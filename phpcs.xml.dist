@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<ruleset name="Sentinel Shield">
+    <description>WordPress Coding Standards for Sentinel Shield.</description>
+
+    <file>.</file>
+    <exclude-pattern>/vendor/*</exclude-pattern>
+    <exclude-pattern>/node_modules/*</exclude-pattern>
+    <exclude-pattern>/tests/*</exclude-pattern>
+
+    <arg name="extensions" value="php"/>
+    <arg name="colors"/>
+    <arg value="sp"/>
+
+    <config name="testVersion" value="8.1-"/>
+    <config name="minimum_wp_version" value="6.4"/>
+
+    <rule ref="WordPress">
+        <!-- PSR-4 file names (ClassName.php) instead of class-name.php. -->
+        <exclude name="WordPress.Files.FileName"/>
+    </rule>
+    <rule ref="WordPress.WP.I18n">
+        <properties>
+            <property name="text_domain" type="array">
+                <element value="sentinel-shield"/>
+            </property>
+        </properties>
+    </rule>
+    <rule ref="WordPress.NamingConventions.PrefixAllGlobals">
+        <properties>
+            <property name="prefixes" type="array">
+                <element value="sentinel_shield"/>
+                <element value="SentinelShield"/>
+                <element value="SENTINEL_SHIELD"/>
+            </property>
+        </properties>
+    </rule>
+    <rule ref="PHPCompatibilityWP"/>
+</ruleset>
