@@ -92,7 +92,7 @@ cat > "$STAGE/$SLUG/build.json" <<JSON
 	"version": "$VERSION",
 	"commit": "$COMMIT$DIRTY",
 	"built": "$BUILT",
-	"files": $((FILES + 1))
+	"files": $((FILES + 2))
 }
 JSON
 (cd "$STAGE/$SLUG" && find . -type f ! -name checksums.sha256 -printf '%P\n' | LC_ALL=C sort | xargs -d '\n' sha256sum > checksums.sha256)
