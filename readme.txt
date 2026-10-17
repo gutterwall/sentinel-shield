@@ -1,14 +1,14 @@
 === Sentinel Shield ===
 Contributors: sentinelshield
-Tags: security, firewall, malware, ip blocking, lockout
+Tags: security, firewall, malware, geoip, login
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.3.0
+Stable tag: 0.4.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Self-hosted firewall, IP blocklists, progressive lockouts and malware lockdown. No paid cloud service required.
+Self-hosted firewall, IP blocklists, login location restriction, lockouts and malware lockdown. No paid cloud service required.
 
 == Description ==
 
@@ -20,6 +20,13 @@ Sentinel Shield is a self-hosted security plugin. Everything runs on your server
 * IP allowlist and blocklist for single IPs, CIDR ranges and IPv6, with reason, source, created/expiry time and hit counts. CSV and plain-text import, CSV export.
 * Public blocklist feeds (all opt-in, one checkbox each): Spamhaus DROP, FireHOL Level 1, Emerging Threats compromised hosts, blocklist.de, CINS Army, IPsum, DShield top 20 and Tor exit nodes. Lists combine additively, update on a polite schedule (twice daily to weekly, never more often than the provider allows, conditional requests, random jitter, backoff on errors), never include private/reserved ranges, and never override your allowlist.
 * Progressive lockout engine (for example 15 min → 1 h → 24 h → permanent).
+
+**Login location (GeoIP) restriction**
+
+* Allow logins only from the countries you list, or block logins from listed countries, for every account or administrator-level accounts only. Covers wp-login.php, XML-RPC and application passwords (REST API).
+* The answer does not depend on the password, so a visitor from a denied country cannot use the login form to test passwords.
+* Country sources: Cloudflare's CF-IPCountry header (only when requests really come through Cloudflare), a country variable set by your server (mod_geoip, MaxMind module) and the free DB-IP country database, downloaded and kept current automatically (no account or key needed).
+* Allowlisted IPs and this server are never denied; you choose what happens when the country is unknown. Saving settings that would deny your own next login switches the feature to test mode instead of locking you out. Test mode logs "would deny login" without denying.
 
 **Malware Lockdown**
 
@@ -36,17 +43,17 @@ Protection against the "SC" WordPress malware (described by Sucuri in September 
 * Test mode everywhere: global log-only mode with optional auto-expiry, per-module overrides, a decision simulator, an IP resolution simulator, a lockout tester, a block page preview and a test unlock email.
 * Documentation tab (Settings → Documentation) with this whole reference, generated from the plugin's own settings, plus the current administrator approvals.
 * Multisite: network-wide rules and settings; per-site overrides for the block page.
-* WP-CLI: `wp sentinel status|check|resolve-ip|block|allow|unblock|remove|list|lockout|test-mode|settings-get|settings-set|settings-keys|settings-export|settings-import|cloudflare-update|cron|feeds|feeds-update|scan|admins|approve-admin|revoke-admin|flush-cache|prune|unlock-link|events`.
+* WP-CLI: `wp sentinel status|check|resolve-ip|block|allow|unblock|remove|list|lockout|test-mode|settings-get|settings-set|settings-keys|settings-export|settings-import|cloudflare-update|cron|feeds|feeds-update|geo|geo-update|scan|admins|approve-admin|revoke-admin|flush-cache|prune|unlock-link|events`.
 
 **Lockout safety**
 
 The admin's IP is auto-allowlisted on activation from wp-admin and on every settings save, a warning appears if your own IP matches a block rule, rules that would block your own IP are refused, and wp-cron.php from the server plus all WP-CLI requests are never blocked. See "I locked myself out" below for the ways back in.
 
-**Roadmap:** login protection and 2FA, 404 flood blocking, GeoIP login restriction, WAF (auto_prepend_file), file integrity against wordpress.org checksums, audit log and the full dashboard.
+**Roadmap:** login brute-force protection and 2FA, 404 flood blocking, WAF (auto_prepend_file), file integrity against wordpress.org checksums, audit log and the full dashboard.
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.3.0.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.4.0.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
@@ -139,6 +146,15 @@ Malware Lockdown measures are not affected by test mode: once switched on, they 
 * **Temporary allowlist after unlock (hours)** (`unlock.allow_hours`; default: 24; recommended: 24). Range 1–720. After a successful unlock, the IP is allowlisted for this long so you can fix the cause.
 * **Unlock emails per IP per hour** (`unlock.max_requests_per_hour`; default: 3; recommended: 3). Range 1–20. Limits abuse of the unlock form.
 
+= Settings → Login Location =
+
+* **Login location restriction** (`geo.mode`; default: Off: no location check; recommended: your choice). Choices: "Off: no location check"; "Allow logins only from the countries listed"; "Block logins from the countries listed". Checks the country of every login on wp-login.php, XML-RPC and application passwords (REST API). "Allow only" is the strongest choice when everyone who logs in is in a few known countries. A denied login gets "Logging in from your location is not allowed", whether or not the password was right. Allowlisted IPs and this server are never denied, existing login sessions are not ended, and WP-CLI is not affected.
+* **Countries** (`geo.countries`; default: (empty); recommended: your choice). Two-letter ISO country codes separated by commas or spaces, e.g. "US, CA, GB". The full list of codes is below. T1 means the Tor network and is only reported by Cloudflare.
+* **Applies to** (`geo.scope`; default: Every account; recommended: Administrator-level accounts only). Choices: "Every account"; "Administrator-level accounts only". "Administrator-level accounts only" protects the accounts that matter most (the same accounts as the administrator lock) while customers and members can log in from anywhere. The account is identified by the submitted username or email; logins naming an account that does not exist are checked only with "Every account".
+* **When the country is unknown** (`geo.unknown`; default: Allow the login; recommended: Allow the login). Choices: "Allow the login"; "Deny the login". The country is unknown for private and local addresses, addresses no source knows, and when no country source is set up. Denying is stricter but locks everyone out if the country database is missing.
+* **Download the free DB-IP country database** (`geo.dbip`; default: Off; recommended: your choice). Needed unless your site is behind Cloudflare or your server sets a country variable. A 5 MB download from db-ip.com, checked weekly and updated monthly, stored as a 15 MB file in uploads/sentinel-shield. Licensed CC BY 4.0: an "IP Geolocation by DB-IP" link is added to the denial message. DB-IP sees your server's IP when it downloads; nothing about visitors is sent. Switching this off deletes the file.
+* **Country from server variable** (`geo.server_var`; default: (empty); recommended: your choice). Name of a server variable holding the visitor's two-letter country code, set by your web server or host, e.g. GEOIP_COUNTRY_CODE (mod_geoip), MM_COUNTRY_CODE (MaxMind module). Used before the DB-IP database. Leave empty if unsure. Names starting with HTTP_ are request headers: only use one if your proxy always overwrites it, otherwise visitors can choose their country.
+
 = Settings → Blocklists =
 
 * **Check for list updates** (`feeds.update_hours`; default: Daily; recommended: Daily). Choices: "Twice a day"; "Daily"; "Every 2 days"; "Weekly". How often each enabled list is downloaded. Lists whose provider asks for less frequent downloads are never fetched more often than the provider allows. Unchanged lists are not downloaded again.
@@ -172,6 +188,8 @@ Malware Lockdown measures are not affected by test mode: once switched on, they 
 * **Enable: Blocklist feeds** (`modules.feeds.enabled`; default: On; recommended: On). Blocks IPs listed on the public blocklists chosen on the Blocklists tab and keeps them updated. Your allowlist always wins.
 * **Test mode: Blocklist feeds** (`modules.feeds.test_mode`; default: Follow global test mode; recommended: Follow global test mode). Choices: "Follow global test mode"; "Always test mode (log only)"; "Always enforce". Override the global test mode for this module only.
 * **Enable: Scheduled task monitor** (`modules.cron_monitor.enabled`; default: On; recommended: On). Records when each WP-Cron task last ran, how long it took and whether it failed, for the Scheduled Tasks page.
+* **Enable: Login location restriction** (`modules.geo_login.enabled`; default: On; recommended: On). Allows or blocks logins by country as set on the Login Location tab, and keeps the country database updated.
+* **Test mode: Login location restriction** (`modules.geo_login.test_mode`; default: Follow global test mode; recommended: Follow global test mode). Choices: "Follow global test mode"; "Always test mode (log only)"; "Always enforce". Override the global test mode for this module only.
 * **Enable: Malware lockdown** (`modules.lockdown.enabled`; default: On; recommended: On). Applies the measures chosen on the Malware Lockdown tab and runs the twice-daily malware scan. Lockdown measures are not affected by test mode.
 
 <!-- settings-reference:end -->
@@ -201,6 +219,24 @@ Any one of these works:
 
 The administrator lock is on and your account is not approved. Ask an approved administrator to approve you on Sentinel Shield → Malware Lockdown, or run `wp sentinel approve-admin <your-login>`. If `SENTINEL_SHIELD_ADMINS` is defined in wp-config.php, add your `login#ID` there instead. Without WP-CLI, add the SENTINEL_SHIELD_DISABLE constant, approve yourself on the Malware Lockdown page, then remove the constant.
 
+= My login is refused because of my location. What now? =
+
+The login location restriction does not allow your country, or your country could not be determined and unknown locations are denied. Any one of these works:
+
+* `wp sentinel allow <your-ip>` (allowlisted IPs are never denied by location).
+* `wp sentinel settings-set geo.countries "US, CA"` to add your country, or `wp sentinel settings-set geo.mode off`.
+* The `SENTINEL_SHIELD_DISABLE` constant in wp-config.php.
+
+`wp sentinel geo <ip>` shows which country an IP is in and why a login would be allowed or denied. Mobile networks and VPNs can appear in another country.
+
+= How accurate is the country lookup? =
+
+Country-level IP databases are about 98-99% accurate. Satellite, mobile and VPN connections are the usual exceptions. Treat the location restriction as one layer of protection alongside strong passwords and two-factor authentication, and use "Applies to: administrator-level accounts only" if customers log in from anywhere.
+
+= What does DB-IP learn about my site? =
+
+Your server downloads the country database from db-ip.com about once a month (with a weekly check whether it changed), so DB-IP sees your server's IP address. Lookups happen on your server; nothing about visitors is sent. The database is licensed CC BY 4.0, so denied logins show an "IP Geolocation by DB-IP" link.
+
 = I cannot install a plugin or theme =
 
 "Block installing and uploading plugins and themes" is on. Untick it on Settings → Malware Lockdown, install, then tick it again, or install with WP-CLI. Updates are never blocked.
@@ -227,6 +263,9 @@ No. Test mode only records what would have been blocked. Use it to validate sett
 
 == Changelog ==
 
+= 0.4.0 =
+* Login location (GeoIP) restriction: allow logins only from listed countries or block listed countries, for all accounts or administrators only, on wp-login.php, XML-RPC and application passwords. Country from Cloudflare (verified), a server variable, or the free DB-IP country database (downloaded and updated automatically; a compact local file, about 10 µs per lookup). Unknown-country policy, allowlist bypass, test mode, self-lockout protection, a status panel with IP lookup on Settings → Login Location, and WP-CLI `geo` and `geo-update`.
+
 = 0.3.0 =
 * `SENTINEL_SHIELD_ADMINS` in wp-config.php: fixes the approved administrator list in a file (logins, optionally pinned to user IDs) so database writes cannot change it, and always enforces the administrator lock. Unmatched or re-registered entries are flagged on the Administrators list, in an admin notice and by the malware scan.
 * Fixed: an account locked by the administrator lock could not open its own profile page (where the lock is explained); it now can, and still cannot edit anyone else.
@@ -244,6 +283,9 @@ No. Test mode only records what would have been blocked. Use it to validate sett
 * Phase 1: core framework, client IP detection, IP rules, lockout engine, lockout safety, test mode tooling, events, WP-CLI.
 
 == Upgrade Notice ==
+
+= 0.4.0 =
+Adds the login location (GeoIP) restriction. It is off until you choose a mode and countries on Settings → Login Location.
 
 = 0.3.0 =
 Adds the optional SENTINEL_SHIELD_ADMINS wp-config.php constant for a file-based administrator list. Nothing changes unless you define it.

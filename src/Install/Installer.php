@@ -11,6 +11,7 @@ namespace SentinelShield\Install;
 
 use SentinelShield\Cron\CronControl;
 use SentinelShield\Feeds\FeedUpdater;
+use SentinelShield\Geo\GeoUpdater;
 use SentinelShield\Firewall\RuleCache;
 use SentinelShield\Lockdown\UploadGuard;
 use SentinelShield\Modules\LockdownModule;
@@ -84,7 +85,7 @@ final class Installer {
 		}
 		// Without the plugin the rules would be unmanaged; reactivating re-adds them on the next settings save.
 		UploadGuard::sync_htaccess( false );
-		foreach ( array_merge( MaintenanceModule::CRON_HOOKS, array( FeedUpdater::CRON_HOOK, LockdownModule::CRON_HOOK ) ) as $hook ) {
+		foreach ( array_merge( MaintenanceModule::CRON_HOOKS, array( FeedUpdater::CRON_HOOK, LockdownModule::CRON_HOOK, GeoUpdater::CRON_HOOK ) ) as $hook ) {
 			wp_clear_scheduled_hook( $hook );
 			wp_clear_scheduled_hook( $hook, array( 'soon' ) );
 		}

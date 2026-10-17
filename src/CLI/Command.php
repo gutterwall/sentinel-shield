@@ -15,6 +15,10 @@ use SentinelShield\Feeds\FeedCatalog;
 use SentinelShield\Feeds\FeedUpdater;
 use SentinelShield\Firewall\Gate;
 use SentinelShield\Firewall\RuleCache;
+use SentinelShield\Geo\CountryList;
+use SentinelShield\Geo\GeoResolver;
+use SentinelShield\Geo\GeoUpdater;
+use SentinelShield\Geo\LoginGeoGuard;
 use SentinelShield\Lockdown\AdminRegistry;
 use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockout\Unblocker;
@@ -24,6 +28,7 @@ use SentinelShield\Modules\MaintenanceModule;
 use SentinelShield\Net\Cidr;
 use SentinelShield\Net\ClientIpFactory;
 use SentinelShield\Net\CloudflareRanges;
+use SentinelShield\Net\IpAddress;
 use SentinelShield\Repository\BlockRepository;
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Safety\SafetyGuard;
@@ -781,6 +786,76 @@ final class Command {
 			WP_CLI::error( "$failed feed(s) failed; previous copies were kept." );
 		}
 		WP_CLI::success( 'Blocklist feeds updated.' );
+	}
+
+	/**
+	 * Shows an IP's country and whether a login from it would be allowed.
+	 *
+	 * Uses the local DB-IP database (the Cloudflare header and server variable
+	 * only exist for web requests).
+	 *
+	 * ## OPTIONS
+	 *
+	 * <ip>
+	 * : IP address.
+	 *
+	 * [--user=<user>]
+	 * : Account to check (ID, login or email); matters when the restriction applies to administrators only.
+	 *
+	 * [--format=<format>]
+	 * : table, json or yaml.
+	 * ---
+	 * default: table
+	 * ---
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp sentinel geo 8.8.8.8
+	 *     wp sentinel geo 203.0.113.7 --user=admin
+	 *
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function geo( array $args, array $assoc_args ): void {
+		$ip = (string) IpAddress::normalize( $args[0] );
+		if ( '' === $ip ) {
+			WP_CLI::error( "Not a valid IP address: {$args[0]}" );
+		}
+		$user  = isset( $assoc_args['user'] ) ? $this->find_user( (string) $assoc_args['user'] ) : null;
+		$check = $this->c->get( LoginGeoGuard::class )->check( $ip, $user );
+		$geo   = '' === $check['source'] ? $this->c->get( GeoResolver::class )->resolve( $ip ) : $check;
+		$row   = array(
+			'ip'      => $ip,
+			'country' => '' === $geo['country'] ? 'unknown' : CountryList::label( $geo['country'] ),
+			'source'  => $geo['source'],
+			'login'   => $check['allowed'] ? 'allowed' : 'denied',
+			'reason'  => LoginGeoGuard::explain( $check ),
+		);
+		WP_CLI\Utils\format_items( (string) ( $assoc_args['format'] ?? 'table' ), array( $row ), array_keys( $row ) );
+	}
+
+	/**
+	 * Downloads the DB-IP country database now.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--force]
+	 * : Download even if unchanged.
+	 *
+	 * @subcommand geo-update
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function geo_update( array $args, array $assoc_args ): void {
+		unset( $args );
+		if ( ! $this->c->get( Settings::class )->get( 'geo.dbip', false ) ) {
+			WP_CLI::error( 'DB-IP downloads are off. Enable them with: wp sentinel settings-set geo.dbip 1' );
+		}
+		$result = $this->c->get( GeoUpdater::class )->update( isset( $assoc_args['force'] ) );
+		if ( is_wp_error( $result ) ) {
+			WP_CLI::error( $result->get_error_message() . ' The previous database (if any) was kept.' );
+		}
+		WP_CLI::success( sprintf( 'Country database %s: %d IPv4 and %d IPv6 ranges. IP Geolocation by DB-IP (https://db-ip.com).', (string) ( $result['month'] ?? '?' ), (int) ( $result['v4'] ?? 0 ), (int) ( $result['v6'] ?? 0 ) ) );
 	}
 
 	/**

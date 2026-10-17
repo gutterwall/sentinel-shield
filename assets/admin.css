@@ -46,3 +46,4 @@
 .ss-wrap .ss-docs h3{margin:1.4em 0 .4em}
 .ss-wrap .ss-docs td{vertical-align:top}
 .ss-wrap .ss-code{background:#f6f7f7;border:1px solid #dcdcde;padding:8px 12px;overflow-x:auto;max-width:860px}
+.ss-wrap .ss-codes{column-width:16em;font-size:12px;line-height:1.8}

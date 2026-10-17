@@ -32,7 +32,7 @@ final class Settings {
 	/**
 	 * Module slugs that exist in this build.
 	 */
-	public const MODULES = array( 'ip_gate', 'lockout', 'unlock', 'feeds', 'cron_monitor', 'lockdown' );
+	public const MODULES = array( 'ip_gate', 'lockout', 'unlock', 'feeds', 'cron_monitor', 'lockdown', 'geo_login' );
 
 	/**
 	 * Memoized merged settings.
@@ -84,6 +84,15 @@ final class Settings {
 				'update_hours' => '24',
 				'lists'        => array_fill_keys( array_keys( FeedCatalog::NAMES ), false ),
 			),
+			// Login location restriction is off until a mode and countries are chosen.
+			'geo'      => array(
+				'mode'       => 'off',
+				'countries'  => '',
+				'scope'      => 'all',
+				'unknown'    => 'allow',
+				'dbip'       => false,
+				'server_var' => '',
+			),
 			// Malware lockdown measures are opt-in except the alerts, which change nothing.
 			'lockdown' => array(
 				'disable_file_editor' => false,
@@ -117,6 +126,10 @@ final class Settings {
 				),
 				'lockdown'     => array(
 					'enabled' => true,
+				),
+				'geo_login'    => array(
+					'enabled'   => true,
+					'test_mode' => 'inherit',
 				),
 			),
 		);

@@ -18,7 +18,7 @@ foreach ( array( 'sentinel_ip_rules', 'sentinel_events', 'sentinel_offenses', 's
 	$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $wpdb->base_prefix . $sentinel_shield_table ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.SchemaChange -- Uninstall cleanup.
 }
 
-foreach ( array( 'sentinel_shield_settings', 'sentinel_shield_db_version', 'sentinel_shield_secret', 'sentinel_shield_cloudflare_ranges', 'sentinel_shield_welcome', 'sentinel_shield_feeds_state', 'sentinel_shield_admin_approvals', 'sentinel_shield_scan_report', 'sentinel_shield_scan_baseline' ) as $sentinel_shield_option ) {
+foreach ( array( 'sentinel_shield_settings', 'sentinel_shield_db_version', 'sentinel_shield_secret', 'sentinel_shield_cloudflare_ranges', 'sentinel_shield_welcome', 'sentinel_shield_feeds_state', 'sentinel_shield_admin_approvals', 'sentinel_shield_scan_report', 'sentinel_shield_scan_baseline', 'sentinel_shield_geo_db' ) as $sentinel_shield_option ) {
 	delete_site_option( $sentinel_shield_option );
 }
 
@@ -42,6 +42,8 @@ if ( is_multisite() ) {
 		wp_clear_scheduled_hook( 'sentinel_shield_feeds_tick' );
 		wp_clear_scheduled_hook( 'sentinel_shield_feeds_tick', array( 'soon' ) );
 		wp_clear_scheduled_hook( 'sentinel_shield_lockdown_scan' );
+		wp_clear_scheduled_hook( 'sentinel_shield_geo_update' );
+		wp_clear_scheduled_hook( 'sentinel_shield_geo_update', array( 'soon' ) );
 		restore_current_blog();
 	}
 } else {
@@ -51,8 +53,27 @@ if ( is_multisite() ) {
 	wp_clear_scheduled_hook( 'sentinel_shield_feeds_tick' );
 	wp_clear_scheduled_hook( 'sentinel_shield_feeds_tick', array( 'soon' ) );
 	wp_clear_scheduled_hook( 'sentinel_shield_lockdown_scan' );
+	wp_clear_scheduled_hook( 'sentinel_shield_geo_update' );
+	wp_clear_scheduled_hook( 'sentinel_shield_geo_update', array( 'soon' ) );
 	delete_option( 'sentinel_shield_cron_runs' );
 	delete_option( 'sentinel_shield_cron_paused' );
+}
+
+// Country database folder (main site's uploads).
+if ( is_multisite() ) {
+	switch_to_blog( get_main_site_id() );
+}
+$sentinel_shield_dir = trailingslashit( wp_upload_dir( null, false )['basedir'] ) . 'sentinel-shield';
+if ( is_multisite() ) {
+	restore_current_blog();
+}
+foreach ( array( 'geo-country.bin', 'geo-country.bin.new', 'geo-country.bin.new.tmp', 'index.php', '.htaccess' ) as $sentinel_shield_file ) {
+	if ( is_file( "$sentinel_shield_dir/$sentinel_shield_file" ) ) {
+		wp_delete_file( "$sentinel_shield_dir/$sentinel_shield_file" );
+	}
+}
+if ( is_dir( $sentinel_shield_dir ) ) {
+	rmdir( $sentinel_shield_dir ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- Removes our own, now empty, folder.
 }
 
 wp_cache_delete( 'rules_block', 'sentinel_shield' );

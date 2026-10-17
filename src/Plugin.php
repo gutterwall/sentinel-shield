@@ -17,6 +17,10 @@ use SentinelShield\Feeds\FeedUpdater;
 use SentinelShield\Firewall\Gate;
 use SentinelShield\Firewall\RuleCache;
 use SentinelShield\Install\Schema;
+use SentinelShield\Geo\CountryDatabase;
+use SentinelShield\Geo\GeoResolver;
+use SentinelShield\Geo\GeoUpdater;
+use SentinelShield\Geo\LoginGeoGuard;
 use SentinelShield\Lockdown\AdminRegistry;
 use SentinelShield\Lockdown\Hardening;
 use SentinelShield\Lockdown\IntegrityScanner;
@@ -26,6 +30,7 @@ use SentinelShield\Lockout\Unblocker;
 use SentinelShield\Modules\CronMonitorModule;
 use SentinelShield\Modules\FeedsModule;
 use SentinelShield\Modules\IpGateModule;
+use SentinelShield\Modules\GeoLoginModule;
 use SentinelShield\Modules\LockdownModule;
 use SentinelShield\Modules\LockoutModule;
 use SentinelShield\Modules\MaintenanceModule;
@@ -139,6 +144,31 @@ final class Plugin {
 				static fn(): string => (string) $c->get( 'client_ip' )
 			)
 		);
+		$c->set( CountryDatabase::class, static fn(): CountryDatabase => new CountryDatabase( GeoUpdater::path() ) );
+		$c->set(
+			GeoUpdater::class,
+			static fn( Container $c ): GeoUpdater => new GeoUpdater( $c->get( Settings::class ), $c->get( CountryDatabase::class ), $c->get( EventRepository::class ) )
+		);
+		$c->set(
+			GeoResolver::class,
+			static fn( Container $c ): GeoResolver => new GeoResolver(
+				$c->get( Settings::class ),
+				$c->get( CountryDatabase::class ),
+				$_SERVER, // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- Only two-letter codes that match the country list are used.
+				static fn(): array => (array) $c->get( 'client_ip_details' )
+			)
+		);
+		$c->set(
+			LoginGeoGuard::class,
+			static fn( Container $c ): LoginGeoGuard => new LoginGeoGuard(
+				$c->get( Settings::class ),
+				$c->get( GeoResolver::class ),
+				$c->get( Gate::class ),
+				$c->get( EventRepository::class ),
+				static fn(): string => (string) $c->get( 'client_ip' ),
+				static fn(): bool => (bool) $c->get( 'client_ip_details' )['fallback']
+			)
+		);
 		$c->set( RuleCache::class, static fn( Container $c ): RuleCache => new RuleCache( $c->get( BlockRepository::class ), $c->get( FeedRepository::class ) ) );
 		$c->set(
 			FeedUpdater::class,
@@ -238,12 +268,14 @@ final class Plugin {
 			'feeds'        => new FeedsModule(),
 			'cron_monitor' => new CronMonitorModule(),
 			'lockdown'     => new LockdownModule(),
+			'geo_login'    => new GeoLoginModule(),
 		);
 
 		( new MaintenanceModule() )->register( $this->container );
 		CronControl::register_guard();
 		$container = $this->container;
 		add_action( 'sentinel_shield_settings_saved', static fn() => LockdownModule::on_settings_saved( $container ) );
+		add_action( 'sentinel_shield_settings_saved', static fn() => GeoLoginModule::on_settings_saved( $container ) );
 
 		$settings = $this->container->get( Settings::class );
 		if ( $settings->is_enabled() ) {

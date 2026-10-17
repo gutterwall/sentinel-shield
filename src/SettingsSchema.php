@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace SentinelShield;
 
 use SentinelShield\Feeds\FeedCatalog;
+use SentinelShield\Geo\CountryList;
 use SentinelShield\Net\Cidr;
 use SentinelShield\Net\IpRangeSet;
 
@@ -31,6 +32,7 @@ final class SettingsSchema {
 			'general'      => __( 'General & Test Mode', 'sentinel-shield' ),
 			'ip_detection' => __( 'IP Detection', 'sentinel-shield' ),
 			'lockout'      => __( 'Lockouts & Unlock', 'sentinel-shield' ),
+			'geo'          => __( 'Login Location', 'sentinel-shield' ),
 			'blocklists'   => __( 'Blocklists', 'sentinel-shield' ),
 			'lockdown'     => __( 'Malware Lockdown', 'sentinel-shield' ),
 			'modules'      => __( 'Modules', 'sentinel-shield' ),
@@ -264,6 +266,68 @@ final class SettingsSchema {
 		);
 
 		$fields[] = array(
+			'key'         => 'geo.mode',
+			'tab'         => 'geo',
+			'type'        => 'select',
+			'options'     => array(
+				'off'   => __( 'Off: no location check', 'sentinel-shield' ),
+				'allow' => __( 'Allow logins only from the countries listed', 'sentinel-shield' ),
+				'block' => __( 'Block logins from the countries listed', 'sentinel-shield' ),
+			),
+			'label'       => __( 'Login location restriction', 'sentinel-shield' ),
+			'help'        => __( 'Checks the country of every login on wp-login.php, XML-RPC and application passwords (REST API). "Allow only" is the strongest choice when everyone who logs in is in a few known countries. A denied login gets "Logging in from your location is not allowed", whether or not the password was right. Allowlisted IPs and this server are never denied, existing login sessions are not ended, and WP-CLI is not affected.', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'geo.countries',
+			'tab'         => 'geo',
+			'type'        => 'country_list',
+			'label'       => __( 'Countries', 'sentinel-shield' ),
+			'help'        => __( 'Two-letter ISO country codes separated by commas or spaces, e.g. "US, CA, GB". The full list of codes is below. T1 means the Tor network and is only reported by Cloudflare.', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'geo.scope',
+			'tab'         => 'geo',
+			'type'        => 'select',
+			'options'     => array(
+				'all'        => __( 'Every account', 'sentinel-shield' ),
+				'privileged' => __( 'Administrator-level accounts only', 'sentinel-shield' ),
+			),
+			'label'       => __( 'Applies to', 'sentinel-shield' ),
+			'help'        => __( '"Administrator-level accounts only" protects the accounts that matter most (the same accounts as the administrator lock) while customers and members can log in from anywhere. The account is identified by the submitted username or email; logins naming an account that does not exist are checked only with "Every account".', 'sentinel-shield' ),
+			'recommended' => 'privileged',
+		);
+		$fields[] = array(
+			'key'         => 'geo.unknown',
+			'tab'         => 'geo',
+			'type'        => 'select',
+			'options'     => array(
+				'allow' => __( 'Allow the login', 'sentinel-shield' ),
+				'deny'  => __( 'Deny the login', 'sentinel-shield' ),
+			),
+			'label'       => __( 'When the country is unknown', 'sentinel-shield' ),
+			'help'        => __( 'The country is unknown for private and local addresses, addresses no source knows, and when no country source is set up. Denying is stricter but locks everyone out if the country database is missing.', 'sentinel-shield' ),
+			'recommended' => 'allow',
+		);
+		$fields[] = array(
+			'key'         => 'geo.dbip',
+			'tab'         => 'geo',
+			'type'        => 'checkbox',
+			'label'       => __( 'Download the free DB-IP country database', 'sentinel-shield' ),
+			'help'        => __( 'Needed unless your site is behind Cloudflare or your server sets a country variable. A 5 MB download from db-ip.com, checked weekly and updated monthly, stored as a 15 MB file in uploads/sentinel-shield. Licensed CC BY 4.0: an "IP Geolocation by DB-IP" link is added to the denial message. DB-IP sees your server\'s IP when it downloads; nothing about visitors is sent. Switching this off deletes the file.', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'geo.server_var',
+			'tab'         => 'geo',
+			'type'        => 'server_var',
+			'label'       => __( 'Country from server variable', 'sentinel-shield' ),
+			'help'        => __( 'Name of a server variable holding the visitor\'s two-letter country code, set by your web server or host, e.g. GEOIP_COUNTRY_CODE (mod_geoip), MM_COUNTRY_CODE (MaxMind module). Used before the DB-IP database. Leave empty if unsure. Names starting with HTTP_ are request headers: only use one if your proxy always overwrites it, otherwise visitors can choose their country.', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+
+		$fields[] = array(
 			'key'         => 'feeds.update_hours',
 			'tab'         => 'blocklists',
 			'type'        => 'select',
@@ -371,6 +435,11 @@ final class SettingsSchema {
 				__( 'Records when each WP-Cron task last ran, how long it took and whether it failed, for the Scheduled Tasks page.', 'sentinel-shield' ),
 				false,
 			),
+			'geo_login'    => array(
+				__( 'Login location restriction', 'sentinel-shield' ),
+				__( 'Allows or blocks logins by country as set on the Login Location tab, and keeps the country database updated.', 'sentinel-shield' ),
+				true,
+			),
 			'lockdown'     => array(
 				__( 'Malware lockdown', 'sentinel-shield' ),
 				__( 'Applies the measures chosen on the Malware Lockdown tab and runs the twice-daily malware scan. Lockdown measures are not affected by test mode.', 'sentinel-shield' ),
@@ -445,6 +514,16 @@ final class SettingsSchema {
 				return array( '' === $clean ? $default : substr( (string) $clean, 0, 64 ), null );
 			case 'textarea':
 				return array( sanitize_textarea_field( is_scalar( $value ) ? (string) $value : '' ), null );
+			case 'country_list':
+				[ $codes, $invalid ] = CountryList::parse( is_scalar( $value ) ? (string) $value : '' );
+				$error               = $invalid
+					/* translators: 1: setting label, 2: list of entries. */
+					? sprintf( __( '%1$s: ignored unknown country codes: %2$s', 'sentinel-shield' ), $field['label'], implode( ', ', array_map( 'sanitize_text_field', $invalid ) ) )
+					: null;
+				return array( implode( ', ', $codes ), $error );
+			case 'server_var':
+				$clean = strtoupper( (string) preg_replace( '/[^A-Za-z0-9_]/', '', is_scalar( $value ) ? (string) $value : '' ) );
+				return array( substr( $clean, 0, 64 ), null );
 			case 'cidr_list':
 				$valid   = array();
 				$invalid = array();

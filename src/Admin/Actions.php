@@ -22,9 +22,13 @@ use SentinelShield\Firewall\BlockPage;
 use SentinelShield\Firewall\Decision;
 use SentinelShield\Firewall\Gate;
 use SentinelShield\Firewall\RuleCache;
+use SentinelShield\Geo\GeoResolver;
+use SentinelShield\Geo\GeoUpdater;
+use SentinelShield\Geo\LoginGeoGuard;
 use SentinelShield\Lockdown\AdminRegistry;
 use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockout\Unblocker;
+use SentinelShield\Modules\GeoLoginModule;
 use SentinelShield\Modules\LockdownModule;
 use SentinelShield\Modules\LockoutModule;
 use SentinelShield\Modules\MaintenanceModule;
@@ -72,6 +76,7 @@ final class Actions {
 			'feeds_update'       => 'feeds_update',
 			'cron_control'       => 'cron_control',
 			'lockdown'           => 'lockdown',
+			'geo'                => 'geo',
 		);
 		foreach ( $map as $action => $method ) {
 			add_action( 'admin_post_sentinel_shield_' . $action, array( $this, $method ) );
@@ -106,6 +111,7 @@ final class Actions {
 			/* translators: 1: IP address, 2: rule. */
 			View::flash( 'warning', sprintf( __( 'Warning: your IP %1$s matches block rule %2$s. You are only allowed in because of the allowlist.', 'sentinel-shield' ), $ip, (string) ( $decision->rule['label'] ?? '' ) ) );
 		}
+		GeoLoginModule::protect_current_admin( $this->c );
 	}
 
 	/**
@@ -320,6 +326,48 @@ final class Actions {
 			View::flash( 'success', sprintf( __( '%1$s is up to date: %2$s ranges.', 'sentinel-shield' ), $name, number_format_i18n( (int) ( $state[ $slug ]['count'] ?? 0 ) ) ) );
 		}
 		$this->audit( 'feeds_updated', array( 'feeds' => array_values( $slugs ) ) );
+		View::redirect( $back );
+	}
+
+	/**
+	 * Login location tools: database update and IP lookup.
+	 */
+	public function geo(): void {
+		View::guard( 'sentinel_shield_geo' );
+		$op   = isset( $_POST['op'] ) ? sanitize_key( wp_unslash( $_POST['op'] ) ) : '';
+		$back = Admin::url( 'sentinel-shield-settings', array( 'tab' => 'geo' ) );
+		if ( 'update' === $op ) {
+			$result = $this->c->get( GeoUpdater::class )->update( true );
+			if ( is_wp_error( $result ) ) {
+				View::flash( 'error', $result->get_error_message() );
+			} else {
+				/* translators: 1: edition month, 2: number of ranges. */
+				View::flash( 'success', sprintf( __( 'Country database %1$s installed: %2$s ranges.', 'sentinel-shield' ), (string) ( $result['month'] ?? '' ), number_format_i18n( (int) ( $result['v4'] ?? 0 ) + (int) ( $result['v6'] ?? 0 ) ) ) );
+			}
+			$this->audit( 'geo_db_update' );
+		} elseif ( 'lookup' === $op ) {
+			$ip    = isset( $_POST['ip'] ) ? trim( sanitize_text_field( wp_unslash( $_POST['ip'] ) ) ) : '';
+			$name  = isset( $_POST['user'] ) ? sanitize_user( wp_unslash( $_POST['user'] ) ) : '';
+			$user  = '' === $name ? null : LoginGeoGuard::find_account( $name );
+			$check = $this->c->get( LoginGeoGuard::class )->check( $ip, $user );
+			if ( '' === $check['source'] ) {
+				// Not checked (off, out of scope or allowlisted): still show the country.
+				$check = array_merge( $check, $this->c->get( GeoResolver::class )->resolve( $ip ) );
+			}
+			View::put_result(
+				'geo_lookup',
+				array(
+					'ip'      => $ip,
+					'user'    => $name,
+					'country' => $check['country'],
+					'source'  => $check['source'],
+					'allowed' => $check['allowed'],
+					'explain' => LoginGeoGuard::explain( $check ),
+				)
+			);
+		} else {
+			View::flash( 'error', __( 'Unknown action.', 'sentinel-shield' ) );
+		}
 		View::redirect( $back );
 	}
 

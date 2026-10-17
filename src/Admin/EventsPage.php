@@ -49,6 +49,10 @@ final class EventsPage {
 			'lockdown_tamper'       => __( 'Deactivation attempt blocked', 'sentinel-shield' ),
 			'lockdown_admin_added'  => __( 'New administrator', 'sentinel-shield' ),
 			'lockdown_admin_denied' => __( 'Unapproved administrator denied', 'sentinel-shield' ),
+			'login_denied'          => __( 'Login denied by location', 'sentinel-shield' ),
+			'would_deny_login'      => __( 'Would deny login (test mode)', 'sentinel-shield' ),
+			'geo_db_updated'        => __( 'Country database updated', 'sentinel-shield' ),
+			'geo_db_error'          => __( 'Country database update failed', 'sentinel-shield' ),
 		);
 	}
 

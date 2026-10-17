@@ -66,6 +66,8 @@ final class SettingsPage {
 			$this->lockout_panel( $settings );
 		} elseif ( 'blocklists' === $tab ) {
 			$this->blocklists_panel( $settings );
+		} elseif ( 'geo' === $tab ) {
+			( new GeoPanel( $this->c ) )->render();
 		}
 
 		View::form_open( 'save_settings' );

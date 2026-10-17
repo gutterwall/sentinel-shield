@@ -253,6 +253,7 @@ final class DocsTab {
 		$rows = array(
 			array( __( 'Your IP is blocked', 'sentinel-shield' ), __( 'wp sentinel unblock <ip> --allow-hours=24, or "Send unlock link" on the block page (403 mode, Emailed unlock links module on), or the SENTINEL_SHIELD_DISABLE constant.', 'sentinel-shield' ) ),
 			array( __( 'Your administrator rights are suspended', 'sentinel-shield' ), __( 'Ask an approved administrator to approve you, or run wp sentinel approve-admin <your login>. If SENTINEL_SHIELD_ADMINS is defined, add your login#ID to it in wp-config.php instead. As a last resort, use the SENTINEL_SHIELD_DISABLE constant and approve yourself from the Malware Lockdown page, then remove the constant.', 'sentinel-shield' ) ),
+			array( __( 'Your login is refused because of your location', 'sentinel-shield' ), __( 'Add your IP to the allowlist with wp sentinel allow <ip>, or change the countries with wp sentinel settings-set geo.countries "US, CA" (or geo.mode off). The SENTINEL_SHIELD_DISABLE constant also works. Check where an IP is with wp sentinel geo <ip>.', 'sentinel-shield' ) ),
 			array( __( 'You need to install a plugin or theme', 'sentinel-shield' ), __( 'Untick "Block installing and uploading plugins and themes" on the Malware Lockdown tab, install, then tick it again. Or install with WP-CLI.', 'sentinel-shield' ) ),
 			array( __( 'A plugin needs a blockchain gateway', 'sentinel-shield' ), __( 'Untick "Block blockchain command channels", or allow the specific host with the sentinel_shield_allowed_chain_hosts filter.', 'sentinel-shield' ) ),
 			array( __( 'You cannot deactivate Sentinel Shield', 'sentinel-shield' ), __( 'Deactivate it from the Plugins screen as an administrator, or run wp plugin deactivate sentinel-shield. Only code-initiated deactivation is refused.', 'sentinel-shield' ) ),
@@ -282,6 +283,8 @@ final class DocsTab {
 			'settings-keys'                     => __( 'Lists every setting key.', 'sentinel-shield' ),
 			'settings-export / settings-import' => __( 'Saves or loads all settings as JSON (administrator approvals are not included).', 'sentinel-shield' ),
 			'cloudflare-update'                 => __( 'Downloads the current Cloudflare IP ranges.', 'sentinel-shield' ),
+			'geo <ip>'                          => __( 'Shows an IP\'s country and whether a login from it would be allowed (--user=<user> for a specific account).', 'sentinel-shield' ),
+			'geo-update'                        => __( 'Downloads the DB-IP country database now.', 'sentinel-shield' ),
 			'feeds / feeds-update'              => __( 'Shows blocklist status, or downloads enabled lists now.', 'sentinel-shield' ),
 			'cron'                              => __( 'Lists scheduled tasks with last-run status and origin.', 'sentinel-shield' ),
 			'scan'                              => __( 'Runs the malware scan; exits with code 1 when there are alerts, for monitoring.', 'sentinel-shield' ),
