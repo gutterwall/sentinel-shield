@@ -66,7 +66,7 @@ final class LockdownPage {
 			if ( 'lockdown' !== $field['tab'] ) {
 				continue;
 			}
-			$on = (bool) $settings->get( (string) $field['key'], false );
+			$on = (bool) $settings->get( (string) $field['key'], false ) || ( 'lockdown.admin_lock' === $field['key'] && $this->c->get( AdminRegistry::class )->is_fixed() );
 			echo '<tr><td style="width:9em">' . View::pill( $on ? __( 'On', 'sentinel-shield' ) : __( 'Off', 'sentinel-shield' ), $on ? 'ok' : ( true === $field['recommended'] ? 'warn' : 'info' ) ) . '</td>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.
 			echo '<td><strong>' . esc_html( (string) $field['label'] ) . '</strong><br><span class="description">' . esc_html( (string) $field['help'] ) . '</span></td></tr>';
 		}
@@ -188,15 +188,24 @@ final class LockdownPage {
 		$registry = $this->c->get( AdminRegistry::class );
 		$users    = $registry->privileged_users();
 		$lock     = (bool) $settings->get( 'lockdown.admin_lock', false );
-		$active   = $lock && $registry->approvals();
+		$fixed    = $registry->is_fixed();
+		$active   = $registry->enforced( $lock );
 		echo '<div class="ss-card" id="ss-admins"><h2>' . esc_html__( 'Administrators', 'sentinel-shield' ) . '</h2>';
 		echo '<p>' . esc_html__( 'Every account with administrator powers, read straight from the database, so accounts hidden from the Users screen show up here too.', 'sentinel-shield' ) . ' ';
-		echo esc_html(
-			$active
-				? __( 'The administrator lock is on: accounts that are not approved have no admin rights.', 'sentinel-shield' )
-				: ( $lock ? __( 'The administrator lock is on but no account is approved yet, so it is not enforced.', 'sentinel-shield' ) : __( 'The administrator lock is off; approvals take effect when you turn it on.', 'sentinel-shield' ) )
-		);
-		echo '</p><div class="ss-scroll"><table class="widefat striped"><thead><tr>';
+		if ( $fixed ) {
+			echo esc_html__( 'The approved list is fixed in wp-config.php (SENTINEL_SHIELD_ADMINS) and always enforced, whatever the settings say. Approvals cannot be changed here; edit wp-config.php instead.', 'sentinel-shield' );
+		} else {
+			echo esc_html(
+				$active
+					? __( 'The administrator lock is on: accounts that are not approved have no admin rights.', 'sentinel-shield' )
+					: ( $lock ? __( 'The administrator lock is on but no account is approved yet, so it is not enforced.', 'sentinel-shield' ) : __( 'The administrator lock is off; approvals take effect when you turn it on.', 'sentinel-shield' ) )
+			);
+		}
+		echo '</p>';
+		if ( $fixed ) {
+			$this->fixed_list( $registry );
+		}
+		echo '<div class="ss-scroll"><table class="widefat striped"><thead><tr>';
 		foreach ( array( __( 'Account', 'sentinel-shield' ), __( 'Registered', 'sentinel-shield' ), __( 'Status', 'sentinel-shield' ), __( 'Approval', 'sentinel-shield' ) ) as $heading ) {
 			echo '<th>' . esc_html( $heading ) . '</th>';
 		}
@@ -212,6 +221,10 @@ final class LockdownPage {
 			}
 			echo $user['approved'] ? View::pill( __( 'Approved', 'sentinel-shield' ), 'ok' ) : View::pill( $active ? __( 'Locked: waiting for approval', 'sentinel-shield' ) : __( 'Not approved', 'sentinel-shield' ), $active ? 'bad' : 'info' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.
 			echo '</td><td>';
+			if ( $fixed ) {
+				echo '<span class="description">' . esc_html( $user['approved'] ? __( 'Listed in wp-config.php', 'sentinel-shield' ) : __( 'Not listed in wp-config.php', 'sentinel-shield' ) ) . '</span></td></tr>';
+				continue;
+			}
 			$self = get_current_user_id() === $user['id'];
 			View::form_open( 'lockdown' );
 			echo '<input type="hidden" name="user_id" value="' . (int) $user['id'] . '">';
@@ -234,6 +247,35 @@ final class LockdownPage {
 		echo '<button class="button" onclick="return confirm(' . esc_attr( (string) wp_json_encode( __( 'Log out every user, including you?', 'sentinel-shield' ) ) ) . ')">' . esc_html__( 'Log out everyone', 'sentinel-shield' ) . '</button> ';
 		echo '<span class="description">' . esc_html__( 'Ends every login session. SC steals session tokens and forges login cookies, so after a cleanup also replace the security keys (salts) in wp-config.php, which invalidates forged cookies.', 'sentinel-shield' ) . '</span></p></form>';
 		echo '</div>';
+	}
+
+	/**
+	 * The SENTINEL_SHIELD_ADMINS entries and whether each matches an account.
+	 *
+	 * @param AdminRegistry $registry Registry.
+	 */
+	private function fixed_list( AdminRegistry $registry ): void {
+		$report = $registry->fixed_report();
+		if ( ! $report ) {
+			echo '<div class="notice notice-error inline"><p>' . esc_html__( 'SENTINEL_SHIELD_ADMINS lists no accounts, so every administrator is locked. Add logins to it in wp-config.php, or remove the line to manage approvals here.', 'sentinel-shield' ) . '</p></div>';
+			return;
+		}
+		$states = array(
+			'ok'          => array( __( 'Matches an administrator', 'sentinel-shield' ), 'ok' ),
+			'not_admin'   => array( __( 'Account is not an administrator (no effect)', 'sentinel-shield' ), 'info' ),
+			'missing'     => array( __( 'No such login: anyone who registers it becomes an approved administrator', 'sentinel-shield' ), 'bad' ),
+			'id_mismatch' => array( __( 'Login belongs to a different user ID: not approved', 'sentinel-shield' ), 'bad' ),
+		);
+		echo '<table class="widefat striped ss-narrow"><thead><tr><th>' . esc_html__( 'wp-config.php entry', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Status', 'sentinel-shield' ) . '</th></tr></thead><tbody>';
+		foreach ( $report as $entry ) {
+			echo '<tr><td><code>' . esc_html( $entry['entry'] ) . '</code>';
+			if ( 'ok' === $entry['state'] && null === $entry['id'] ) {
+				/* translators: %s: suggested entry. */
+				echo '<br><span class="description">' . esc_html( sprintf( __( 'Tip: pin it as %s', 'sentinel-shield' ), $entry['login'] . '#' . $entry['user_id'] ) ) . '</span>';
+			}
+			echo '</td><td>' . View::pill( $states[ $entry['state'] ][0], $states[ $entry['state'] ][1] ) . '</td></tr>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.
+		}
+		echo '</tbody></table>';
 	}
 
 	/**

@@ -91,12 +91,12 @@ final class LockdownTest extends \WP_UnitTestCase {
 	 *
 	 * @param array<string, bool> $lockdown Settings under lockdown.*.
 	 */
-	private function harden( array $lockdown ): Hardening {
+	private function harden( array $lockdown, ?AdminRegistry $registry = null ): Hardening {
 		update_site_option( Settings::OPTION, array( 'lockdown' => $lockdown ) );
 		$c        = Plugin::instance()->container();
 		$settings = $c->get( Settings::class );
 		$settings->refresh();
-		$this->hardening = new Hardening( $settings, new AdminRegistry(), $c->get( EventRepository::class ), static fn(): string => '203.0.113.9' );
+		$this->hardening = new Hardening( $settings, $registry ?? new AdminRegistry(), $c->get( EventRepository::class ), static fn(): string => '203.0.113.9' );
 		$this->hardening->register();
 		return $this->hardening;
 	}
@@ -401,5 +401,71 @@ final class LockdownTest extends \WP_UnitTestCase {
 		}
 		$this->assertSame( 'critical', $found[0]['severity'] );
 		$this->assertStringContainsString( 'ss_test_trg', $found[0]['title'] );
+	}
+
+	public function test_parses_the_wp_config_admin_list(): void {
+		$this->assertSame(
+			array(
+				array( 'login' => 'admin', 'id' => 1 ),
+				array( 'login' => 'Jane', 'id' => null ),
+				array( 'login' => 'bob', 'id' => 7 ),
+			),
+			AdminRegistry::parse( 'admin#1, Jane , #3, , bob # 7' )
+		);
+		$this->assertSame( array( array( 'login' => 'x', 'id' => 2 ) ), AdminRegistry::parse( array( 'x#2', '' ) ) );
+		$this->assertSame( array(), AdminRegistry::parse( '' ) );
+	}
+
+	public function test_wp_config_list_replaces_approvals_and_is_always_enforced(): void {
+		$keeper = self::factory()->user->create( array( 'role' => 'administrator', 'user_login' => 'keeper' ) );
+		$other  = self::factory()->user->create( array( 'role' => 'administrator', 'user_login' => 'other' ) );
+		define( 'SS_TEST_ADMINS_A', 'KEEPER#' . $keeper . ', ghost' );
+		$registry = new AdminRegistry( 'SS_TEST_ADMINS_A' );
+		// A database approval for "other" is ignored while the constant is defined.
+		( new AdminRegistry() )->approve( $other, $keeper );
+
+		// The lock applies although the setting is off.
+		$this->harden( array( 'admin_lock' => false ), $registry );
+		$this->assertTrue( user_can( $keeper, 'manage_options' ), 'listed admin (case-insensitive login, pinned ID) keeps rights' );
+		$this->assertFalse( user_can( $other, 'manage_options' ), 'unlisted admin is locked' );
+		$this->assertTrue( user_can( $other, 'read' ) );
+		$this->assertTrue( user_can( $other, 'edit_user', $other ), 'own profile stays reachable' );
+		$this->assertFalse( user_can( $other, 'edit_user', $keeper ) );
+		$this->assertTrue( $registry->enforced( false ) );
+
+		$this->assertFalse( $registry->approve( $other, $keeper ), 'database approvals cannot be changed' );
+		$this->assertFalse( $registry->revoke( $keeper ) );
+		$this->assertSame( 0, $registry->approve_visible( $keeper ) );
+
+		$states = array_column( $registry->fixed_report(), 'state', 'entry' );
+		$this->assertSame( array( 'KEEPER#' . $keeper => 'ok', 'ghost' => 'missing' ), $states );
+
+		// The scan warns that an unmatched login could be claimed.
+		$scanner = new IntegrityScanner( $registry, Plugin::instance()->container()->get( EventRepository::class ), Plugin::instance()->container()->get( Settings::class ) );
+		$titles  = array_column( $scanner->run()['findings'], 'title' );
+		$this->assertContains( 'SENTINEL_SHIELD_ADMINS entry "ghost" matches no account', $titles );
+		$this->assertNotEmpty( preg_grep( '/waiting for approval: other /', $titles ) );
+
+		// Which is exactly the risk: an unpinned entry approves whoever registers that login.
+		$ghost = self::factory()->user->create( array( 'role' => 'administrator', 'user_login' => 'ghost' ) );
+		$this->assertTrue( user_can( $ghost, 'manage_options' ) );
+	}
+
+	public function test_pinned_entry_rejects_a_re_registered_login(): void {
+		$admin = self::factory()->user->create( array( 'role' => 'administrator', 'user_login' => 'pinned' ) );
+		define( 'SS_TEST_ADMINS_B', 'pinned#' . ( $admin + 1000 ) );
+		$registry = new AdminRegistry( 'SS_TEST_ADMINS_B' );
+		$this->harden( array(), $registry );
+		$this->assertFalse( user_can( $admin, 'manage_options' ) );
+		$this->assertSame( 'id_mismatch', $registry->fixed_report()[0]['state'] );
+	}
+
+	public function test_empty_wp_config_list_locks_every_administrator(): void {
+		$admin = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		define( 'SS_TEST_ADMINS_C', '' );
+		$registry = new AdminRegistry( 'SS_TEST_ADMINS_C' );
+		$this->harden( array(), $registry );
+		$this->assertTrue( $registry->is_fixed() );
+		$this->assertFalse( user_can( $admin, 'manage_options' ) );
 	}
 }

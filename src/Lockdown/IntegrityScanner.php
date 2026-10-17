@@ -400,7 +400,23 @@ final class IntegrityScanner {
 	 * Hidden, unapproved or oddly privileged administrators.
 	 */
 	private function check_admins(): void {
-		$lock = (bool) $this->settings->get( 'lockdown.admin_lock', false );
+		$lock = $this->admins->enforced( (bool) $this->settings->get( 'lockdown.admin_lock', false ) );
+		foreach ( $this->admins->fixed_report() as $entry ) {
+			if ( in_array( $entry['state'], array( 'missing', 'id_mismatch' ), true ) ) {
+				$this->add(
+					'admins',
+					'missing' === $entry['state'] ? 'warning' : 'critical',
+					/* translators: %s: list entry. */
+					sprintf( __( 'SENTINEL_SHIELD_ADMINS entry "%s" matches no account', 'sentinel-shield' ), $entry['entry'] ),
+					'missing' === $entry['state']
+						? __( 'No account has this login, so anyone who creates one would become an approved administrator. Remove the entry from wp-config.php, or pin it to a user ID (login#ID).', 'sentinel-shield' )
+						/* translators: %d: user ID. */
+						: sprintf( __( 'The login now belongs to account ID %d, not the pinned ID, so it is not approved. The original account may have been deleted and the login re-registered.', 'sentinel-shield' ), $entry['user_id'] ),
+					'fixed-admin:' . $entry['entry'],
+					md5( $entry['entry'] . '|' . $entry['state'] . '|' . $entry['user_id'] )
+				);
+			}
+		}
 		foreach ( $this->admins->privileged_users() as $user ) {
 			/* translators: 1: login, 2: user ID, 3: email, 4: registration date. */
 			$who = sprintf( __( '%1$s (ID %2$d, %3$s, registered %4$s)', 'sentinel-shield' ), $user['login'], $user['id'], $user['email'], $user['registered'] );
@@ -425,13 +441,15 @@ final class IntegrityScanner {
 					md5( $user['id'] . '|' . $user['login'] . '|' . implode( ',', $user['roles'] ) )
 				);
 			}
-			if ( $lock && ! $user['approved'] && $this->admins->approvals() ) {
+			if ( $lock && ! $user['approved'] ) {
 				$this->add(
 					'admins',
 					'warning',
 					/* translators: %s: account description. */
 					sprintf( __( 'Administrator waiting for approval: %s', 'sentinel-shield' ), $who ),
-					__( 'The administrator lock denies this account every admin capability until it is approved in the Administrators section below.', 'sentinel-shield' ),
+					$this->admins->is_fixed()
+						? __( 'The administrator lock denies this account every admin capability because it is not listed in SENTINEL_SHIELD_ADMINS in wp-config.php.', 'sentinel-shield' )
+						: __( 'The administrator lock denies this account every admin capability until it is approved in the Administrators section below.', 'sentinel-shield' ),
 					'admin-pending:' . $user['id']
 				);
 			}

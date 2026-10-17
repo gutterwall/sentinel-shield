@@ -4,7 +4,7 @@ Tags: security, firewall, malware, ip blocking, lockout
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.2.0
+Stable tag: 0.3.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -46,7 +46,7 @@ The admin's IP is auto-allowlisted on activation from wp-admin and on every sett
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.2.0.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.3.0.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
@@ -66,8 +66,24 @@ With the **Administrator lock** on (Settings → Malware Lockdown), only account
 * Sentinel Shield → Malware Lockdown → Administrators: lists every administrator account read directly from the database, including hidden ones, with Approve and Withdraw approval buttons.
 * WP-CLI: `wp sentinel admins`, `wp sentinel approve-admin <user>`, `wp sentinel revoke-admin <user>` (user ID, login or email).
 * Settings → Documentation shows the current approved list with who approved each account and when.
+* Or fix the list in wp-config.php with `SENTINEL_SHIELD_ADMINS` (below), which replaces the database list entirely.
 
 The list is stored in its own option (`sentinel_shield_admin_approvals`, network-wide on multisite). It is not a settings field, is not included in settings export/import and cannot be changed with `settings-set`, so importing settings never approves accounts. Approving or withdrawing needs full administrator rights (manage_options; manage_network_options on multisite); a locked account cannot approve itself.
+
+= Fixing the list in wp-config.php =
+
+A list in the database could be changed by malware that writes to the database. To fix the list in a file instead, add this to wp-config.php above "That's all, stop editing!":
+
+`define( 'SENTINEL_SHIELD_ADMINS', 'admin#1, jane#7' );`
+
+* Entries are logins separated by commas (an array also works), matched without regard to case.
+* `#ID` pins an entry to one account: `jane#7` approves login jane only while it belongs to user ID 7. Always pin: without it, if the jane account is deleted, anyone who registers a new account called jane becomes an approved administrator. The Administrators list shows the ID to use.
+* While the constant is defined the lock is always enforced, regardless of the "Administrator lock" checkbox, the Malware lockdown module and "Enable protection" (all stored in the database). Only `SENTINEL_SHIELD_DISABLE` switches it off.
+* The database list is ignored but kept; remove the constant to return to it. The Approve/Withdraw buttons and `approve-admin` / `revoke-admin` are disabled.
+* The list is applied exactly as written: if no entry matches an administrator (a typo, or an empty value), every administrator is locked until wp-config.php is fixed. Check the Administrators list right after saving the file.
+* Entries matching no account, or whose login now belongs to another user ID, are shown on the Administrators list, reported by the malware scan and announced in an admin notice.
+* Adding an administrator: create or promote the account, then add its `login#ID`. Removing one: delete its entry (and ideally its administrator role).
+* Limit: the list is only enforced while Sentinel Shield runs. Malware writing to the database directly could still remove Sentinel Shield from the active plugins (you would see it deactivated), and malware that can edit files can edit wp-config.php.
 
 = Which accounts count as administrators =
 
@@ -83,7 +99,7 @@ The list is stored in its own option (`sentinel_shield_admin_approvals`, network
 * **Locked accounts:** can log in and see their profile, but every admin screen and capability is refused, including through the REST API, AJAX and XML-RPC. They see a notice explaining how to get approved. Each locked account is logged once an hour as "Unapproved administrator denied".
 * **Withdrawing:** you cannot withdraw your own approval from the admin. Approvals are bound to user ID and login, so an account whose login is changed must be approved again. Removing someone's administrator role does not remove their approval; withdraw it when someone leaves.
 * Approvals and withdrawals are written to the Events log.
-* **Limit:** the list lives in the database. Malware that can write to the database and specifically targets Sentinel Shield could add itself. Keep the twice-daily scan and the new-administrator alerts on; they report hidden administrators, triggers and new admins independently.
+* **Limit:** without `SENTINEL_SHIELD_ADMINS` the list lives in the database, where malware that specifically targets Sentinel Shield could add itself. Keep the twice-daily scan and the new-administrator alerts on; they report hidden administrators, triggers and new admins independently.
 
 == Settings reference ==
 
@@ -140,7 +156,7 @@ Malware Lockdown measures are not affected by test mode: once switched on, they 
 * **Disable the plugin and theme file editor** (`lockdown.disable_file_editor`; default: Off; recommended: On). Removes Appearance → Theme File Editor and Plugins → Plugin File Editor for everyone, like DISALLOW_FILE_EDIT. A stolen admin login can then not be used to paste a backdoor into a theme, which is how SC's theme copy is often planted.
 * **Block installing and uploading plugins and themes** (`lockdown.block_installs`; default: Off; recommended: your choice). Nobody can add new plugins or themes from the admin (updates still work). SC installs itself as a fake plugin; turn this off briefly when you need to install something.
 * **Block PHP in uploads** (`lockdown.block_php_uploads`; default: Off; recommended: On). Rejects uploads whose name or content is a script (including double extensions such as shell.php.jpg and .htaccess/.user.ini files) and, on Apache, adds rules to uploads/.htaccess so PHP files there cannot run. On nginx, add the rule shown on the Malware Lockdown page to your server configuration.
-* **Administrator lock** (`lockdown.admin_lock`; default: Off; recommended: On). Only approved administrator accounts keep admin rights; any other account with admin powers (such as one SC writes straight into the database) is treated as having none until approved on the Malware Lockdown page. When first switched on, every administrator shown on the Users screen is approved, hidden ones are not. Recover with: wp sentinel approve-admin <user>.
+* **Administrator lock** (`lockdown.admin_lock`; default: Off; recommended: On). Only approved administrator accounts keep admin rights; any other account with admin powers (such as one SC writes straight into the database) is treated as having none until approved on the Malware Lockdown page. When first switched on, every administrator shown on the Users screen is approved, hidden ones are not. Recover with: wp sentinel approve-admin <user>. To fix the list in a file instead, define SENTINEL_SHIELD_ADMINS in wp-config.php (see Documentation).
 * **Protect Sentinel Shield from being switched off by code** (`lockdown.protect_self`; default: Off; recommended: On). SC deactivates and deletes security plugins. With this on, Sentinel Shield can only be deactivated or deleted by an administrator from the Plugins screen, during an update, or with WP-CLI.
 * **Block blockchain command channels** (`lockdown.block_chain_rpc`; default: Off; recommended: On). Stops the site from contacting public Ethereum and BNB Chain RPC gateways and from sending blockchain JSON-RPC calls (eth_call), which SC uses to fetch its commands. Each attempt is logged with the file that made it. Leave off if a plugin on this site legitimately talks to a blockchain.
 * **Alert on new administrator accounts** (`lockdown.alert_admin_changes`; default: On; recommended: On). Logs and emails the site admin address whenever an account becomes an administrator through WordPress. Accounts written directly into the database are caught by the scan instead.
@@ -163,6 +179,7 @@ Malware Lockdown measures are not affected by test mode: once switched on, they 
 = wp-config.php constants =
 
 * `define( 'SENTINEL_SHIELD_DISABLE', true );` Emergency switch: Sentinel Shield loads nothing. Use it to get back in, fix the cause, then remove the line.
+* `define( 'SENTINEL_SHIELD_ADMINS', 'admin#1, jane#7' );` Fixes the approved administrator list in this file and always enforces the administrator lock. See "Fixing the list in wp-config.php" above.
 * `define( 'DISALLOW_FILE_EDIT', true );` WordPress's own file editor switch. Stronger than the lockdown setting because it lives in a file instead of the database.
 * `define( 'DISABLE_WP_CRON', true );` Only with a real server cron job (the line is shown on the Scheduled Tasks page); otherwise blocklist updates and the malware scan stop.
 
@@ -182,7 +199,7 @@ Any one of these works:
 
 = My administrator rights are suspended. What now? =
 
-The administrator lock is on and your account is not approved. Ask an approved administrator to approve you on Sentinel Shield → Malware Lockdown, or run `wp sentinel approve-admin <your-login>`. Without WP-CLI, add the SENTINEL_SHIELD_DISABLE constant, approve yourself on the Malware Lockdown page, then remove the constant.
+The administrator lock is on and your account is not approved. Ask an approved administrator to approve you on Sentinel Shield → Malware Lockdown, or run `wp sentinel approve-admin <your-login>`. If `SENTINEL_SHIELD_ADMINS` is defined in wp-config.php, add your `login#ID` there instead. Without WP-CLI, add the SENTINEL_SHIELD_DISABLE constant, approve yourself on the Malware Lockdown page, then remove the constant.
 
 = I cannot install a plugin or theme =
 
@@ -210,6 +227,10 @@ No. Test mode only records what would have been blocked. Use it to validate sett
 
 == Changelog ==
 
+= 0.3.0 =
+* `SENTINEL_SHIELD_ADMINS` in wp-config.php: fixes the approved administrator list in a file (logins, optionally pinned to user IDs) so database writes cannot change it, and always enforces the administrator lock. Unmatched or re-registered entries are flagged on the Administrators list, in an admin notice and by the malware scan.
+* Fixed: an account locked by the administrator lock could not open its own profile page (where the lock is explained); it now can, and still cannot edit anyone else.
+
 = 0.2.0 =
 * Documentation tab (Settings → Documentation): administrator approvals explained in detail with the current approved list, every setting with its key, default and recommended value, wp-config.php constants, recovery steps and WP-CLI commands. The readme's settings reference is generated from the same source.
 * Release builds: `bin/build.sh` checks version numbers, coding standards and tests, and produces an install zip with `checksums.sha256` and `build.json`. The source is now under git, with each release tagged.
@@ -223,6 +244,9 @@ No. Test mode only records what would have been blocked. Use it to validate sett
 * Phase 1: core framework, client IP detection, IP rules, lockout engine, lockout safety, test mode tooling, events, WP-CLI.
 
 == Upgrade Notice ==
+
+= 0.3.0 =
+Adds the optional SENTINEL_SHIELD_ADMINS wp-config.php constant for a file-based administrator list. Nothing changes unless you define it.
 
 = 0.2.0 =
 Adds Malware Lockdown (SC malware scan and opt-in hardening), blocklist feeds, the Scheduled Tasks page and a Documentation tab. All new protections are off until you switch them on.

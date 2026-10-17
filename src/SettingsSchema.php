@@ -307,7 +307,7 @@ final class SettingsSchema {
 			),
 			'admin_lock'          => array(
 				__( 'Administrator lock', 'sentinel-shield' ),
-				__( 'Only approved administrator accounts keep admin rights; any other account with admin powers (such as one SC writes straight into the database) is treated as having none until approved on the Malware Lockdown page. When first switched on, every administrator shown on the Users screen is approved, hidden ones are not. Recover with: wp sentinel approve-admin <user>.', 'sentinel-shield' ),
+				__( 'Only approved administrator accounts keep admin rights; any other account with admin powers (such as one SC writes straight into the database) is treated as having none until approved on the Malware Lockdown page. When first switched on, every administrator shown on the Users screen is approved, hidden ones are not. Recover with: wp sentinel approve-admin <user>. To fix the list in a file instead, define SENTINEL_SHIELD_ADMINS in wp-config.php (see Documentation).', 'sentinel-shield' ),
 				true,
 			),
 			'protect_self'        => array(
@@ -331,6 +331,9 @@ final class SettingsSchema {
 				true,
 			),
 		);
+		if ( defined( 'SENTINEL_SHIELD_ADMINS' ) ) {
+			$lockdown['admin_lock'][1] .= ' ' . __( 'On this site the list is fixed by SENTINEL_SHIELD_ADMINS in wp-config.php, so the lock is always enforced and this checkbox has no effect.', 'sentinel-shield' );
+		}
 		foreach ( $lockdown as $key => $meta ) {
 			$fields[] = array(
 				'key'         => "lockdown.$key",

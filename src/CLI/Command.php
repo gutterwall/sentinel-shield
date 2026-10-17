@@ -863,7 +863,12 @@ final class Command {
 				'approved'   => $user['approved'] ? 'yes' : 'no',
 			);
 		}
+		$registry = $this->c->get( AdminRegistry::class );
 		WP_CLI\Utils\format_items( (string) ( $assoc_args['format'] ?? 'table' ), $rows, array( 'id', 'login', 'email', 'registered', 'hidden', 'approved' ) );
+		if ( $registry->is_fixed() ) {
+			$entries = array_map( static fn( array $e ): string => $e['entry'] . ( 'ok' === $e['state'] ? '' : ' (' . $e['state'] . ')' ), $registry->fixed_report() );
+			WP_CLI::warning( 'Approvals come from SENTINEL_SHIELD_ADMINS in wp-config.php: ' . ( $entries ? implode( ', ', $entries ) : '(empty: every administrator is locked)' ) );
+		}
 	}
 
 	/**
@@ -888,6 +893,7 @@ final class Command {
 		if ( ! AdminRegistry::is_privileged( $user ) ) {
 			WP_CLI::error( "{$user->user_login} is not an administrator." );
 		}
+		$this->refuse_if_fixed();
 		$this->c->get( AdminRegistry::class )->approve( $user->ID, 0 );
 		WP_CLI::success( "Approved {$user->user_login} (ID {$user->ID})." );
 	}
@@ -907,10 +913,20 @@ final class Command {
 	public function revoke_admin( array $args, array $assoc_args ): void {
 		unset( $assoc_args );
 		$user = $this->find_user( $args[0] );
+		$this->refuse_if_fixed();
 		if ( ! $this->c->get( AdminRegistry::class )->revoke( $user->ID ) ) {
 			WP_CLI::error( "{$user->user_login} was not approved." );
 		}
 		WP_CLI::success( "Withdrew approval for {$user->user_login}." );
+	}
+
+	/**
+	 * Stops when the administrator list is fixed in wp-config.php.
+	 */
+	private function refuse_if_fixed(): void {
+		if ( $this->c->get( AdminRegistry::class )->is_fixed() ) {
+			WP_CLI::error( 'The administrator list is fixed by SENTINEL_SHIELD_ADMINS in wp-config.php. Edit it there.' );
+		}
 	}
 
 	/**

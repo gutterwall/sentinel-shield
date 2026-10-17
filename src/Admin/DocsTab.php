@@ -64,12 +64,17 @@ final class DocsTab {
 		$settings = $this->c->get( Settings::class );
 		$registry = $this->c->get( AdminRegistry::class );
 		$lock     = (bool) $settings->get( 'lockdown.admin_lock', false );
-		$list     = $registry->approvals();
+		$list     = $registry->is_fixed() ? array() : $registry->approvals();
 
 		echo '<div class="ss-card ss-docs" id="ss-doc-admins"><h2>' . esc_html__( 'Administrator approvals', 'sentinel-shield' ) . '</h2>';
 
 		echo '<h3>' . esc_html__( 'Current state on this site', 'sentinel-shield' ) . '</h3><p>';
-		if ( ! $lock ) {
+		if ( $registry->is_fixed() ) {
+			$entries = array_column( $registry->fixed_report(), 'entry' );
+			echo View::pill( __( 'Fixed in wp-config.php', 'sentinel-shield' ), 'ok' ) . ' '; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.
+			/* translators: %s: list of logins. */
+			echo esc_html( sprintf( __( 'SENTINEL_SHIELD_ADMINS is defined, so the lock is always enforced and only these accounts are administrators: %s.', 'sentinel-shield' ), $entries ? implode( ', ', $entries ) : __( '(none: every administrator is locked)', 'sentinel-shield' ) ) );
+		} elseif ( ! $lock ) {
 			echo View::pill( __( 'Administrator lock off', 'sentinel-shield' ), 'info' ) . ' ' . esc_html__( 'Every administrator has full rights. The approved list below is kept and takes effect when the lock is turned on.', 'sentinel-shield' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.
 		} elseif ( ! $list ) {
 			echo View::pill( __( 'Lock on, not enforced', 'sentinel-shield' ), 'warn' ) . ' ' . esc_html__( 'The lock is on but no account is approved, so nobody is locked. Approve at least one administrator.', 'sentinel-shield' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.
@@ -109,8 +114,32 @@ final class DocsTab {
 				__( 'The list is managed on Sentinel Shield → Malware Lockdown → Administrators, or with WP-CLI (wp sentinel admins, approve-admin, revoke-admin). It is not a field on these settings tabs, because it is a list of accounts rather than a preference: you approve real accounts that exist, and approvals are bound to the account, not typed in.', 'sentinel-shield' ),
 				__( 'The list is stored in its own option (sentinel_shield_admin_approvals; network-wide on multisite). It is not part of the settings export or import and not reachable through wp sentinel settings-set, so importing settings from another site never approves accounts on this one.', 'sentinel-shield' ),
 				__( 'Approving or withdrawing requires full administrator rights (manage_options; manage_network_options on multisite). A locked account has no rights, so it cannot approve itself.', 'sentinel-shield' ),
+				__( 'Alternatively, the list can be fixed in wp-config.php with SENTINEL_SHIELD_ADMINS (next section). It then replaces the list in the database entirely.', 'sentinel-shield' ),
 			)
 		);
+
+		$this->section(
+			__( 'Fixing the list in wp-config.php (SENTINEL_SHIELD_ADMINS)', 'sentinel-shield' ),
+			array(
+				__( 'Malware that can write to the database could add its own account to an approved list stored there. A list in wp-config.php can only be changed by someone who can edit the site\'s files. Add a line like this above "That\'s all, stop editing!":', 'sentinel-shield' ),
+			)
+		);
+		echo '<pre class="ss-code"><code>define( \'SENTINEL_SHIELD_ADMINS\', \'admin#1, jane#7\' );</code></pre>';
+		echo '<ul class="ul-disc">';
+		foreach (
+			array(
+				__( 'Entries are logins separated by commas (an array of logins also works). Logins are matched without regard to case.', 'sentinel-shield' ),
+				__( 'Adding #ID pins an entry to one account: "jane#7" approves login jane only while it belongs to user ID 7. Always pin. Without it, if the jane account is deleted, anyone who registers a new account called jane becomes an approved administrator. The Administrators list shows the ID to use for each entry.', 'sentinel-shield' ),
+				__( 'While the constant is defined, the lock is always enforced: it does not depend on the "Administrator lock" checkbox, the Malware lockdown module or the "Enable protection" switch, all of which live in the database. Only SENTINEL_SHIELD_DISABLE switches it off.', 'sentinel-shield' ),
+				__( 'The approved list in the database is ignored and kept unchanged; remove the constant to go back to it. Approve and Withdraw buttons and wp sentinel approve-admin / revoke-admin are disabled.', 'sentinel-shield' ),
+				__( 'The list is applied exactly as written. If no entry matches an administrator (a typo, or an empty value), every administrator is locked until wp-config.php is corrected. Check the Administrators list right after saving the file.', 'sentinel-shield' ),
+				__( 'Entries that match no account, or whose login now belongs to a different user ID, are shown on the Administrators list, reported by the malware scan and announced in an admin notice.', 'sentinel-shield' ),
+				__( 'To add an administrator: create or promote the account, then add its login#ID to the constant. To remove one: delete its entry (and ideally its administrator role).', 'sentinel-shield' ),
+			) as $text
+		) {
+			echo '<li>' . esc_html( $text ) . '</li>';
+		}
+		echo '</ul>';
 
 		$this->section(
 			__( 'Which accounts count as administrators', 'sentinel-shield' ),
@@ -160,7 +189,8 @@ final class DocsTab {
 		$this->section(
 			__( 'Limits', 'sentinel-shield' ),
 			array(
-				__( 'The approved list lives in the database. Malware that can write to the database and that specifically targets Sentinel Shield could add its own account to the list. The twice-daily scan still reports hidden administrators and database triggers, and the email alert reports administrators added through WordPress, so keep both on.', 'sentinel-shield' ),
+				__( 'Without SENTINEL_SHIELD_ADMINS the approved list lives in the database, where malware that specifically targets Sentinel Shield could add its own account. Use the wp-config.php list to close that gap. Either way, keep the twice-daily scan and the email alerts on: they report hidden administrators, database triggers and new administrators independently.', 'sentinel-shield' ),
+				__( 'The wp-config.php list cannot be changed through the database, but it is only enforced while Sentinel Shield is running. Malware that writes to the database directly could still remove Sentinel Shield from the list of active plugins; the plugin then stops loading altogether, which you would notice on the Plugins screen. Malware that can edit files can also edit wp-config.php. The list is not a defence against full server compromise.', 'sentinel-shield' ),
 				__( 'The lock limits what an account can do inside WordPress. It does not stop code that is already running on the server; that is what the scan and the other lockdown measures are for.', 'sentinel-shield' ),
 			)
 		);
@@ -205,6 +235,7 @@ final class DocsTab {
 		echo '<p>' . esc_html__( 'Add these above the line "That\'s all, stop editing!".', 'sentinel-shield' ) . '</p><table class="widefat striped ss-narrow"><tbody>';
 		$rows = array(
 			"define( 'SENTINEL_SHIELD_DISABLE', true );" => __( 'Emergency switch: Sentinel Shield loads nothing (no blocking, no lockdown measures). Use it to get back in, fix the cause, then remove the line.', 'sentinel-shield' ),
+			"define( 'SENTINEL_SHIELD_ADMINS', 'admin#1, jane#7' );" => __( 'Fixes the approved administrator list in this file and always enforces the administrator lock. Pin each login to its user ID with #ID. See "Administrator approvals" above.', 'sentinel-shield' ),
 			"define( 'DISALLOW_FILE_EDIT', true );"      => __( 'WordPress\'s own switch for the plugin and theme file editor. Stronger than the lockdown setting because it lives in a file instead of the database.', 'sentinel-shield' ),
 			"define( 'DISABLE_WP_CRON', true );"         => __( 'Stops page loads from running scheduled tasks. Only use it with a real server cron job (the line is shown on the Scheduled Tasks page), otherwise blocklist updates and the malware scan stop.', 'sentinel-shield' ),
 		);
@@ -221,7 +252,7 @@ final class DocsTab {
 		echo '<div class="ss-card ss-docs" id="ss-doc-recovery"><h2>' . esc_html__( 'Locked out? Ways back in', 'sentinel-shield' ) . '</h2><table class="widefat striped ss-narrow"><thead><tr><th>' . esc_html__( 'Problem', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Fix', 'sentinel-shield' ) . '</th></tr></thead><tbody>';
 		$rows = array(
 			array( __( 'Your IP is blocked', 'sentinel-shield' ), __( 'wp sentinel unblock <ip> --allow-hours=24, or "Send unlock link" on the block page (403 mode, Emailed unlock links module on), or the SENTINEL_SHIELD_DISABLE constant.', 'sentinel-shield' ) ),
-			array( __( 'Your administrator rights are suspended', 'sentinel-shield' ), __( 'Ask an approved administrator to approve you, or run wp sentinel approve-admin <your login>. As a last resort, use the SENTINEL_SHIELD_DISABLE constant and approve yourself from the Malware Lockdown page, then remove the constant.', 'sentinel-shield' ) ),
+			array( __( 'Your administrator rights are suspended', 'sentinel-shield' ), __( 'Ask an approved administrator to approve you, or run wp sentinel approve-admin <your login>. If SENTINEL_SHIELD_ADMINS is defined, add your login#ID to it in wp-config.php instead. As a last resort, use the SENTINEL_SHIELD_DISABLE constant and approve yourself from the Malware Lockdown page, then remove the constant.', 'sentinel-shield' ) ),
 			array( __( 'You need to install a plugin or theme', 'sentinel-shield' ), __( 'Untick "Block installing and uploading plugins and themes" on the Malware Lockdown tab, install, then tick it again. Or install with WP-CLI.', 'sentinel-shield' ) ),
 			array( __( 'A plugin needs a blockchain gateway', 'sentinel-shield' ), __( 'Untick "Block blockchain command channels", or allow the specific host with the sentinel_shield_allowed_chain_hosts filter.', 'sentinel-shield' ) ),
 			array( __( 'You cannot deactivate Sentinel Shield', 'sentinel-shield' ), __( 'Deactivate it from the Plugins screen as an administrator, or run wp plugin deactivate sentinel-shield. Only code-initiated deactivation is refused.', 'sentinel-shield' ) ),

@@ -17,10 +17,17 @@ defined( 'ABSPATH' ) || exit;
  * Accounts are therefore found with SQL and compared with what WordPress's own
  * user query returns. With the administrator lock on, only approved accounts
  * keep admin rights, however they got them.
+ *
+ * The approved list normally lives in the database. Defining SENTINEL_SHIELD_ADMINS
+ * in wp-config.php replaces it with a fixed list ("admin#1, jane#7": logins, each
+ * optionally pinned to a user ID) that database writes cannot change, and makes
+ * the lock always enforced.
  */
 final class AdminRegistry {
 
 	public const OPTION = 'sentinel_shield_admin_approvals';
+
+	public const CONSTANT = 'SENTINEL_SHIELD_ADMINS';
 
 	/**
 	 * Capabilities that amount to control of the site's code.
@@ -33,6 +40,113 @@ final class AdminRegistry {
 	 * @var array<int, bool>
 	 */
 	private array $locked = array();
+
+	/**
+	 * Parsed wp-config.php list (false until read).
+	 *
+	 * @var list<array{login:string, id:?int}>|null|false
+	 */
+	private array|null|false $fixed = false;
+
+	/**
+	 * Constructor.
+	 *
+	 * @param string $constant Name of the wp-config.php constant (tests use their own).
+	 */
+	public function __construct( private string $constant = self::CONSTANT ) {}
+
+	/**
+	 * The administrator list from wp-config.php, or null when it is not defined.
+	 * Accepts a comma-separated string or an array; "login#ID" pins an entry to
+	 * one account so a deleted login cannot be re-registered by someone else.
+	 *
+	 * @return list<array{login:string, id:?int}>|null
+	 */
+	public function fixed(): ?array {
+		if ( false === $this->fixed ) {
+			$this->fixed = defined( $this->constant ) ? self::parse( constant( $this->constant ) ) : null;
+		}
+		return $this->fixed;
+	}
+
+	/**
+	 * Whether the list is set in wp-config.php.
+	 */
+	public function is_fixed(): bool {
+		return null !== $this->fixed();
+	}
+
+	/**
+	 * Parses a SENTINEL_SHIELD_ADMINS value.
+	 *
+	 * @param mixed $raw String or array.
+	 * @return list<array{login:string, id:?int}>
+	 */
+	public static function parse( mixed $raw ): array {
+		$items = is_array( $raw ) ? $raw : explode( ',', is_scalar( $raw ) ? (string) $raw : '' );
+		$out   = array();
+		foreach ( $items as $item ) {
+			$item = trim( is_scalar( $item ) ? (string) $item : '' );
+			$id   = null;
+			if ( preg_match( '/^(.*?)\s*#\s*(\d+)$/', $item, $m ) ) {
+				$item = $m[1];
+				$id   = (int) $m[2];
+			}
+			if ( '' !== $item ) {
+				$out[] = array(
+					'login' => $item,
+					'id'    => $id,
+				);
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * Each wp-config.php entry with the account it matches and its state:
+	 * ok, missing (no such login), id_mismatch (login belongs to another ID)
+	 * or not_admin (account exists but has no admin powers; harmless).
+	 *
+	 * @return list<array{entry:string, login:string, id:?int, user_id:int, state:string}>
+	 */
+	public function fixed_report(): array {
+		$out = array();
+		foreach ( (array) $this->fixed() as $entry ) {
+			$user  = get_user_by( 'login', $entry['login'] );
+			$state = 'ok';
+			if ( ! $user instanceof \WP_User ) {
+				$state = 'missing';
+			} elseif ( null !== $entry['id'] && $entry['id'] !== $user->ID ) {
+				$state = 'id_mismatch';
+			} elseif ( ! self::is_privileged( $user ) ) {
+				$state = 'not_admin';
+			}
+			$out[] = array(
+				'entry'   => $entry['login'] . ( null === $entry['id'] ? '' : '#' . $entry['id'] ),
+				'login'   => $entry['login'],
+				'id'      => $entry['id'],
+				'user_id' => $user instanceof \WP_User ? $user->ID : 0,
+				'state'   => $state,
+			);
+		}
+		return $out;
+	}
+
+	/**
+	 * Whether any list is in force (a wp-config.php list always is, even empty).
+	 */
+	public function has_list(): bool {
+		return $this->is_fixed() || (bool) $this->approvals();
+	}
+
+	/**
+	 * Whether the lock is enforced, given the "Administrator lock" setting.
+	 *
+	 * @param bool $setting Setting value.
+	 */
+	public function enforced( bool $setting ): bool {
+		return $this->is_fixed() || ( $setting && $this->has_list() );
+	}
 
 	/**
 	 * Approved accounts: user ID => [login, at, by].
@@ -52,7 +166,7 @@ final class AdminRegistry {
 	 */
 	public function approve( int $user_id, int $by ): bool {
 		$user = get_userdata( $user_id );
-		if ( ! $user instanceof \WP_User ) {
+		if ( ! $user instanceof \WP_User || $this->is_fixed() ) {
 			return false;
 		}
 		$list             = $this->approvals();
@@ -72,7 +186,7 @@ final class AdminRegistry {
 	 */
 	public function revoke( int $user_id ): bool {
 		$list = $this->approvals();
-		if ( ! isset( $list[ $user_id ] ) ) {
+		if ( $this->is_fixed() || ! isset( $list[ $user_id ] ) ) {
 			return false;
 		}
 		unset( $list[ $user_id ] );
@@ -86,6 +200,15 @@ final class AdminRegistry {
 	 * @param \WP_User $user User.
 	 */
 	public function is_approved( \WP_User $user ): bool {
+		if ( $this->is_fixed() ) {
+			foreach ( (array) $this->fixed() as $fixed ) {
+				// Logins are unique regardless of case in WordPress's database.
+				if ( strtolower( $fixed['login'] ) === strtolower( (string) $user->user_login ) && ( null === $fixed['id'] || $fixed['id'] === $user->ID ) ) {
+					return true;
+				}
+			}
+			return false;
+		}
 		$entry = $this->approvals()[ $user->ID ] ?? null;
 		return is_array( $entry ) && (string) $entry['login'] === (string) $user->user_login;
 	}
@@ -112,7 +235,8 @@ final class AdminRegistry {
 
 	/**
 	 * Whether the administrator lock denies this user. Never locks anyone while
-	 * no account is approved, so turning the lock on cannot lock everyone out.
+	 * no account is approved in the database, so turning the lock on cannot lock
+	 * everyone out; a wp-config.php list is applied as written.
 	 *
 	 * @param int $user_id User.
 	 */
@@ -122,7 +246,7 @@ final class AdminRegistry {
 		}
 		if ( ! isset( $this->locked[ $user_id ] ) ) {
 			$user                     = get_userdata( $user_id );
-			$this->locked[ $user_id ] = $user instanceof \WP_User && $this->approvals() && self::is_privileged( $user ) && ! $this->is_approved( $user );
+			$this->locked[ $user_id ] = $user instanceof \WP_User && $this->has_list() && self::is_privileged( $user ) && ! $this->is_approved( $user );
 		}
 		return $this->locked[ $user_id ];
 	}
@@ -165,7 +289,7 @@ final class AdminRegistry {
 	 * @return list<array<string, mixed>>
 	 */
 	public function pending(): array {
-		if ( ! $this->approvals() ) {
+		if ( ! $this->has_list() ) {
 			return array();
 		}
 		return array_values( array_filter( $this->privileged_users(), static fn( array $u ): bool => ! $u['approved'] ) );
@@ -180,6 +304,9 @@ final class AdminRegistry {
 	 */
 	public function approve_visible( int $by ): int {
 		$count = 0;
+		if ( $this->is_fixed() ) {
+			return 0;
+		}
 		foreach ( $this->privileged_users() as $user ) {
 			if ( ( ! $user['hidden'] || $user['id'] === $by ) && ! $user['approved'] && $this->approve( $user['id'], $by ) ) {
 				++$count;

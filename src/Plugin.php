@@ -254,6 +254,12 @@ final class Plugin {
 			}
 		}
 
+		// A wp-config.php administrator list holds even when protection or the
+		// lockdown module is switched off in the database.
+		if ( ! SafetyGuard::emergency_disabled() && $this->container->get( AdminRegistry::class )->is_fixed() ) {
+			$this->container->get( Hardening::class )->register_admin_lock();
+		}
+
 		add_action( 'init', array( I18n::class, 'load' ) );
 		( new AdminBar( $this->container ) )->register();
 

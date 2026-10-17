@@ -42,6 +42,13 @@ final class Hardening {
 	private array $alerted = array();
 
 	/**
+	 * Hooks already added (register() and register_admin_lock() may both run).
+	 *
+	 * @var array<string, true>
+	 */
+	private array $hooked = array();
+
+	/**
 	 * Constructor.
 	 *
 	 * @param Settings        $settings Settings.
@@ -57,15 +64,11 @@ final class Hardening {
 	public function register(): void {
 		$on = fn( string $key ): bool => (bool) $this->settings->get( 'lockdown.' . $key, false );
 
-		if ( $on( 'disable_file_editor' ) || $on( 'block_installs' ) || $on( 'admin_lock' ) ) {
-			add_filter( 'map_meta_cap', array( $this, 'map_meta_cap' ), PHP_INT_MAX, 4 );
+		if ( $on( 'disable_file_editor' ) || $on( 'block_installs' ) ) {
+			$this->hook_caps();
 		}
-		if ( $on( 'admin_lock' ) ) {
-			add_action( 'admin_init', array( $this, 'log_locked_user' ) );
-			add_action( is_multisite() ? 'network_admin_notices' : 'admin_notices', array( $this, 'lock_notices' ) );
-			if ( is_multisite() ) {
-				add_action( 'admin_notices', array( $this, 'lock_notices' ) );
-			}
+		if ( $on( 'admin_lock' ) || $this->admins->is_fixed() ) {
+			$this->register_admin_lock();
 		}
 		if ( $on( 'block_php_uploads' ) ) {
 			add_filter( 'wp_handle_upload_prefilter', array( UploadGuard::class, 'filter' ) );
@@ -90,6 +93,41 @@ final class Hardening {
 	}
 
 	/**
+	 * Hooks the administrator lock. Also called on its own when SENTINEL_SHIELD_ADMINS
+	 * is defined, so the wp-config.php list holds even if protection or this module
+	 * is switched off in the database.
+	 */
+	public function register_admin_lock(): void {
+		if ( isset( $this->hooked['lock'] ) ) {
+			return;
+		}
+		$this->hooked['lock'] = true;
+		$this->hook_caps();
+		add_action( 'admin_init', array( $this, 'log_locked_user' ) );
+		add_action( is_multisite() ? 'network_admin_notices' : 'admin_notices', array( $this, 'lock_notices' ) );
+		if ( is_multisite() ) {
+			add_action( 'admin_notices', array( $this, 'lock_notices' ) );
+		}
+	}
+
+	/**
+	 * Adds the capability filter once.
+	 */
+	private function hook_caps(): void {
+		if ( ! isset( $this->hooked['caps'] ) ) {
+			$this->hooked['caps'] = true;
+			add_filter( 'map_meta_cap', array( $this, 'map_meta_cap' ), PHP_INT_MAX, 4 );
+		}
+	}
+
+	/**
+	 * Whether the administrator lock applies (setting on, or a wp-config.php list).
+	 */
+	private function lock_on(): bool {
+		return $this->admins->is_fixed() || (bool) $this->settings->get( 'lockdown.admin_lock', false );
+	}
+
+	/**
 	 * Removes file editing, installs and (for unapproved admins) every capability.
 	 *
 	 * @param list<string> $caps    Primitive caps required.
@@ -99,8 +137,9 @@ final class Hardening {
 	 * @return list<string>
 	 */
 	public function map_meta_cap( array $caps, string $cap, int $user_id, array $args ): array {
-		unset( $args );
-		if ( $this->settings->get( 'lockdown.admin_lock', false ) && ! in_array( $cap, array( 'read', 'exist' ), true ) && $this->admins->is_locked( $user_id ) ) {
+		// A locked account keeps the dashboard and its own profile (where it sees why it is locked).
+		$own_profile = 'edit_user' === $cap && isset( $args[0] ) && (int) $args[0] === $user_id;
+		if ( $this->lock_on() && ! $own_profile && ! in_array( $cap, array( 'read', 'exist' ), true ) && $this->admins->is_locked( $user_id ) ) {
 			return array( 'do_not_allow' );
 		}
 		if ( $this->settings->get( 'lockdown.disable_file_editor', false ) && in_array( $cap, self::EDITOR_CAPS, true ) ) {
@@ -117,7 +156,7 @@ final class Hardening {
 	 */
 	public function log_locked_user(): void {
 		$user_id = get_current_user_id();
-		if ( $this->admins->is_locked( $user_id ) && Throttle::once( 'lockdown_denied_' . $user_id, HOUR_IN_SECONDS ) ) {
+		if ( $this->lock_on() && $this->admins->is_locked( $user_id ) && Throttle::once( 'lockdown_denied_' . $user_id, HOUR_IN_SECONDS ) ) {
 			$user = wp_get_current_user();
 			$this->log(
 				'lockdown_admin_denied',
@@ -133,18 +172,33 @@ final class Hardening {
 	 */
 	public function lock_notices(): void {
 		$user_id = get_current_user_id();
-		if ( $this->admins->is_locked( $user_id ) ) {
+		if ( $this->lock_on() && $this->admins->is_locked( $user_id ) ) {
 			echo '<div class="notice notice-error"><p><strong>' . esc_html__( 'Sentinel Shield:', 'sentinel-shield' ) . '</strong> ';
-			printf(
-				/* translators: %d: user ID. */
-				esc_html__( 'Your administrator rights are suspended by the administrator lock until an approved administrator approves this account on Sentinel Shield → Malware Lockdown (or runs: wp sentinel approve-admin %d).', 'sentinel-shield' ),
-				(int) $user_id
-			);
+			if ( $this->admins->is_fixed() ) {
+				printf(
+					/* translators: %s: login. */
+					esc_html__( 'Your administrator rights are suspended: the administrator list is fixed in wp-config.php (SENTINEL_SHIELD_ADMINS) and does not include %s. Ask whoever manages the site\'s files to add this account.', 'sentinel-shield' ),
+					esc_html( wp_get_current_user()->user_login )
+				);
+			} else {
+				printf(
+					/* translators: %d: user ID. */
+					esc_html__( 'Your administrator rights are suspended by the administrator lock until an approved administrator approves this account on Sentinel Shield → Malware Lockdown (or runs: wp sentinel approve-admin %d).', 'sentinel-shield' ),
+					(int) $user_id
+				);
+			}
 			echo '</p></div>';
 			return;
 		}
 		if ( ! current_user_can( Admin::cap() ) ) {
 			return;
+		}
+		$risky = array_filter( $this->admins->fixed_report(), static fn( array $e ): bool => in_array( $e['state'], array( 'missing', 'id_mismatch' ), true ) );
+		if ( $risky ) {
+			echo '<div class="notice notice-warning"><p><strong>' . esc_html__( 'Sentinel Shield:', 'sentinel-shield' ) . '</strong> ';
+			/* translators: %s: list of entries. */
+			echo esc_html( sprintf( __( 'SENTINEL_SHIELD_ADMINS in wp-config.php has entries that match no account: %s. Anyone who creates an account with that login would become an approved administrator. Remove them, or pin each entry to its user ID (login#ID).', 'sentinel-shield' ), implode( ', ', array_column( $risky, 'entry' ) ) ) );
+			echo '</p></div>';
 		}
 		$screen = get_current_screen();
 		if ( $screen && str_contains( (string) $screen->id, 'sentinel-shield-lockdown' ) ) {
@@ -359,8 +413,15 @@ final class Hardening {
 		if ( ! Throttle::once( 'lockdown_admin_mail_' . $user->ID, HOUR_IN_SECONDS ) ) {
 			return;
 		}
-		$locked = $this->settings->get( 'lockdown.admin_lock', false ) && $this->admins->approvals() && ! $this->admins->is_approved( $user );
-		$lines  = array(
+		$locked = $this->lock_on() && $this->admins->has_list() && ! $this->admins->is_approved( $user );
+		if ( ! $locked ) {
+			$advice = __( 'If you did not expect this, remove the account and change all administrator passwords:', 'sentinel-shield' );
+		} elseif ( $this->admins->is_fixed() ) {
+			$advice = __( 'The administrator list is fixed in wp-config.php (SENTINEL_SHIELD_ADMINS) and does not include this account, so it has no admin rights. If you expected it, add it there; otherwise remove the account:', 'sentinel-shield' );
+		} else {
+			$advice = __( 'The administrator lock is on, so this account has no admin rights until you approve it:', 'sentinel-shield' );
+		}
+		$lines = array(
 			/* translators: %s: site URL. */
 			sprintf( __( 'A new administrator account was created or promoted on %s.', 'sentinel-shield' ), home_url( '/' ) ),
 			'',
@@ -373,9 +434,7 @@ final class Hardening {
 			/* translators: %s: IP address. */
 			sprintf( __( 'From IP: %s', 'sentinel-shield' ), ( $this->ip )() ),
 			'',
-			$locked
-				? __( 'The administrator lock is on, so this account has no admin rights until you approve it:', 'sentinel-shield' )
-				: __( 'If you did not expect this, remove the account and change all administrator passwords:', 'sentinel-shield' ),
+			$advice,
 			Admin::url( 'sentinel-shield-lockdown' ),
 		);
 		wp_mail(

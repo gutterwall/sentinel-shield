@@ -195,7 +195,9 @@ final class Actions {
 			case 'revoke_admin':
 				$user_id = isset( $_POST['user_id'] ) ? absint( $_POST['user_id'] ) : 0;
 				$user    = get_userdata( $user_id );
-				if ( ! $user instanceof \WP_User || ! AdminRegistry::is_privileged( $user ) ) {
+				if ( $registry->is_fixed() ) {
+					View::flash( 'error', __( 'The administrator list is fixed in wp-config.php (SENTINEL_SHIELD_ADMINS). Change it there.', 'sentinel-shield' ) );
+				} elseif ( ! $user instanceof \WP_User || ! AdminRegistry::is_privileged( $user ) ) {
 					View::flash( 'error', __( 'That account is not an administrator.', 'sentinel-shield' ) );
 				} elseif ( 'approve_admin' === $op ) {
 					$registry->approve( $user_id, get_current_user_id() );
