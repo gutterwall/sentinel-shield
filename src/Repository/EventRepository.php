@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace SentinelShield\Repository;
 
+use SentinelShield\Http\Request;
 use SentinelShield\Net\IpAddress;
 
 defined( 'ABSPATH' ) || exit;
@@ -53,7 +54,7 @@ final class EventRepository {
 				substr( sanitize_key( $event ), 0, 32 ),
 				substr( sanitize_key( (string) ( $data['module'] ?? '' ) ), 0, 32 ),
 				mb_substr( (string) ( $data['reason'] ?? '' ), 0, 255 ),
-				substr( (string) ( $data['uri'] ?? '' ), 0, 2048 ),
+				substr( Request::redact_uri( (string) ( $data['uri'] ?? '' ) ), 0, 2048 ),
 				substr( (string) ( $data['user_agent'] ?? '' ), 0, 512 ),
 				(int) ( $data['user_id'] ?? 0 ),
 				empty( $data['is_test'] ) ? 0 : 1,

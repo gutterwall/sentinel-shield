@@ -289,10 +289,10 @@ final class BlockRepository {
 			$where[]  = '(expires_at IS NULL OR expires_at > %s)';
 			$params[] = gmdate( 'Y-m-d H:i:s' );
 		}
-		$orderby  = in_array( $args['orderby'] ?? '', array( 'created_at', 'expires_at', 'hits', 'label', 'list_type' ), true ) ? (string) $args['orderby'] : 'created_at';
-		$order    = 'ASC' === strtoupper( (string) ( $args['order'] ?? 'DESC' ) ) ? 'ASC' : 'DESC';
-		$per_page = max( 1, min( 1000, (int) ( $args['per_page'] ?? 50 ) ) );
-		$page     = max( 1, (int) ( $args['page'] ?? 1 ) );
+		$orderby   = in_array( $args['orderby'] ?? '', array( 'created_at', 'expires_at', 'hits', 'label', 'list_type' ), true ) ? (string) $args['orderby'] : 'created_at';
+		$order     = 'ASC' === strtoupper( (string) ( $args['order'] ?? 'DESC' ) ) ? 'ASC' : 'DESC';
+		$per_page  = max( 1, min( 1000, (int) ( $args['per_page'] ?? 50 ) ) );
+		$page      = max( 1, (int) ( $args['page'] ?? 1 ) );
 		$where_sql = implode( ' AND ', $where );
 
 		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared -- $where_sql holds only placeholders; ORDER BY values are allowlisted.

@@ -10,9 +10,15 @@ declare(strict_types=1);
 namespace SentinelShield\CLI;
 
 use SentinelShield\Container;
+use SentinelShield\Cron\CronInspector;
+use SentinelShield\Feeds\FeedCatalog;
+use SentinelShield\Feeds\FeedUpdater;
 use SentinelShield\Firewall\Gate;
 use SentinelShield\Firewall\RuleCache;
+use SentinelShield\Lockdown\AdminRegistry;
+use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockout\Unblocker;
+use SentinelShield\Modules\LockdownModule;
 use SentinelShield\Modules\LockoutModule;
 use SentinelShield\Modules\MaintenanceModule;
 use SentinelShield\Net\Cidr;
@@ -65,14 +71,38 @@ final class Command {
 		$rules = $this->c->get( BlockRepository::class );
 		$until = (int) $s->get( 'general.test_mode_until', 0 );
 		$rows  = array(
-			array( 'Key' => 'enabled', 'Value' => $s->get( 'general.enabled' ) ? 'yes' : 'no' ),
-			array( 'Key' => 'emergency_disable_constant', 'Value' => SafetyGuard::emergency_disabled() ? 'SET (blocking off)' : 'not set' ),
-			array( 'Key' => 'test_mode', 'Value' => $s->global_test_mode() ? ( $until ? 'on until ' . wp_date( 'Y-m-d H:i', $until ) : 'on' ) : 'off' ),
-			array( 'Key' => 'test_mode_scope', 'Value' => (string) $s->get( 'general.test_mode_scope' ) ),
-			array( 'Key' => 'proxy_mode', 'Value' => (string) $s->get( 'proxy.mode' ) ),
-			array( 'Key' => 'block_rules_active', 'Value' => (string) $rules->count_active( 'block' ) ),
-			array( 'Key' => 'allow_rules_active', 'Value' => (string) $rules->count_active( 'allow' ) ),
-			array( 'Key' => 'lockout_ladder_seconds', 'Value' => implode( ',', $s->lockout_durations() ) ),
+			array(
+				'Key'   => 'enabled',
+				'Value' => $s->get( 'general.enabled' ) ? 'yes' : 'no',
+			),
+			array(
+				'Key'   => 'emergency_disable_constant',
+				'Value' => SafetyGuard::emergency_disabled() ? 'SET (blocking off)' : 'not set',
+			),
+			array(
+				'Key'   => 'test_mode',
+				'Value' => $s->global_test_mode() ? ( $until ? 'on until ' . wp_date( 'Y-m-d H:i', $until ) : 'on' ) : 'off',
+			),
+			array(
+				'Key'   => 'test_mode_scope',
+				'Value' => (string) $s->get( 'general.test_mode_scope' ),
+			),
+			array(
+				'Key'   => 'proxy_mode',
+				'Value' => (string) $s->get( 'proxy.mode' ),
+			),
+			array(
+				'Key'   => 'block_rules_active',
+				'Value' => (string) $rules->count_active( 'block' ),
+			),
+			array(
+				'Key'   => 'allow_rules_active',
+				'Value' => (string) $rules->count_active( 'allow' ),
+			),
+			array(
+				'Key'   => 'lockout_ladder_seconds',
+				'Value' => implode( ',', $s->lockout_durations() ),
+			),
 		);
 		foreach ( Settings::MODULES as $module ) {
 			$rows[] = array(
@@ -239,7 +269,14 @@ final class Command {
 			$minutes > 0 ? time() + ( $minutes * MINUTE_IN_SECONDS ) : null
 		);
 		$this->c->get( RuleCache::class )->flush();
-		$this->audit( 'rule_added', array( 'id' => $id, 'type' => $type, 'rule' => $cidr->to_string() ) );
+		$this->audit(
+			'rule_added',
+			array(
+				'id'   => $id,
+				'type' => $type,
+				'rule' => $cidr->to_string(),
+			)
+		);
 		WP_CLI::success( sprintf( '%s rule #%d: %s', ucfirst( $type ), $id, $cidr->to_string() ) );
 	}
 
@@ -298,7 +335,13 @@ final class Command {
 			WP_CLI::error( 'Rule not found.' );
 		}
 		$this->c->get( RuleCache::class )->flush();
-		$this->audit( 'rule_removed', array( 'id' => (int) $args[0], 'rule' => $rule['label'] ) );
+		$this->audit(
+			'rule_removed',
+			array(
+				'id'   => (int) $args[0],
+				'rule' => $rule['label'],
+			)
+		);
 		WP_CLI::success( 'Removed rule ' . $rule['label'] );
 	}
 
@@ -459,7 +502,7 @@ final class Command {
 		if ( null === $field ) {
 			WP_CLI::error( "Unknown setting '{$args[0]}'. Run: wp sentinel settings-keys" );
 		}
-		$raw = 'cidr_list' === $field['type'] ? str_replace( array( '\n', ',' ), "\n", $args[1] ) : $args[1];
+		$raw               = 'cidr_list' === $field['type'] ? str_replace( array( '\n', ',' ), "\n", $args[1] ) : $args[1];
 		[ $value, $error ] = SettingsSchema::sanitize_field( $field, $raw );
 		if ( null !== $error ) {
 			WP_CLI::warning( $error );
@@ -589,8 +632,298 @@ final class Command {
 	 */
 	public function flush_cache( array $args, array $assoc_args ): void {
 		unset( $args, $assoc_args );
-		$this->c->get( RuleCache::class )->flush();
+		$cache = $this->c->get( RuleCache::class );
+		$cache->flush();
+		$cache->flush_feeds();
 		WP_CLI::success( 'Rule cache cleared.' );
+	}
+
+	/**
+	 * Lists scheduled WP-Cron tasks with next run, last recorded run and the code they call.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--format=<format>]
+	 * : table, csv, json or yaml.
+	 * ---
+	 * default: table
+	 * ---
+	 *
+	 * [--failed]
+	 * : Only tasks whose last recorded run failed.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp sentinel cron
+	 *     wp sentinel cron --failed --format=json
+	 *
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function cron( array $args, array $assoc_args ): void {
+		unset( $args );
+		$when = static fn( int $t ): string => $t > 0 ? gmdate( 'Y-m-d H:i:s', $t ) . ' UTC' : '';
+		$rows = array();
+		foreach ( CronInspector::events() as $event ) {
+			$run = is_array( $event['run'] ) ? $event['run'] : null;
+			if ( isset( $assoc_args['failed'] ) && ( null === $run || 'ok' === $run['status'] ) ) {
+				continue;
+			}
+			$code = array();
+			foreach ( $event['callbacks'] as $cb ) {
+				$code[] = $cb['name'] . ' [' . $cb['source'] . ']';
+			}
+			$rows[] = array(
+				'hook'      => $event['hook'],
+				'args'      => $event['args'] ? (string) wp_json_encode( $event['args'] ) : '',
+				'repeats'   => $event['recurs'],
+				'next_run'  => $when( (int) $event['next_run'] ) . ( $event['next_run'] < time() - CronInspector::OVERDUE_AFTER ? ' (overdue)' : '' ),
+				'last_run'  => null === $run ? 'not seen yet' : $when( (int) $run['last_start'] ),
+				'status'    => null === $run ? '' : ( 'ok' === $run['status'] ? 'completed' : 'failed: ' . $run['error'] ),
+				'duration'  => null === $run ? '' : $run['duration'] . 's',
+				'callbacks' => $code ? implode( '; ', $code ) : '(none)',
+				'command'   => CronInspector::command( $event['hook'] ),
+			);
+		}
+		WP_CLI\Utils\format_items( (string) ( $assoc_args['format'] ?? 'table' ), $rows, array( 'hook', 'args', 'repeats', 'next_run', 'last_run', 'status', 'duration', 'callbacks', 'command' ) );
+	}
+
+	/**
+	 * Shows the public blocklist feeds and their update status.
+	 *
+	 * Enable a list with: wp sentinel settings-set feeds.lists.<slug> 1
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--format=<format>]
+	 * : table, csv, json or yaml.
+	 * ---
+	 * default: table
+	 * ---
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp sentinel feeds
+	 *     wp sentinel settings-set feeds.lists.spamhaus_drop 1
+	 *
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function feeds( array $args, array $assoc_args ): void {
+		unset( $args );
+		$updater = $this->c->get( FeedUpdater::class );
+		$state   = $updater->state();
+		$enabled = $updater->enabled();
+		$when    = static fn( int $t ): string => $t > 0 ? gmdate( 'Y-m-d H:i', $t ) . ' UTC' : '';
+		$rows    = array();
+		foreach ( FeedCatalog::all() as $slug => $feed ) {
+			$entry  = $state[ $slug ] ?? array();
+			$on     = in_array( $slug, $enabled, true );
+			$rows[] = array(
+				'slug'         => $slug,
+				'name'         => $feed['name'],
+				'enabled'      => $on ? 'yes' : 'no',
+				'terms'        => $feed['terms'],
+				'ranges'       => $on ? (int) ( $entry['count'] ?? 0 ) : '',
+				'last_checked' => $on ? $when( (int) ( $entry['last_check'] ?? 0 ) ) : '',
+				'last_changed' => $on ? $when( (int) ( $entry['last_change'] ?? 0 ) ) : '',
+				'next_check'   => $on ? $when( (int) ( $entry['next_due'] ?? 0 ) ) : '',
+				'error'        => (string) ( $entry['error'] ?? '' ),
+			);
+		}
+		WP_CLI\Utils\format_items( (string) ( $assoc_args['format'] ?? 'table' ), $rows, array( 'slug', 'name', 'enabled', 'terms', 'ranges', 'last_checked', 'last_changed', 'next_check', 'error' ) );
+	}
+
+	/**
+	 * Downloads enabled blocklist feeds now.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [<slug>...]
+	 * : Feeds to update. Default: all enabled feeds.
+	 *
+	 * [--force]
+	 * : Download in full even if the provider reports no change.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp sentinel feeds-update
+	 *     wp sentinel feeds-update spamhaus_drop --force
+	 *
+	 * @subcommand feeds-update
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function feeds_update( array $args, array $assoc_args ): void {
+		$updater = $this->c->get( FeedUpdater::class );
+		$enabled = $updater->enabled();
+		$slugs   = $args ? $args : $enabled;
+		if ( ! $slugs ) {
+			WP_CLI::error( 'No blocklist feeds are enabled. Enable one with: wp sentinel settings-set feeds.lists.<slug> 1' );
+		}
+		$failed = 0;
+		foreach ( $slugs as $slug ) {
+			if ( ! in_array( $slug, $enabled, true ) ) {
+				WP_CLI::warning( "$slug is not an enabled feed; skipped." );
+				++$failed;
+				continue;
+			}
+			$result = $updater->update( $slug, isset( $assoc_args['force'] ) );
+			if ( is_wp_error( $result ) ) {
+				WP_CLI::warning( "$slug: " . $result->get_error_message() );
+				++$failed;
+				continue;
+			}
+			$entry = $updater->state()[ $slug ] ?? array();
+			WP_CLI::log( sprintf( '%s: %d ranges (%d entries skipped as invalid or reserved).', $slug, (int) ( $entry['count'] ?? 0 ), (int) ( $entry['skipped'] ?? 0 ) ) );
+		}
+		if ( $failed ) {
+			WP_CLI::error( "$failed feed(s) failed; previous copies were kept." );
+		}
+		WP_CLI::success( 'Blocklist feeds updated.' );
+	}
+
+	/**
+	 * Scans for the persistence points of the SC WordPress malware. Read-only.
+	 *
+	 * Exits with status 1 when there are critical findings or warnings.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--all]
+	 * : Also list items to review and approved items.
+	 *
+	 * [--format=<format>]
+	 * : table, csv, json or yaml.
+	 * ---
+	 * default: table
+	 * ---
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp sentinel scan
+	 *     wp sentinel scan --all --format=json
+	 *
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function scan( array $args, array $assoc_args ): void {
+		unset( $args );
+		$report = $this->c->get( IntegrityScanner::class )->run();
+		LockdownModule::notify( $this->c, $report, false );
+		$labels = IntegrityScanner::checks();
+		$rows   = array();
+		foreach ( $report['findings'] as $finding ) {
+			if ( ! isset( $assoc_args['all'] ) && ! IntegrityScanner::is_alert( $finding ) ) {
+				continue;
+			}
+			$rows[] = array(
+				'severity' => $finding['severity'],
+				'check'    => $labels[ $finding['check'] ][0] ?? $finding['check'],
+				'title'    => $finding['title'],
+				'detail'   => $finding['detail'],
+				'id'       => $finding['id'],
+			);
+		}
+		$format = (string) ( $assoc_args['format'] ?? 'table' );
+		if ( $rows || 'table' !== $format ) {
+			WP_CLI\Utils\format_items( $format, $rows, array( 'severity', 'check', 'title', 'detail', 'id' ) );
+		}
+		$alerts = count( array_filter( $report['findings'], array( IntegrityScanner::class, 'is_alert' ) ) );
+		if ( $alerts ) {
+			WP_CLI::halt( 1 );
+		}
+		WP_CLI::success( sprintf( 'No critical findings or warnings (%d checks, %.1fs).', count( $labels ), $report['duration'] ) );
+	}
+
+	/**
+	 * Lists administrator accounts found in the database, with hidden and approval status.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--format=<format>]
+	 * : table, csv, json or yaml.
+	 * ---
+	 * default: table
+	 * ---
+	 *
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function admins( array $args, array $assoc_args ): void {
+		unset( $args );
+		$rows = array();
+		foreach ( $this->c->get( AdminRegistry::class )->privileged_users() as $user ) {
+			$rows[] = array(
+				'id'         => $user['id'],
+				'login'      => $user['login'],
+				'email'      => $user['email'],
+				'registered' => $user['registered'],
+				'hidden'     => $user['hidden'] ? 'HIDDEN' : 'no',
+				'approved'   => $user['approved'] ? 'yes' : 'no',
+			);
+		}
+		WP_CLI\Utils\format_items( (string) ( $assoc_args['format'] ?? 'table' ), $rows, array( 'id', 'login', 'email', 'registered', 'hidden', 'approved' ) );
+	}
+
+	/**
+	 * Approves an administrator account for the administrator lock (also the way back in if you are locked out).
+	 *
+	 * ## OPTIONS
+	 *
+	 * <user>
+	 * : User ID, login or email.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp sentinel approve-admin admin
+	 *
+	 * @subcommand approve-admin
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function approve_admin( array $args, array $assoc_args ): void {
+		unset( $assoc_args );
+		$user = $this->find_user( $args[0] );
+		if ( ! AdminRegistry::is_privileged( $user ) ) {
+			WP_CLI::error( "{$user->user_login} is not an administrator." );
+		}
+		$this->c->get( AdminRegistry::class )->approve( $user->ID, 0 );
+		WP_CLI::success( "Approved {$user->user_login} (ID {$user->ID})." );
+	}
+
+	/**
+	 * Withdraws approval from an administrator account.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <user>
+	 * : User ID, login or email.
+	 *
+	 * @subcommand revoke-admin
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function revoke_admin( array $args, array $assoc_args ): void {
+		unset( $assoc_args );
+		$user = $this->find_user( $args[0] );
+		if ( ! $this->c->get( AdminRegistry::class )->revoke( $user->ID ) ) {
+			WP_CLI::error( "{$user->user_login} was not approved." );
+		}
+		WP_CLI::success( "Withdrew approval for {$user->user_login}." );
+	}
+
+	/**
+	 * Resolves a user by ID, login or email.
+	 *
+	 * @param string $who Identifier.
+	 */
+	private function find_user( string $who ): \WP_User {
+		$user = get_user_by( is_numeric( $who ) ? 'id' : ( is_email( $who ) ? 'email' : 'login' ), $who );
+		if ( ! $user instanceof \WP_User ) {
+			WP_CLI::error( "User not found: $who" );
+		}
+		return $user;
 	}
 
 	/**

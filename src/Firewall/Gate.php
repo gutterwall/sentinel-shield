@@ -9,10 +9,12 @@ declare(strict_types=1);
 
 namespace SentinelShield\Firewall;
 
+use SentinelShield\Feeds\FeedCatalog;
 use SentinelShield\Http\Request;
 use SentinelShield\Net\IpAddress;
 use SentinelShield\Repository\BlockRepository;
 use SentinelShield\Repository\EventRepository;
+use SentinelShield\Repository\FeedRepository;
 use SentinelShield\Safety\SafetyGuard;
 use SentinelShield\Settings;
 use SentinelShield\Support\Throttle;
@@ -20,26 +22,36 @@ use SentinelShield\Support\Throttle;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Order of checks: emergency/CLI bypass -> server cron exemption -> allowlist -> blocklist.
+ * Order of checks: emergency/CLI bypass -> server cron exemption -> allowlist -> blocklist
+ * -> blocklist feeds (never applied to this server's own IPs).
  * The allowlist always wins, so geo or automatic rules added later can never
  * override an IP the admin explicitly trusts.
  */
 final class Gate {
 
 	/**
+	 * Most blocked/would-block rows logged per minute across all IPs.
+	 */
+	public const LOG_BUDGET = 120;
+
+	/**
 	 * Block decision deferred to `init` so the unlock flow can use pluggable functions.
+	 *
+	 * @var Decision|null
 	 */
 	private ?Decision $deferred = null;
 
 	/**
 	 * Constructor.
 	 *
-	 * @param Settings        $settings Settings.
-	 * @param RuleCache       $rules    Compiled rule sets.
-	 * @param BlockRepository $repo     Rule repository.
-	 * @param EventRepository $events   Event log.
-	 * @param SafetyGuard     $guard    Safety exemptions.
-	 * @param \Closure        $ip       Returns the current client IP.
+	 * @param Settings            $settings Settings.
+	 * @param RuleCache           $rules    Compiled rule sets.
+	 * @param BlockRepository     $repo     Rule repository.
+	 * @param EventRepository     $events   Event log.
+	 * @param SafetyGuard         $guard    Safety exemptions.
+	 * @param \Closure            $ip       Returns the current client IP.
+	 * @param FeedRepository|null $feeds Blocklist feed ranges.
+	 * @param \Closure|null       $ip_is_fallback Returns true when the IP is a trusted proxy's own (unusable forwarding header).
 	 */
 	public function __construct(
 		private Settings $settings,
@@ -47,7 +59,9 @@ final class Gate {
 		private BlockRepository $repo,
 		private EventRepository $events,
 		private SafetyGuard $guard,
-		private \Closure $ip
+		private \Closure $ip,
+		private ?FeedRepository $feeds = null,
+		private ?\Closure $ip_is_fallback = null
 	) {}
 
 	/**
@@ -81,7 +95,43 @@ final class Gate {
 			}
 			return new Decision( Decision::BLOCK, (string) $rule['reason'], 'ip_gate', $rule );
 		}
-		return new Decision( Decision::PASS );
+		return $this->evaluate_feeds( $bin ) ?? new Decision( Decision::PASS );
+	}
+
+	/**
+	 * Blocklist feed check. Several feeds may list the same address; all are named.
+	 *
+	 * @param string $bin Packed address.
+	 */
+	private function evaluate_feeds( string $bin ): ?Decision {
+		if ( null === $this->feeds || ! $this->settings->is_module_enabled( 'feeds' ) ) {
+			return null;
+		}
+		$slugs = FeedCatalog::enabled_slugs( $this->settings );
+		if ( ! $slugs || ! $this->rules->feeds( $slugs )->contains( $bin ) || $this->guard->is_server_ip( $bin ) ) {
+			return null;
+		}
+		$rows = $this->feeds->find_containing( $bin, $slugs );
+		if ( ! $rows ) {
+			$this->rules->flush_feeds();
+			return new Decision( Decision::PASS, 'stale_cache' );
+		}
+		$listed = array_values( array_unique( array_column( $rows, 'feed' ) ) );
+		$names  = array_map( static fn( string $slug ): string => FeedCatalog::NAMES[ $slug ] ?? $slug, $listed );
+		$start  = IpAddress::from_binary( (string) hex2bin( (string) $rows[0]['start_hex'] ) );
+		$reason = 'Blocklist: ' . implode( ', ', $names );
+		return new Decision(
+			Decision::BLOCK,
+			$reason,
+			'ip_gate',
+			array(
+				'id'     => 0,
+				'label'  => $start . '/' . (int) $rows[0]['prefix'],
+				'reason' => $reason,
+				'source' => 'feed',
+				'feeds'  => $listed,
+			)
+		);
 	}
 
 	/**
@@ -103,6 +153,9 @@ final class Gate {
 	 * @param string $source Rule source.
 	 */
 	public function is_test_for_source( string $source ): bool {
+		if ( 'feed' === $source ) {
+			return $this->settings->is_test_mode_chain( 'feeds', 'ip_gate' );
+		}
 		if ( ! $this->settings->is_test_mode( 'ip_gate' ) ) {
 			return false;
 		}
@@ -116,9 +169,12 @@ final class Gate {
 	 * Enforces the decision for the current request. Called while plugins load.
 	 */
 	public function enforce(): void {
-		$ip       = ( $this->ip )();
-		$uri      = Request::uri();
-		$decision = $this->evaluate( $ip, $uri );
+		$ip  = ( $this->ip )();
+		$uri = Request::uri();
+		// A request that fell back to a trusted proxy's own IP is anonymous: it must not
+		// inherit an allowlist entry that covers the proxy (or loopback).
+		$fallback = null !== $this->ip_is_fallback && ( $this->ip_is_fallback )();
+		$decision = $this->evaluate( $ip, $uri, $fallback );
 		if ( ! $decision->is_block() ) {
 			return;
 		}
@@ -129,7 +185,9 @@ final class Gate {
 			$this->repo->increment_hits( (int) $rule['id'] );
 		}
 		$event = $test ? 'would_block' : 'blocked';
-		if ( Throttle::once( 'evt_' . $event . '_' . md5( $ip ), MINUTE_IN_SECONDS ) ) {
+		// One row per IP per minute, and at most LOG_BUDGET rows per minute site-wide,
+		// so an attack (even from many IPs) cannot grow the event table without bound.
+		if ( Throttle::once_within_budget( 'evt_' . $event . '_' . md5( $ip ), MINUTE_IN_SECONDS, 'evt_blocked_all', self::LOG_BUDGET, MINUTE_IN_SECONDS ) ) {
 			$this->events->log(
 				$event,
 				array(

@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace SentinelShield;
 
+use SentinelShield\Feeds\FeedCatalog;
 use SentinelShield\Safety\SafetyGuard;
 
 defined( 'ABSPATH' ) || exit;
@@ -31,7 +32,7 @@ final class Settings {
 	/**
 	 * Module slugs that exist in this build.
 	 */
-	public const MODULES = array( 'ip_gate', 'lockout', 'unlock' );
+	public const MODULES = array( 'ip_gate', 'lockout', 'unlock', 'feeds', 'cron_monitor', 'lockdown' );
 
 	/**
 	 * Memoized merged settings.
@@ -48,7 +49,7 @@ final class Settings {
 	 */
 	public static function defaults(): array {
 		return array(
-			'general' => array(
+			'general'  => array(
 				'enabled'                  => true,
 				'test_mode'                => true,
 				'test_mode_hours'          => 0,
@@ -60,36 +61,62 @@ final class Settings {
 				'admin_bar'                => true,
 				'delete_data_on_uninstall' => false,
 			),
-			'proxy'   => array(
+			'proxy'    => array(
 				'mode'          => 'none',
 				'header'        => 'X-Forwarded-For',
 				'trusted_cidrs' => '',
 				'server_ips'    => '',
 			),
-			'lockout' => array(
+			'lockout'  => array(
 				'step1_minutes'      => 15,
 				'step2_minutes'      => 60,
 				'step3_minutes'      => 1440,
 				'step4_minutes'      => 0,
 				'repeat_window_days' => 7,
 			),
-			'unlock'  => array(
+			'unlock'   => array(
 				'token_ttl_minutes'     => 30,
 				'allow_hours'           => 24,
 				'max_requests_per_hour' => 3,
 			),
-			'modules' => array(
-				'ip_gate' => array(
+			// Every public blocklist is opt-in.
+			'feeds'    => array(
+				'update_hours' => '24',
+				'lists'        => array_fill_keys( array_keys( FeedCatalog::NAMES ), false ),
+			),
+			// Malware lockdown measures are opt-in except the alerts, which change nothing.
+			'lockdown' => array(
+				'disable_file_editor' => false,
+				'block_installs'      => false,
+				'block_php_uploads'   => false,
+				'admin_lock'          => false,
+				'protect_self'        => false,
+				'block_chain_rpc'     => false,
+				'alert_admin_changes' => true,
+				'scan_email'          => true,
+			),
+			'modules'  => array(
+				'ip_gate'      => array(
 					'enabled'   => true,
 					'test_mode' => 'inherit',
 				),
-				'lockout' => array(
+				'lockout'      => array(
 					'enabled'   => true,
 					'test_mode' => 'inherit',
 				),
-				'unlock'  => array(
+				'unlock'       => array(
 					'enabled'   => true,
 					'test_mode' => 'inherit',
+				),
+				'feeds'        => array(
+					'enabled'   => true,
+					'test_mode' => 'inherit',
+				),
+				'cron_monitor' => array(
+					'enabled' => true,
+				),
+				'lockdown'     => array(
+					'enabled' => true,
 				),
 			),
 		);
@@ -272,8 +299,8 @@ final class Settings {
 	 * @return array<string, mixed>
 	 */
 	public static function apply_test_mode_expiry( array $settings ): array {
-		$on    = ! empty( $settings['general']['test_mode'] );
-		$hours = (int) ( $settings['general']['test_mode_hours'] ?? 0 );
+		$on                                     = ! empty( $settings['general']['test_mode'] );
+		$hours                                  = (int) ( $settings['general']['test_mode_hours'] ?? 0 );
 		$settings['general']['test_mode_until'] = ( $on && $hours > 0 ) ? time() + ( $hours * HOUR_IN_SECONDS ) : 0;
 		return $settings;
 	}

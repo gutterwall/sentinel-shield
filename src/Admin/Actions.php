@@ -1,6 +1,10 @@
 <?php
 /**
- * admin-post.php handlers. Every handler checks capability and nonce first.
+ * Handlers for admin-post.php. Every handler checks capability and nonce first.
+ *
+ * phpcs:disable WordPress.Security.NonceVerification -- Each handler calls View::guard()
+ * (current_user_can() + check_admin_referer()) before reading input; WPCS can't see
+ * verification done in a static helper.
  *
  * @package SentinelShield
  */
@@ -10,11 +14,18 @@ declare(strict_types=1);
 namespace SentinelShield\Admin;
 
 use SentinelShield\Container;
+use SentinelShield\Cron\CronControl;
+use SentinelShield\Feeds\FeedCatalog;
+use SentinelShield\Feeds\FeedParser;
+use SentinelShield\Feeds\FeedUpdater;
 use SentinelShield\Firewall\BlockPage;
 use SentinelShield\Firewall\Decision;
 use SentinelShield\Firewall\Gate;
 use SentinelShield\Firewall\RuleCache;
+use SentinelShield\Lockdown\AdminRegistry;
+use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockout\Unblocker;
+use SentinelShield\Modules\LockdownModule;
 use SentinelShield\Modules\LockoutModule;
 use SentinelShield\Modules\MaintenanceModule;
 use SentinelShield\Net\Cidr;
@@ -58,6 +69,9 @@ final class Actions {
 			'tool'               => 'tool',
 			'preview_block'      => 'preview_block',
 			'dismiss_welcome'    => 'dismiss_welcome',
+			'feeds_update'       => 'feeds_update',
+			'cron_control'       => 'cron_control',
+			'lockdown'           => 'lockdown',
 		);
 		foreach ( $map as $action => $method ) {
 			add_action( 'admin_post_sentinel_shield_' . $action, array( $this, $method ) );
@@ -80,7 +94,10 @@ final class Actions {
 		if ( '' === $ip ) {
 			return;
 		}
-		if ( $protection->ensure_allowlisted( $ip, get_current_user_id() ) ) {
+		if ( ! AdminProtection::is_real_client( (array) $this->c->get( 'client_ip_details' ) ) ) {
+			/* translators: %s: IP address. */
+			View::flash( 'warning', sprintf( __( 'Your detected IP %s is a loopback or proxy address, so it was not allowlisted (that would exempt every visitor). Check Settings → IP Detection.', 'sentinel-shield' ), $ip ) );
+		} elseif ( $protection->ensure_allowlisted( $ip, get_current_user_id() ) ) {
 			/* translators: %s: IP address. */
 			View::flash( 'info', sprintf( __( 'Your IP %s was added to the permanent allowlist so you cannot lock yourself out.', 'sentinel-shield' ), $ip ) );
 		}
@@ -111,6 +128,200 @@ final class Actions {
 	}
 
 	/**
+	 * Run now, pause, resume, reschedule or delete one scheduled task.
+	 */
+	public function cron_control(): void {
+		View::guard( 'sentinel_shield_cron_control' );
+		$op       = isset( $_POST['op'] ) ? sanitize_key( wp_unslash( $_POST['op'] ) ) : '';
+		$switched = is_multisite() && get_current_blog_id() !== get_main_site_id();
+		if ( $switched ) {
+			switch_to_blog( get_main_site_id() );
+		}
+		[ $type, $message, $hook ] = $this->cron_op( $op );
+		if ( $switched ) {
+			restore_current_blog();
+		}
+		if ( 'success' === $type ) {
+			$this->audit(
+				'cron_' . $op,
+				array( 'hook' => $hook )
+			);
+		}
+		View::flash( $type, $message );
+		View::redirect( Admin::url( 'sentinel-shield-cron' ) );
+	}
+
+	/**
+	 * Malware lockdown page buttons: scan, approve findings and administrators, log out everyone.
+	 */
+	public function lockdown(): void {
+		View::guard( 'sentinel_shield_lockdown' );
+		$op       = isset( $_POST['op'] ) ? sanitize_key( wp_unslash( $_POST['op'] ) ) : '';
+		$registry = $this->c->get( AdminRegistry::class );
+		$back     = Admin::url( 'sentinel-shield-lockdown' );
+		switch ( $op ) {
+			case 'scan':
+				$report = $this->c->get( IntegrityScanner::class )->run();
+				LockdownModule::notify( $this->c, $report, false );
+				$alerts = count( array_filter( $report['findings'], array( IntegrityScanner::class, 'is_alert' ) ) );
+				$this->audit( 'lockdown_scan' );
+				View::flash(
+					$alerts ? 'warning' : 'success',
+					$alerts
+						/* translators: %d: count. */
+						? sprintf( _n( 'Scan finished: %d item needs attention.', 'Scan finished: %d items need attention.', $alerts, 'sentinel-shield' ), $alerts )
+						: __( 'Scan finished: no critical findings or warnings.', 'sentinel-shield' )
+				);
+				break;
+			case 'approve':
+			case 'unapprove':
+				$id = isset( $_POST['id'] ) ? sanitize_key( wp_unslash( $_POST['id'] ) ) : '';
+				if ( 'approve' === $op ) {
+					$finding = IntegrityScanner::approve( $id, get_current_user_id() );
+					if ( null === $finding ) {
+						View::flash( 'error', __( 'That item is no longer in the scan results. Run the scan again.', 'sentinel-shield' ) );
+						break;
+					}
+					$this->audit( 'lockdown_approve', array( 'title' => $finding['title'] ) );
+					/* translators: %s: finding title. */
+					View::flash( 'success', sprintf( __( 'Approved: %s', 'sentinel-shield' ), $finding['title'] ) );
+				} elseif ( IntegrityScanner::unapprove( $id ) ) {
+					$this->audit( 'lockdown_unapprove', array( 'id' => $id ) );
+					View::flash( 'success', __( 'Approval withdrawn.', 'sentinel-shield' ) );
+				}
+				$back .= '#ss-scan';
+				break;
+			case 'approve_admin':
+			case 'revoke_admin':
+				$user_id = isset( $_POST['user_id'] ) ? absint( $_POST['user_id'] ) : 0;
+				$user    = get_userdata( $user_id );
+				if ( ! $user instanceof \WP_User || ! AdminRegistry::is_privileged( $user ) ) {
+					View::flash( 'error', __( 'That account is not an administrator.', 'sentinel-shield' ) );
+				} elseif ( 'approve_admin' === $op ) {
+					$registry->approve( $user_id, get_current_user_id() );
+					$this->audit( 'lockdown_approve_admin', array( 'user' => $user->user_login ) );
+					/* translators: %s: login. */
+					View::flash( 'success', sprintf( __( 'Approved administrator %s.', 'sentinel-shield' ), $user->user_login ) );
+				} elseif ( get_current_user_id() === $user_id ) {
+					View::flash( 'error', __( 'You cannot withdraw your own approval.', 'sentinel-shield' ) );
+				} else {
+					$registry->revoke( $user_id );
+					$this->audit( 'lockdown_revoke_admin', array( 'user' => $user->user_login ) );
+					/* translators: %s: login. */
+					View::flash( 'success', sprintf( __( 'Withdrew approval for %s.', 'sentinel-shield' ), $user->user_login ) );
+				}
+				$back .= '#ss-admins';
+				break;
+			case 'logout_all':
+				$this->audit( 'lockdown_logout_all' );
+				\WP_Session_Tokens::destroy_all_for_all_users();
+				$back = wp_login_url( $back );
+				break;
+			default:
+				View::flash( 'error', __( 'Unknown action.', 'sentinel-shield' ) );
+		}
+		View::redirect( $back );
+	}
+
+	/**
+	 * Performs one cron action on the current site.
+	 *
+	 * @param string $op Operation.
+	 * @return array{0:string, 1:string, 2:string} Flash type, message, hook.
+	 */
+	private function cron_op( string $op ): array {
+		if ( in_array( $op, array( 'resume', 'forget' ), true ) ) {
+			$key    = isset( $_POST['key'] ) ? substr( (string) wp_unslash( $_POST['key'] ), 0, 300 ) : ''; // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Only used as an exact array key.
+			$paused = CronControl::paused();
+			$hook   = (string) ( $paused[ $key ]['hook'] ?? '' );
+			if ( 'forget' === $op ) {
+				return CronControl::forget( $key )
+					/* translators: %s: hook name. */
+					? array( 'success', sprintf( __( 'Deleted paused task %s.', 'sentinel-shield' ), $hook ), $hook )
+					: array( 'error', __( 'That task is not paused.', 'sentinel-shield' ), $hook );
+			}
+			$result = CronControl::resume( $key );
+			return is_wp_error( $result )
+				? array( 'error', $result->get_error_message(), $hook )
+				/* translators: %s: hook name. */
+				: array( 'success', sprintf( __( 'Resumed %s.', 'sentinel-shield' ), $hook ), $hook );
+		}
+
+		$timestamp = isset( $_POST['timestamp'] ) ? absint( $_POST['timestamp'] ) : 0;
+		$hook      = isset( $_POST['hook'] ) ? substr( (string) wp_unslash( $_POST['hook'] ), 0, 300 ) : ''; // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Only used for an exact lookup of an existing event.
+		$sig       = isset( $_POST['sig'] ) ? sanitize_key( wp_unslash( $_POST['sig'] ) ) : '';
+		$event     = 1 === preg_match( '/^[a-f0-9]{32}$/', $sig ) ? CronControl::find( $timestamp, $hook, $sig ) : null;
+		if ( null === $event ) {
+			return array( 'error', __( 'That task has already run or changed since the page loaded. Check the list again.', 'sentinel-shield' ), $hook );
+		}
+		switch ( $op ) {
+			case 'run':
+				$result = CronControl::run_now( $event );
+				/* translators: %s: hook name. */
+				$done = sprintf( __( '%s was queued to run now. Reload in a few seconds to see the result under "Last run".', 'sentinel-shield' ), $hook );
+				break;
+			case 'pause':
+				$result = CronControl::pause( $event, get_current_user_id() );
+				/* translators: %s: hook name. */
+				$done = sprintf( __( 'Paused %s. Its plugin cannot schedule it again until you resume it.', 'sentinel-shield' ), $hook );
+				break;
+			case 'delete':
+				$result = CronControl::delete( $event );
+				/* translators: %s: hook name. */
+				$done = sprintf( __( 'Deleted %s. If its plugin is still active it may schedule it again; use Pause to stop it for good.', 'sentinel-shield' ), $hook );
+				break;
+			case 'reschedule':
+				$schedule = isset( $_POST['schedule'] ) ? sanitize_key( wp_unslash( $_POST['schedule'] ) ) : '';
+				$schedule = 'once' === $schedule ? '' : $schedule;
+				$next_raw = isset( $_POST['next_run'] ) ? sanitize_text_field( wp_unslash( $_POST['next_run'] ) ) : '';
+				$next     = (int) $event['timestamp'];
+				if ( '' !== $next_raw ) {
+					$parsed = \DateTimeImmutable::createFromFormat( 'Y-m-d\TH:i', $next_raw, wp_timezone() );
+					if ( false === $parsed ) {
+						return array( 'error', __( 'Invalid date and time.', 'sentinel-shield' ), $hook );
+					}
+					$next = $parsed->getTimestamp();
+				}
+				$result = CronControl::reschedule( $event, $schedule, $next );
+				/* translators: 1: hook name, 2: date and time. */
+				$done = sprintf( __( 'Rescheduled %1$s; next run %2$s.', 'sentinel-shield' ), $hook, wp_date( 'Y-m-d H:i', $next ) );
+				break;
+			default:
+				return array( 'error', __( 'Unknown action.', 'sentinel-shield' ), $hook );
+		}
+		return is_wp_error( $result ) ? array( 'error', $result->get_error_message(), $hook ) : array( 'success', $done, $hook );
+	}
+
+	/**
+	 * Downloads one blocklist feed, or all enabled ones, now.
+	 */
+	public function feeds_update(): void {
+		View::guard( 'sentinel_shield_feeds_update' );
+		$back    = Admin::url( 'sentinel-shield-settings', array( 'tab' => 'blocklists' ) );
+		$feed    = isset( $_POST['feed'] ) ? sanitize_key( wp_unslash( $_POST['feed'] ) ) : '';
+		$updater = $this->c->get( FeedUpdater::class );
+		$slugs   = 'all' === $feed ? $updater->enabled() : array_intersect( array( $feed ), $updater->enabled() );
+		if ( ! $slugs ) {
+			View::flash( 'error', __( 'That list is not enabled.', 'sentinel-shield' ) );
+			View::redirect( $back );
+		}
+		$state = array();
+		foreach ( $slugs as $slug ) {
+			$result = $updater->update( $slug );
+			$name   = FeedCatalog::NAMES[ $slug ] ?? $slug;
+			if ( is_wp_error( $result ) ) {
+				View::flash( 'error', $result->get_error_message() );
+				continue;
+			}
+			$state = $updater->state();
+			/* translators: 1: list name, 2: number of ranges. */
+			View::flash( 'success', sprintf( __( '%1$s is up to date: %2$s ranges.', 'sentinel-shield' ), $name, number_format_i18n( (int) ( $state[ $slug ]['count'] ?? 0 ) ) ) );
+		}
+		$this->audit( 'feeds_updated', array( 'feeds' => array_values( $slugs ) ) );
+		View::redirect( $back );
+	}
+
+	/**
 	 * Saves one settings tab.
 	 */
 	public function save_settings(): void {
@@ -121,8 +332,8 @@ final class Actions {
 		// Values are sanitized per field by SettingsSchema::sanitize_field().
 		$input = isset( $_POST['sentinel_shield'] ) && is_array( $_POST['sentinel_shield'] ) ? wp_unslash( $_POST['sentinel_shield'] ) : array(); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
 
-		$settings           = $this->c->get( Settings::class );
-		[ $new, $errors ]   = SettingsSchema::sanitize_tab( $tab, $input, $settings->network_settings() );
+		$settings         = $this->c->get( Settings::class );
+		[ $new, $errors ] = SettingsSchema::sanitize_tab( $tab, $input, $settings->network_settings() );
 		if ( 'general' === $tab ) {
 			$new = Settings::apply_test_mode_expiry( $new );
 		}
@@ -307,10 +518,12 @@ final class Actions {
 		$added    = 0;
 		$skipped  = 0;
 		$line     = 0;
-		while ( false !== ( $row = fgetcsv( $handle ) ) && $line < 10000 ) { // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition
+		$limit    = 10000;
+		while ( false !== ( $row = fgetcsv( $handle ) ) && $line < $limit ) { // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition
 			++$line;
-			$value = trim( ltrim( (string) ( $row[0] ?? '' ), "'" ) );
-			if ( 1 === $line && 'value' === strtolower( $value ) ) {
+			// Plain blocklist files work too: "#"/";" comments and blank lines are ignored, "IP <tab> notes" reads the IP.
+			$value = FeedParser::plain_entry( ltrim( (string) ( $row[0] ?? '' ), "'" ) );
+			if ( null === $value || ( 1 === $line && 'value' === strtolower( $value ) ) ) {
 				continue;
 			}
 			$cidr = Cidr::parse( $value );
@@ -328,8 +541,13 @@ final class Actions {
 			$repo->add( $type, $cidr, sanitize_text_field( ltrim( (string) ( $row[2] ?? '' ), "'" ) ), 'import', $expires, get_current_user_id() );
 			++$added;
 		}
+		$truncated = $line >= $limit && false !== fgets( $handle );
 		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 		$this->c->get( RuleCache::class )->flush();
+		if ( $truncated ) {
+			/* translators: %d: line limit. */
+			View::flash( 'warning', sprintf( __( 'Only the first %d lines were imported. For large public lists, use the Blocklists settings tab instead.', 'sentinel-shield' ), $limit ) );
+		}
 		$this->audit(
 			'rules_imported',
 			array(
@@ -401,8 +619,8 @@ final class Actions {
 
 		switch ( $tool ) {
 			case 'test_mode':
-				$mode = isset( $_POST['mode'] ) ? sanitize_key( wp_unslash( $_POST['mode'] ) ) : '';
-				$all  = $settings->network_settings();
+				$mode                              = isset( $_POST['mode'] ) ? sanitize_key( wp_unslash( $_POST['mode'] ) ) : '';
+				$all                               = $settings->network_settings();
 				$all['general']['test_mode']       = in_array( $mode, array( 'on', 'on24' ), true );
 				$all['general']['test_mode_hours'] = 'on24' === $mode ? 24 : 0;
 				$settings->save_network( Settings::apply_test_mode_expiry( $all ) );
@@ -437,7 +655,8 @@ final class Actions {
 				$headers = isset( $_POST['headers'] ) ? sanitize_textarea_field( wp_unslash( $_POST['headers'] ) ) : '';
 				$mode    = isset( $_POST['mode'] ) ? sanitize_key( wp_unslash( $_POST['mode'] ) ) : '';
 				$server  = array( 'REMOTE_ADDR' => $remote );
-				foreach ( preg_split( '/\R/', $headers ) ?: array() as $line ) {
+				$lines   = preg_split( '/\R/', $headers );
+				foreach ( false === $lines ? array() : $lines as $line ) {
 					$parts = explode( ':', $line, 2 );
 					if ( 2 === count( $parts ) && '' !== trim( $parts[0] ) ) {
 						$server[ 'HTTP_' . strtoupper( str_replace( '-', '_', trim( $parts[0] ) ) ) ] = trim( $parts[1] );

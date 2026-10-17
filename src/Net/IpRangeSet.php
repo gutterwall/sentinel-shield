@@ -145,6 +145,16 @@ final class IpRangeSet {
 	}
 
 	/**
+	 * Merged, sorted [start, end] pairs for one IP version.
+	 *
+	 * @param int $version 4 or 6.
+	 * @return list<array{0:string,1:string}>
+	 */
+	public function pairs( int $version ): array {
+		return $this->ranges[ 4 === $version ? 4 : 6 ];
+	}
+
+	/**
 	 * Number of merged ranges.
 	 */
 	public function count(): int {

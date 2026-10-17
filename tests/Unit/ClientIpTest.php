@@ -117,4 +117,41 @@ final class ClientIpTest extends TestCase {
 		$this->assertSame( 'X-Forwarded-For', $details['source'] );
 		$this->assertSame( '10.0.0.2', $details['remote_addr'] );
 	}
+
+	/**
+	 * Pentest D3: an unusable right-most hop falls back to the proxy and says so.
+	 *
+	 * @dataProvider unusable_headers
+	 */
+	public function test_unusable_header_is_flagged_as_fallback( string $value ): void {
+		$server  = array(
+			'REMOTE_ADDR'          => '10.0.0.5',
+			'HTTP_X_FORWARDED_FOR' => $value,
+		);
+		$details = ( new ClientIp( $server, 'custom', 'X-Forwarded-For', IpRangeSet::from_strings( array( '10.0.0.0/8' ) ) ) )->details();
+		$this->assertSame( '10.0.0.5', $details['ip'] );
+		$this->assertTrue( $details['fallback'] );
+	}
+
+	/**
+	 * @return array<string, array{0:string}>
+	 */
+	public static function unusable_headers(): array {
+		return array(
+			'unknown'       => array( 'unknown' ),
+			'leading zeros' => array( '203.000.113.009' ),
+			'decimal'       => array( '3405803785' ),
+			'trailing junk' => array( '203.0.113.9, unknown' ),
+			'only commas'   => array( ',' ),
+		);
+	}
+
+	public function test_normal_resolution_is_not_fallback(): void {
+		$trusted = IpRangeSet::from_strings( array( '10.0.0.0/8' ) );
+		$ok      = ( new ClientIp( array( 'REMOTE_ADDR' => '10.0.0.5', 'HTTP_X_FORWARDED_FOR' => '198.51.100.7' ), 'custom', 'X-Forwarded-For', $trusted ) )->details();
+		$direct  = ( new ClientIp( array( 'REMOTE_ADDR' => '10.0.0.5' ), 'custom', 'X-Forwarded-For', $trusted ) )->details();
+		$this->assertFalse( $ok['fallback'] );
+		$this->assertSame( '198.51.100.7', $ok['ip'] );
+		$this->assertFalse( $direct['fallback'], 'No header at all (e.g. the proxy itself calling wp-cron) is not a fallback.' );
+	}
 }

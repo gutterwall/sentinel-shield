@@ -11,7 +11,7 @@
         <testsuite name="unit">
             <directory suffix="Test.php">./tests/Unit</directory>
         </testsuite>
-        <!-- Needs the WordPress test suite: WP_TESTS_DIR=/tmp/wordpress-tests-lib vendor/bin/phpunit --testsuite integration -->
+        <!-- Needs the WordPress test suite: WP_TESTS_DIR=/tmp/wordpress-tests-lib composer test:integration -->
         <testsuite name="integration">
             <directory suffix="Test.php">./tests/Integration</directory>
         </testsuite>

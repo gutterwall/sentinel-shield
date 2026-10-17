@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace SentinelShield;
 
+use SentinelShield\Feeds\FeedCatalog;
 use SentinelShield\Net\Cidr;
 use SentinelShield\Net\IpRangeSet;
 
@@ -30,7 +31,10 @@ final class SettingsSchema {
 			'general'      => __( 'General & Test Mode', 'sentinel-shield' ),
 			'ip_detection' => __( 'IP Detection', 'sentinel-shield' ),
 			'lockout'      => __( 'Lockouts & Unlock', 'sentinel-shield' ),
+			'blocklists'   => __( 'Blocklists', 'sentinel-shield' ),
+			'lockdown'     => __( 'Malware Lockdown', 'sentinel-shield' ),
 			'modules'      => __( 'Modules', 'sentinel-shield' ),
+			'docs'         => __( 'Documentation', 'sentinel-shield' ),
 		);
 	}
 
@@ -153,13 +157,18 @@ final class SettingsSchema {
 				'tab'         => 'ip_detection',
 				'type'        => 'header',
 				'label'       => __( 'Client IP header', 'sentinel-shield' ),
-				'help'        => __( 'Used by the load balancer and custom presets, e.g. X-Forwarded-For, X-Real-IP, True-Client-IP or Forwarded. Ignored for Cloudflare and None.', 'sentinel-shield' ),
+				'help'        => __( 'Used by the load balancer and custom presets, e.g. X-Forwarded-For, X-Real-IP, True-Client-IP or Forwarded. Ignored for Cloudflare and None. Your proxy must always set or overwrite this header; if it passes a visitor-supplied value through, visitors can fake their IP. A header the proxy overwrites (such as X-Real-IP from nginx) is safest.', 'sentinel-shield' ),
 				'recommended' => 'X-Forwarded-For',
 			),
 			array(
 				'key'         => 'proxy.trusted_cidrs',
 				'tab'         => 'ip_detection',
 				'type'        => 'cidr_list',
+				// Trusting 0.0.0.0/0 (or similar) would let any visitor choose their IP.
+				'min_prefix'  => array(
+					4 => 8,
+					6 => 16,
+				),
 				'label'       => __( 'Trusted proxy IPs / CIDRs', 'sentinel-shield' ),
 				'help'        => __( 'One per line. IPv4, IPv6 and CIDR ranges allowed; # starts a comment. For the load balancer preset, an empty list trusts private network ranges. For Cloudflare, add any proxy that sits between Cloudflare and this server.', 'sentinel-shield' ),
 				'recommended' => null,
@@ -254,20 +263,114 @@ final class SettingsSchema {
 			),
 		);
 
+		$fields[] = array(
+			'key'         => 'feeds.update_hours',
+			'tab'         => 'blocklists',
+			'type'        => 'select',
+			'options'     => array(
+				'12'  => __( 'Twice a day', 'sentinel-shield' ),
+				'24'  => __( 'Daily', 'sentinel-shield' ),
+				'48'  => __( 'Every 2 days', 'sentinel-shield' ),
+				'168' => __( 'Weekly', 'sentinel-shield' ),
+			),
+			'label'       => __( 'Check for list updates', 'sentinel-shield' ),
+			'help'        => __( 'How often each enabled list is downloaded. Lists whose provider asks for less frequent downloads are never fetched more often than the provider allows. Unchanged lists are not downloaded again.', 'sentinel-shield' ),
+			'recommended' => '24',
+		);
+		foreach ( FeedCatalog::all() as $slug => $feed ) {
+			$fields[] = array(
+				'key'         => "feeds.lists.$slug",
+				'tab'         => 'blocklists',
+				'type'        => 'checkbox',
+				'label'       => (string) $feed['name'],
+				/* translators: 1: description, 2: terms summary, 3: terms URL. */
+				'help'        => sprintf( __( '%1$s Terms: %2$s (%3$s).', 'sentinel-shield' ), (string) $feed['about'], FeedCatalog::terms_label( (string) $feed['terms'] ), (string) $feed['terms_url'] ),
+				'recommended' => 'spamhaus_drop' === $slug ? true : null,
+			);
+		}
+
+		$lockdown = array(
+			'disable_file_editor' => array(
+				__( 'Disable the plugin and theme file editor', 'sentinel-shield' ),
+				__( 'Removes Appearance → Theme File Editor and Plugins → Plugin File Editor for everyone, like DISALLOW_FILE_EDIT. A stolen admin login can then not be used to paste a backdoor into a theme, which is how SC\'s theme copy is often planted.', 'sentinel-shield' ),
+				true,
+			),
+			'block_installs'      => array(
+				__( 'Block installing and uploading plugins and themes', 'sentinel-shield' ),
+				__( 'Nobody can add new plugins or themes from the admin (updates still work). SC installs itself as a fake plugin; turn this off briefly when you need to install something.', 'sentinel-shield' ),
+				null,
+			),
+			'block_php_uploads'   => array(
+				__( 'Block PHP in uploads', 'sentinel-shield' ),
+				__( 'Rejects uploads whose name or content is a script (including double extensions such as shell.php.jpg and .htaccess/.user.ini files) and, on Apache, adds rules to uploads/.htaccess so PHP files there cannot run. On nginx, add the rule shown on the Malware Lockdown page to your server configuration.', 'sentinel-shield' ),
+				true,
+			),
+			'admin_lock'          => array(
+				__( 'Administrator lock', 'sentinel-shield' ),
+				__( 'Only approved administrator accounts keep admin rights; any other account with admin powers (such as one SC writes straight into the database) is treated as having none until approved on the Malware Lockdown page. When first switched on, every administrator shown on the Users screen is approved, hidden ones are not. Recover with: wp sentinel approve-admin <user>.', 'sentinel-shield' ),
+				true,
+			),
+			'protect_self'        => array(
+				__( 'Protect Sentinel Shield from being switched off by code', 'sentinel-shield' ),
+				__( 'SC deactivates and deletes security plugins. With this on, Sentinel Shield can only be deactivated or deleted by an administrator from the Plugins screen, during an update, or with WP-CLI.', 'sentinel-shield' ),
+				true,
+			),
+			'block_chain_rpc'     => array(
+				__( 'Block blockchain command channels', 'sentinel-shield' ),
+				__( 'Stops the site from contacting public Ethereum and BNB Chain RPC gateways and from sending blockchain JSON-RPC calls (eth_call), which SC uses to fetch its commands. Each attempt is logged with the file that made it. Leave off if a plugin on this site legitimately talks to a blockchain.', 'sentinel-shield' ),
+				true,
+			),
+			'alert_admin_changes' => array(
+				__( 'Alert on new administrator accounts', 'sentinel-shield' ),
+				__( 'Logs and emails the site admin address whenever an account becomes an administrator through WordPress. Accounts written directly into the database are caught by the scan instead.', 'sentinel-shield' ),
+				true,
+			),
+			'scan_email'          => array(
+				__( 'Email new malware scan findings', 'sentinel-shield' ),
+				__( 'The scan runs twice a day. New critical findings and warnings are logged; with this on they are also emailed to the site admin address.', 'sentinel-shield' ),
+				true,
+			),
+		);
+		foreach ( $lockdown as $key => $meta ) {
+			$fields[] = array(
+				'key'         => "lockdown.$key",
+				'tab'         => 'lockdown',
+				'type'        => 'checkbox',
+				'label'       => $meta[0],
+				'help'        => $meta[1],
+				'recommended' => $meta[2],
+			);
+		}
+
 		$modules = array(
-			'ip_gate' => array(
+			'ip_gate'      => array(
 				__( 'IP blocklist & allowlist enforcement', 'sentinel-shield' ),
 				__( 'Checks every request against the IP rules early in the WordPress load.', 'sentinel-shield' ),
 				true,
 			),
-			'lockout' => array(
+			'lockout'      => array(
 				__( 'Progressive lockouts', 'sentinel-shield' ),
 				__( 'Turns repeat offenses into escalating temporary blocks. Other modules (login protection, 404 blocking, WAF) use it.', 'sentinel-shield' ),
 				true,
 			),
-			'unlock'  => array(
+			'unlock'       => array(
 				__( 'Emailed unlock links', 'sentinel-shield' ),
 				__( 'Lets a locked-out administrator request a one-time unlock link from the block page.', 'sentinel-shield' ),
+				false,
+			),
+			'feeds'        => array(
+				__( 'Blocklist feeds', 'sentinel-shield' ),
+				__( 'Blocks IPs listed on the public blocklists chosen on the Blocklists tab and keeps them updated. Your allowlist always wins.', 'sentinel-shield' ),
+				true,
+			),
+			'cron_monitor' => array(
+				__( 'Scheduled task monitor', 'sentinel-shield' ),
+				__( 'Records when each WP-Cron task last ran, how long it took and whether it failed, for the Scheduled Tasks page.', 'sentinel-shield' ),
+				false,
+			),
+			'lockdown'     => array(
+				__( 'Malware lockdown', 'sentinel-shield' ),
+				__( 'Applies the measures chosen on the Malware Lockdown tab and runs the twice-daily malware scan. Lockdown measures are not affected by test mode.', 'sentinel-shield' ),
 				false,
 			),
 		);
@@ -342,10 +445,13 @@ final class SettingsSchema {
 			case 'cidr_list':
 				$valid   = array();
 				$invalid = array();
+				$broad   = array();
 				foreach ( IpRangeSet::parse_lines( is_scalar( $value ) ? (string) $value : '' ) as $line ) {
 					$cidr = Cidr::parse( $line );
 					if ( null === $cidr ) {
 						$invalid[] = $line;
+					} elseif ( isset( $field['min_prefix'][ $cidr->version ] ) && $cidr->prefix < (int) $field['min_prefix'][ $cidr->version ] ) {
+						$broad[] = $cidr->to_string();
 					} else {
 						$valid[] = $cidr->to_string();
 					}
@@ -354,6 +460,11 @@ final class SettingsSchema {
 					/* translators: 1: setting label, 2: list of invalid entries. */
 					? sprintf( __( '%1$s: ignored invalid entries: %2$s', 'sentinel-shield' ), $field['label'], implode( ', ', array_map( 'sanitize_text_field', $invalid ) ) )
 					: null;
+				if ( $broad ) {
+					/* translators: 1: setting label, 2: list of ranges. */
+					$broad_error = sprintf( __( '%1$s: ignored ranges that are too broad to trust (anyone inside them could fake their IP): %2$s', 'sentinel-shield' ), $field['label'], implode( ', ', $broad ) );
+					$error       = null === $error ? $broad_error : $error . ' ' . $broad_error;
+				}
 				return array( implode( "\n", array_unique( $valid ) ), $error );
 			default:
 				return array( sanitize_text_field( is_scalar( $value ) ? (string) $value : '' ), null );

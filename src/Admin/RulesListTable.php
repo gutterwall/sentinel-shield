@@ -93,8 +93,8 @@ final class RulesListTable extends \WP_List_Table {
 			'allow' => __( 'Allowed', 'sentinel-shield' ),
 		);
 		foreach ( $labels as $type => $label ) {
-			$count          = $this->repo->count_active( '' === $type ? null : $type );
-			$url            = Admin::url( 'sentinel-shield-rules', '' === $type ? array() : array( 'list_type' => $type ) );
+			$count                                 = $this->repo->count_active( '' === $type ? null : $type );
+			$url                                   = Admin::url( 'sentinel-shield-rules', '' === $type ? array() : array( 'list_type' => $type ) );
 			$views[ '' === $type ? 'all' : $type ] = sprintf( '<a href="%1$s"%2$s>%3$s <span class="count">(%4$d)</span></a>', esc_url( $url ), $current === $type ? ' class="current" aria-current="page"' : '', esc_html( $label ), $count );
 		}
 		return $views;
@@ -105,7 +105,7 @@ final class RulesListTable extends \WP_List_Table {
 	 */
 	public function prepare_items(): void {
 		// phpcs:disable WordPress.Security.NonceVerification.Recommended -- Read-only filters.
-		$per_page = 50;
+		$per_page         = 50;
 		[ $rows, $total ] = $this->repo->query(
 			array(
 				'type'     => isset( $_GET['list_type'] ) ? sanitize_key( wp_unslash( $_GET['list_type'] ) ) : '',
@@ -142,8 +142,8 @@ final class RulesListTable extends \WP_List_Table {
 	 * @param array<string, mixed> $item Row.
 	 */
 	protected function column_label( array $item ): string {
-		$delete = View::action_url( 'delete_rule', array( 'id' => (int) $item['id'] ) );
-		$search = Admin::url( 'sentinel-shield-events', array( 'ip' => strtok( (string) $item['label'], '/' ) ) );
+		$delete  = View::action_url( 'delete_rule', array( 'id' => (int) $item['id'] ) );
+		$search  = Admin::url( 'sentinel-shield-events', array( 'ip' => strtok( (string) $item['label'], '/' ) ) );
 		$actions = array(
 			'delete' => '<a href="' . esc_url( $delete ) . '" data-sentinel-confirm="' . esc_attr__( 'Delete this rule?', 'sentinel-shield' ) . '">' . esc_html__( 'Delete', 'sentinel-shield' ) . '</a>',
 			'events' => '<a href="' . esc_url( $search ) . '">' . esc_html__( 'Events', 'sentinel-shield' ) . '</a>',

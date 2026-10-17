@@ -12,13 +12,21 @@ namespace SentinelShield;
 use SentinelShield\Admin\Admin;
 use SentinelShield\Admin\AdminBar;
 use SentinelShield\CLI\Command;
+use SentinelShield\Cron\CronControl;
+use SentinelShield\Feeds\FeedUpdater;
 use SentinelShield\Firewall\Gate;
 use SentinelShield\Firewall\RuleCache;
 use SentinelShield\Install\Schema;
+use SentinelShield\Lockdown\AdminRegistry;
+use SentinelShield\Lockdown\Hardening;
+use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockout\LockoutService;
 use SentinelShield\Lockout\RepositoryBlockWriter;
 use SentinelShield\Lockout\Unblocker;
+use SentinelShield\Modules\CronMonitorModule;
+use SentinelShield\Modules\FeedsModule;
 use SentinelShield\Modules\IpGateModule;
+use SentinelShield\Modules\LockdownModule;
 use SentinelShield\Modules\LockoutModule;
 use SentinelShield\Modules\MaintenanceModule;
 use SentinelShield\Modules\ModuleInterface;
@@ -27,6 +35,7 @@ use SentinelShield\Net\ClientIpFactory;
 use SentinelShield\Net\CloudflareRanges;
 use SentinelShield\Repository\BlockRepository;
 use SentinelShield\Repository\EventRepository;
+use SentinelShield\Repository\FeedRepository;
 use SentinelShield\Repository\OffenseRepository;
 use SentinelShield\Repository\TokenRepository;
 use SentinelShield\Safety\AdminProtection;
@@ -43,16 +52,22 @@ final class Plugin {
 
 	/**
 	 * Instance.
+	 *
+	 * @var Plugin|null
 	 */
 	private static ?Plugin $instance = null;
 
 	/**
 	 * Services.
+	 *
+	 * @var Container
 	 */
 	private Container $container;
 
 	/**
 	 * Boot guard.
+	 *
+	 * @var bool
 	 */
 	private bool $booted = false;
 
@@ -109,13 +124,38 @@ final class Plugin {
 		$c->set( OffenseRepository::class, static fn(): OffenseRepository => new OffenseRepository( $GLOBALS['wpdb'] ) );
 		$c->set( TokenRepository::class, static fn(): TokenRepository => new TokenRepository( $GLOBALS['wpdb'] ) );
 		$c->set( CloudflareRanges::class, static fn(): CloudflareRanges => new CloudflareRanges() );
-		$c->set( RuleCache::class, static fn( Container $c ): RuleCache => new RuleCache( $c->get( BlockRepository::class ) ) );
+		$c->set( FeedRepository::class, static fn(): FeedRepository => new FeedRepository( $GLOBALS['wpdb'] ) );
+		$c->set( AdminRegistry::class, static fn(): AdminRegistry => new AdminRegistry() );
+		$c->set(
+			IntegrityScanner::class,
+			static fn( Container $c ): IntegrityScanner => new IntegrityScanner( $c->get( AdminRegistry::class ), $c->get( EventRepository::class ), $c->get( Settings::class ) )
+		);
+		$c->set(
+			Hardening::class,
+			static fn( Container $c ): Hardening => new Hardening(
+				$c->get( Settings::class ),
+				$c->get( AdminRegistry::class ),
+				$c->get( EventRepository::class ),
+				static fn(): string => (string) $c->get( 'client_ip' )
+			)
+		);
+		$c->set( RuleCache::class, static fn( Container $c ): RuleCache => new RuleCache( $c->get( BlockRepository::class ), $c->get( FeedRepository::class ) ) );
+		$c->set(
+			FeedUpdater::class,
+			static fn( Container $c ): FeedUpdater => new FeedUpdater(
+				$c->get( Settings::class ),
+				$c->get( FeedRepository::class ),
+				$c->get( RuleCache::class ),
+				$c->get( EventRepository::class )
+			)
+		);
 		$c->set(
 			ClientIpFactory::class,
 			static fn( Container $c ): ClientIpFactory => new ClientIpFactory( $c->get( Settings::class ), $c->get( CloudflareRanges::class ) )
 		);
 		// The current request's client IP, resolved once.
-		$c->set( 'client_ip', static fn( Container $c ): string => $c->get( ClientIpFactory::class )->from_globals()->resolve() );
+		$c->set( 'client_ip_details', static fn( Container $c ): array => $c->get( ClientIpFactory::class )->from_globals()->details() );
+		$c->set( 'client_ip', static fn( Container $c ): string => (string) $c->get( 'client_ip_details' )['ip'] );
 		$c->set(
 			SafetyGuard::class,
 			static fn( Container $c ): SafetyGuard => new SafetyGuard( $c->get( Settings::class ), $_SERVER ) // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- Values are validated as IPs.
@@ -128,7 +168,9 @@ final class Plugin {
 				$c->get( BlockRepository::class ),
 				$c->get( EventRepository::class ),
 				$c->get( SafetyGuard::class ),
-				static fn(): string => (string) $c->get( 'client_ip' )
+				static fn(): string => (string) $c->get( 'client_ip' ),
+				$c->get( FeedRepository::class ),
+				static fn(): bool => (bool) $c->get( 'client_ip_details' )['fallback']
 			)
 		);
 		$c->set(
@@ -190,12 +232,18 @@ final class Plugin {
 		Schema::maybe_upgrade();
 
 		$this->modules = array(
-			'ip_gate' => new IpGateModule(),
-			'lockout' => new LockoutModule(),
-			'unlock'  => new UnlockModule(),
+			'ip_gate'      => new IpGateModule(),
+			'lockout'      => new LockoutModule(),
+			'unlock'       => new UnlockModule(),
+			'feeds'        => new FeedsModule(),
+			'cron_monitor' => new CronMonitorModule(),
+			'lockdown'     => new LockdownModule(),
 		);
 
 		( new MaintenanceModule() )->register( $this->container );
+		CronControl::register_guard();
+		$container = $this->container;
+		add_action( 'sentinel_shield_settings_saved', static fn() => LockdownModule::on_settings_saved( $container ) );
 
 		$settings = $this->container->get( Settings::class );
 		if ( $settings->is_enabled() ) {

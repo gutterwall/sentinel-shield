@@ -94,8 +94,8 @@ final class RulesPage {
 		echo '<div class="ss-card"><h2>' . esc_html__( 'Import / export', 'sentinel-shield' ) . '</h2>';
 		echo '<p><a class="button" href="' . esc_url( View::action_url( 'export_rules' ) ) . '">' . esc_html__( 'Export CSV', 'sentinel-shield' ) . '</a></p>';
 		View::form_open( 'import_rules', true );
-		echo '<p><label for="ss-csv">' . esc_html__( 'Import CSV', 'sentinel-shield' ) . '</label><br><input type="file" id="ss-csv" name="sentinel_csv" accept=".csv,text/csv" required></p>';
-		echo '<p class="description">' . esc_html__( 'Columns: value, list_type (block|allow), reason, expires_at (UTC, empty = never). Files exported here can be re-imported. Rows that would block your own IP are skipped.', 'sentinel-shield' ) . '</p>';
+		echo '<p><label for="ss-csv">' . esc_html__( 'Import CSV or text list', 'sentinel-shield' ) . '</label><br><input type="file" id="ss-csv" name="sentinel_csv" accept=".csv,.txt,.netset,.ipset,text/csv,text/plain" required></p>';
+		echo '<p class="description">' . esc_html__( 'Columns: value, list_type (block|allow), reason, expires_at (UTC, empty = never). Files exported here can be re-imported. A plain list with one IP or CIDR per line ("#" comments allowed) is imported as block rules. Up to 10,000 lines; rows that would block your own IP are skipped. Public blocklists can be kept up to date automatically on Settings → Blocklists.', 'sentinel-shield' ) . '</p>';
 		submit_button( __( 'Import', 'sentinel-shield' ), 'secondary', 'submit', false );
 		echo '</form></div>';
 		echo '</div>';

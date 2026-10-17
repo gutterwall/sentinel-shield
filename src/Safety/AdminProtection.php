@@ -13,6 +13,7 @@ use SentinelShield\Firewall\Decision;
 use SentinelShield\Firewall\Gate;
 use SentinelShield\Firewall\RuleCache;
 use SentinelShield\Net\Cidr;
+use SentinelShield\Net\IpAddress;
 use SentinelShield\Repository\BlockRepository;
 use SentinelShield\Repository\EventRepository;
 
@@ -80,6 +81,25 @@ final class AdminProtection {
 	public function self_check( string $ip ): ?Decision {
 		$decision = $this->gate->evaluate( $ip, '/wp-admin/', true, true );
 		return $decision->is_block() ? $decision : null;
+	}
+
+	/**
+	 * Whether detected request details identify a real client worth auto-allowlisting.
+	 *
+	 * Loopback and trusted-proxy addresses are what a misconfigured proxy setup reports
+	 * for every visitor; allowlisting them would exempt the whole site.
+	 *
+	 * @param array<string, mixed> $details ClientIp::details() output.
+	 */
+	public static function is_real_client( array $details ): bool {
+		$bin = IpAddress::to_binary( (string) ( $details['ip'] ?? '' ) );
+		if ( null === $bin || ! empty( $details['fallback'] ) ) {
+			return false;
+		}
+		if ( ! empty( $details['remote_trusted'] ) && $details['ip'] === $details['remote_addr'] ) {
+			return false;
+		}
+		return ! Cidr::parse( '127.0.0.0/8' )->contains( $bin ) && '::1' !== IpAddress::from_binary( $bin );
 	}
 
 	/**

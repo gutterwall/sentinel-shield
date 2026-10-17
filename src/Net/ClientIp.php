@@ -46,7 +46,12 @@ final class ClientIp {
 	/**
 	 * Resolution details for diagnostics.
 	 *
-	 * @return array{ip:string, remote_addr:string, remote_trusted:bool, mode:string, header:string, header_value:string, source:string}
+	 * "fallback" is true when a trusted proxy sent a forwarding header that could not
+	 * be used (e.g. "unknown" or a malformed address), so "ip" is the proxy's own
+	 * address rather than the visitor's. Such requests must not inherit the proxy's
+	 * allowlist status.
+	 *
+	 * @return array{ip:string, remote_addr:string, remote_trusted:bool, mode:string, header:string, header_value:string, source:string, fallback:bool}
 	 */
 	public function details(): array {
 		$remote = IpAddress::normalize( (string) ( $this->server['REMOTE_ADDR'] ?? '' ) ) ?? '';
@@ -58,6 +63,7 @@ final class ClientIp {
 			'header'         => $this->header,
 			'header_value'   => '',
 			'source'         => 'REMOTE_ADDR',
+			'fallback'       => false,
 		);
 		if ( '' === $remote || 'none' === $this->mode || '' === $this->header ) {
 			return $result;
@@ -77,6 +83,7 @@ final class ClientIp {
 			$bin = IpAddress::to_binary( $hops[ $i ] );
 			if ( null === $bin ) {
 				// Malformed chain: do not guess, fall back to the direct peer.
+				$result['fallback'] = true;
 				return $result;
 			}
 			if ( ! $this->trusted->contains( $bin ) ) {
@@ -85,6 +92,9 @@ final class ClientIp {
 				return $result;
 			}
 			$leftmost = $bin;
+		}
+		if ( ! $hops ) {
+			$result['fallback'] = true;
 		}
 		if ( null !== $leftmost ) {
 			// Every hop is a trusted proxy; the leftmost is the closest thing to a client.

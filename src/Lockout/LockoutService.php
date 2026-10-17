@@ -22,6 +22,8 @@ final class LockoutService {
 
 	/**
 	 * Time source.
+	 *
+	 * @var \Closure
 	 */
 	private \Closure $clock;
 

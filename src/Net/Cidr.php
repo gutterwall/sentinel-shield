@@ -103,7 +103,7 @@ final class Cidr {
 	 * True when the range is a single host.
 	 */
 	public function is_single(): bool {
-		return $this->prefix === ( 4 === $this->version ? 32 : 128 );
+		return ( 4 === $this->version ? 32 : 128 ) === $this->prefix;
 	}
 
 	/**

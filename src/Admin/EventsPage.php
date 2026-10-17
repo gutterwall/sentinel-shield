@@ -33,14 +33,22 @@ final class EventsPage {
 	 */
 	public static function types(): array {
 		return array(
-			'blocked'          => __( 'Blocked', 'sentinel-shield' ),
-			'would_block'      => __( 'Would block (test mode)', 'sentinel-shield' ),
-			'lockout'          => __( 'Lockout', 'sentinel-shield' ),
-			'would_lockout'    => __( 'Would lock out (test mode)', 'sentinel-shield' ),
-			'unlock'           => __( 'Unlocked', 'sentinel-shield' ),
-			'unlock_requested' => __( 'Unlock link sent', 'sentinel-shield' ),
-			'allowlist_auto'   => __( 'Admin IP auto-allowlisted', 'sentinel-shield' ),
-			'config_change'    => __( 'Configuration change', 'sentinel-shield' ),
+			'blocked'               => __( 'Blocked', 'sentinel-shield' ),
+			'would_block'           => __( 'Would block (test mode)', 'sentinel-shield' ),
+			'lockout'               => __( 'Lockout', 'sentinel-shield' ),
+			'would_lockout'         => __( 'Would lock out (test mode)', 'sentinel-shield' ),
+			'unlock'                => __( 'Unlocked', 'sentinel-shield' ),
+			'unlock_requested'      => __( 'Unlock link sent', 'sentinel-shield' ),
+			'allowlist_auto'        => __( 'Admin IP auto-allowlisted', 'sentinel-shield' ),
+			'config_change'         => __( 'Configuration change', 'sentinel-shield' ),
+			'feed_updated'          => __( 'Blocklist updated', 'sentinel-shield' ),
+			'feed_error'            => __( 'Blocklist update failed', 'sentinel-shield' ),
+			'malware_finding'       => __( 'Malware scan finding', 'sentinel-shield' ),
+			'lockdown_outbound'     => __( 'Blockchain request blocked', 'sentinel-shield' ),
+			'lockdown_upload'       => __( 'Upload blocked', 'sentinel-shield' ),
+			'lockdown_tamper'       => __( 'Deactivation attempt blocked', 'sentinel-shield' ),
+			'lockdown_admin_added'  => __( 'New administrator', 'sentinel-shield' ),
+			'lockdown_admin_denied' => __( 'Unapproved administrator denied', 'sentinel-shield' ),
 		);
 	}
 

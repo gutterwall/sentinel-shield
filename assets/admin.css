@@ -23,3 +23,25 @@
 .ss-badge-rec{background:#fcf0c3;color:#6b4a00}
 .ss-badge-ok{background:#d1f0d9;color:#0a5c1f}
 .ss-badge-ok::before{content:"\2713  "}
+.ss-scroll{overflow-x:auto;max-width:100%}
+.ss-error{color:#b32d2e}
+.ss-wrap .ss-cron td{vertical-align:top}
+.ss-wrap .ss-hook{font-weight:600;word-break:break-all}
+.ss-wrap .ss-callbacks{margin:6px 0 0;padding:0;list-style:none}
+.ss-wrap .ss-callbacks li{margin:4px 0}
+.ss-wrap .ss-cmd{display:flex;gap:6px;align-items:flex-start;margin:2px 0 6px}
+.ss-wrap .ss-cmd code{user-select:all;word-break:break-all}
+.ss-wrap .ss-controls form{display:inline-block;margin:0 4px 4px 0}
+.ss-wrap .ss-controls{min-width:190px}
+.ss-wrap .ss-resched summary{cursor:pointer;color:#2271b1;margin-top:4px}
+.ss-wrap .ss-resched form{display:block;margin-top:6px}
+
+/* Malware Lockdown */
+.ss-scan td { vertical-align: top; }
+.ss-finding { border-left: 3px solid #dcdcde; padding: 2px 0 4px 10px; margin: 0 0 10px; }
+.ss-finding p { margin: 4px 0; }
+.ss-finding form { margin: 4px 0 0; }
+.ss-list li { margin-bottom: 6px; }
+.ss-wrap .ss-docs p,.ss-wrap .ss-docs li{max-width:860px}
+.ss-wrap .ss-docs h3{margin:1.4em 0 .4em}
+.ss-wrap .ss-docs td{vertical-align:top}

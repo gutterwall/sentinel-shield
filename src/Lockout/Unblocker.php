@@ -57,7 +57,7 @@ final class Unblocker {
 		$removed = 0;
 		$ranges  = array();
 		foreach ( $this->repo->find_containing( 'block', $cidr->start ) as $row ) {
-			if ( (int) $row['prefix'] === ( 4 === $cidr->version ? 32 : 128 ) || $include_ranges ) {
+			if ( $include_ranges || ( 4 === $cidr->version ? 32 : 128 ) === (int) $row['prefix'] ) {
 				$removed += $this->repo->delete( (int) $row['id'] ) ? 1 : 0;
 			} else {
 				$ranges[] = (string) $row['label'];

@@ -1,0 +1,16 @@
+# Files left out of release zips by wp dist-archive. bin/build.sh uses the
+# export-ignore entries in .gitattributes instead; keep the two lists in step.
+/.git
+/.gitattributes
+/.gitignore
+/.distignore
+/.phpunit.result.cache
+/composer.json
+/composer.lock
+/phpunit.xml.dist
+/phpcs.xml.dist
+/bin
+/dist
+/docs
+/tests
+/vendor

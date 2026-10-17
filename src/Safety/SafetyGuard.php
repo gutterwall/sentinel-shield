@@ -22,6 +22,8 @@ final class SafetyGuard {
 
 	/**
 	 * Lazily built server address set.
+	 *
+	 * @var IpRangeSet|null
 	 */
 	private ?IpRangeSet $server_set = null;
 
@@ -34,7 +36,7 @@ final class SafetyGuard {
 	public function __construct( private Settings $settings, private array $server ) {}
 
 	/**
-	 * define( 'SENTINEL_SHIELD_DISABLE', true ) in wp-config.php disables all blocking.
+	 * Defining SENTINEL_SHIELD_DISABLE as true in wp-config.php disables all blocking.
 	 */
 	public static function emergency_disabled(): bool {
 		return defined( 'SENTINEL_SHIELD_DISABLE' ) && SENTINEL_SHIELD_DISABLE;

@@ -27,7 +27,9 @@
         "lint": "phpcs",
         "lint:fix": "phpcbf",
         "test": "phpunit",
-        "test:integration": "phpunit --testsuite integration"
+        "test:integration": "phpunit --testsuite integration",
+        "docs": "php bin/readme-settings.php --write",
+        "build": "bin/build.sh"
     },
     "config": {
         "allow-plugins": {

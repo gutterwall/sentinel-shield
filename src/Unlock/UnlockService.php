@@ -127,7 +127,7 @@ final class UnlockService {
 			$subject = sprintf( __( '[%s] Your Sentinel Shield unlock link', 'sentinel-shield' ), $site );
 			$body    = sprintf(
 				/* translators: 1: IP address, 2: unlock URL, 3: minutes. */
-				__( "Someone (hopefully you) asked to unlock the IP address %1\$s on this site.\n\nOpen this link to remove the block and temporarily allowlist your IP:\n%2\$s\n\nThe link works once and expires in %3\$d minutes. If you did not request this, ignore this email; nothing will change.", 'sentinel-shield' ),
+				__( "Someone (hopefully you) asked to unlock the IP address %1\$s on this site.\n\nOpen this link to review and confirm the unlock:\n%2\$s\n\nThe link works once and expires in %3\$d minutes. If you did not request this, ignore this email; nothing will change.", 'sentinel-shield' ),
 				$ip,
 				$url,
 				$ttl
@@ -143,8 +143,10 @@ final class UnlockService {
 	 * @param string $token Token from the URL.
 	 */
 	private function handle_link( string $token ): void {
-		$token = strtolower( $token );
-		$row   = preg_match( '/^[a-f0-9]{64}$/', $token ) ? $this->tokens->consume( $token ) : null;
+		$token   = strtolower( $token );
+		$valid   = 1 === preg_match( '/^[a-f0-9]{64}$/', $token );
+		$confirm = isset( $_POST['sentinel_unlock_confirm'] ); // phpcs:ignore WordPress.Security.NonceVerification.Missing -- The secret link token authenticates the request.
+		$row     = $valid ? ( $confirm ? $this->tokens->consume( $token ) : $this->tokens->peek( $token ) ) : null;
 		if ( null === $row ) {
 			$message  = __( 'This unlock link is invalid, has already been used, or has expired.', 'sentinel-shield' );
 			$deferred = $this->gate->deferred();
@@ -153,9 +155,26 @@ final class UnlockService {
 			}
 			wp_die( esc_html( $message ), esc_html__( 'Unlock failed', 'sentinel-shield' ), array( 'response' => 403 ) );
 		}
+		$current   = ( $this->ip )();
+		$requester = (string) $row['ip_text'];
+		if ( ! $confirm ) {
+			// Opening the link only shows what would happen; a POST is needed to act.
+			if ( ! headers_sent() ) {
+				status_header( 200 );
+				nocache_headers();
+				header( 'Content-Type: text/html; charset=utf-8' );
+				header( 'X-Robots-Tag: noindex, nofollow' );
+				header( 'Referrer-Policy: no-referrer' );
+			}
+			echo BlockPage::unlock_confirm( $requester, $current, add_query_arg( 'sentinel_unlock', $token, home_url( '/' ) ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- unlock_confirm() escapes every value.
+			exit;
+		}
 		$hours = (int) $this->settings->get( 'unlock.allow_hours', 24 );
-		$ips   = array_unique( array_filter( array( ( $this->ip )(), (string) $row['ip_text'] ) ) );
-		foreach ( $ips as $ip ) {
+		$ips   = array( $current );
+		if ( $requester === $current || ! empty( $_POST['sentinel_unlock_requester'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Missing -- See above.
+			$ips[] = $requester;
+		}
+		foreach ( array_unique( array_filter( $ips ) ) as $ip ) {
 			$this->unblocker->unblock( $ip, false, $hours, (int) $row['user_id'], 'email_link' );
 		}
 		wp_safe_redirect( add_query_arg( 'sentinel_unlocked', '1', wp_login_url() ) );

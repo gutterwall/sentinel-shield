@@ -93,6 +93,33 @@ final class BlockPage {
 	}
 
 	/**
+	 * Confirmation step for an unlock link. Opening the link changes nothing, so
+	 * email scanners that prefetch links cannot use it up, and the administrator
+	 * sees which address asked for the unlock before agreeing to it.
+	 *
+	 * @param string $requested_ip IP that asked for the link.
+	 * @param string $current_ip   IP opening the link now.
+	 * @param string $action       Form action URL (the link itself).
+	 */
+	public static function unlock_confirm( string $requested_ip, string $current_ip, string $action ): string {
+		$same  = '' === $requested_ip || $requested_ip === $current_ip;
+		$body  = '<h1>' . esc_html__( 'Confirm unlock', 'sentinel-shield' ) . '</h1>';
+		$body .= '<dl><dt>' . esc_html__( 'Your current IP address', 'sentinel-shield' ) . '</dt><dd><code>' . esc_html( $current_ip ) . '</code></dd>';
+		$body .= '<dt>' . esc_html__( 'Unlock was requested from', 'sentinel-shield' ) . '</dt><dd><code>' . esc_html( '' === $requested_ip ? '—' : $requested_ip ) . '</code></dd></dl>';
+		$body .= '<form method="post" action="' . esc_url( $action ) . '"><input type="hidden" name="sentinel_unlock_confirm" value="1">';
+		if ( $same ) {
+			$body .= '<p>' . esc_html__( 'Your address will be unblocked and temporarily allowlisted.', 'sentinel-shield' ) . '</p>';
+		} else {
+			$body .= '<p>' . esc_html__( 'Your current address will be unblocked and temporarily allowlisted.', 'sentinel-shield' ) . '</p>';
+			$body .= '<p><label><input type="checkbox" name="sentinel_unlock_requester" value="1"> ';
+			/* translators: %s: IP address. */
+			$body .= esc_html( sprintf( __( 'Also unblock %s, the address that asked for this link. Only tick this if you recognise it as your own (for example your computer, while you are reading this on your phone). If you did not ask for an unlock, leave it unticked: someone else may have.', 'sentinel-shield' ), $requested_ip ) ) . '</label></p>';
+		}
+		$body .= '<button type="submit">' . esc_html__( 'Unlock', 'sentinel-shield' ) . '</button></form>';
+		return self::wrap( esc_html__( 'Confirm unlock', 'sentinel-shield' ), $body );
+	}
+
+	/**
 	 * Wraps body HTML in a minimal document.
 	 *
 	 * @param string $title Escaped title.

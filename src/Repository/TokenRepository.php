@@ -55,6 +55,25 @@ final class TokenRepository {
 	}
 
 	/**
+	 * A valid, unused token's row without consuming it (for the confirmation page).
+	 *
+	 * @param string $token Plaintext token.
+	 * @return array<string, mixed>|null
+	 */
+	public function peek( string $token ): ?array {
+		$row = $this->db->get_row(
+			$this->db->prepare(
+				'SELECT id, user_id, ip_text, created_at, expires_at, used_at FROM %i WHERE token_hash = %s AND used_at IS NULL AND expires_at > %s',
+				$this->table(),
+				hash( 'sha256', $token ),
+				gmdate( 'Y-m-d H:i:s' )
+			),
+			ARRAY_A
+		);
+		return is_array( $row ) ? $row : null;
+	}
+
+	/**
 	 * Atomically marks a valid, unused token as used and returns its row.
 	 *
 	 * @param string $token Plaintext token.

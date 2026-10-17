@@ -25,6 +25,15 @@ final class Request {
 	}
 
 	/**
+	 * URI with secret query values (unlock tokens) masked, safe to store in logs.
+	 *
+	 * @param string $uri Request URI.
+	 */
+	public static function redact_uri( string $uri ): string {
+		return (string) preg_replace( '/([?&]sentinel_unlock=)[^&#]*/i', '$1[redacted]', $uri );
+	}
+
+	/**
 	 * URI path only.
 	 */
 	public static function path(): string {

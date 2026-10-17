@@ -1,41 +1,174 @@
 === Sentinel Shield ===
 Contributors: sentinelshield
-Tags: security, firewall, brute force, ip blocking, lockout
+Tags: security, firewall, malware, ip blocking, lockout
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.1.0
+Stable tag: 0.2.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Self-hosted firewall, IP blocklists, progressive lockouts and hardening. No paid cloud service required.
+Self-hosted firewall, IP blocklists, progressive lockouts and malware lockdown. No paid cloud service required.
 
 == Description ==
 
 Sentinel Shield is a self-hosted security plugin. Everything runs on your server; optional external integrations are off by default.
 
-**This release (0.1.0) contains the Phase 1 foundation:**
+**Firewall and IP rules**
 
 * Spoof-resistant client IP detection. Uses REMOTE_ADDR by default and reads forwarding headers only from trusted proxies. Presets: None, Cloudflare (ranges auto-updated weekly), load balancer with custom header, custom CIDR list. The settings page shows the detected IP and raw headers.
-* IP allowlist and blocklist for single IPs, CIDR ranges and IPv6, with reason, source, created/expiry time and hit counts. CSV import/export.
-* Progressive lockout engine (for example 15 min → 1 h → 24 h → permanent) used by upcoming modules.
-* Lockout safety: the admin's IP is auto-allowlisted on activation and every settings save, a warning appears if your own IP matches a block rule, rules that would block your own IP are refused, `SENTINEL_SHIELD_DISABLE` emergency constant, `wp sentinel unblock <ip>`, emailed one-time unlock links, and wp-cron.php from the server plus all WP-CLI requests are never blocked.
-* Test mode everywhere: global log-only mode with optional auto-expiry, per-module overrides, scope choice (all blocks or automatic only), a decision simulator, an IP resolution simulator, a lockout tester, a block page preview and a test unlock email.
-* Security events log, dashboard and admin bar counter.
-* Multisite: network-wide rules and settings; per-site overrides for the block page.
-* WP-CLI: `wp sentinel status|check|resolve-ip|block|allow|unblock|remove|list|lockout|test-mode|settings-get|settings-set|settings-keys|settings-export|settings-import|cloudflare-update|flush-cache|prune|unlock-link|events`.
+* IP allowlist and blocklist for single IPs, CIDR ranges and IPv6, with reason, source, created/expiry time and hit counts. CSV and plain-text import, CSV export.
+* Public blocklist feeds (all opt-in, one checkbox each): Spamhaus DROP, FireHOL Level 1, Emerging Threats compromised hosts, blocklist.de, CINS Army, IPsum, DShield top 20 and Tor exit nodes. Lists combine additively, update on a polite schedule (twice daily to weekly, never more often than the provider allows, conditional requests, random jitter, backoff on errors), never include private/reserved ranges, and never override your allowlist.
+* Progressive lockout engine (for example 15 min → 1 h → 24 h → permanent).
 
-**Roadmap:** login protection and 2FA, 404 flood blocking, GeoIP login restriction, hardening toggles, WP-Cron monitor, WAF (auto_prepend_file), malware and integrity scanner, audit log, alerts and the full dashboard.
+**Malware Lockdown**
+
+Protection against the "SC" WordPress malware (described by Sucuri in September 2026) and similar takeovers, which keep copies of themselves in many places and rebuild each other.
+
+* A read-only malware scan, twice a day and on demand, of every place SC hides: auto_prepend_file loaders in .user.ini / php.ini / .htaccess, the db.php and advanced-cache.php drop-ins, must-use plugins and duplicate plugins, plugins hidden from the Plugins screen, administrators hidden from the Users screen, database triggers, injected theme code, hidden PHP files and ZIP bundles, PHP in uploads, encoded payloads and sc_ options in the database, random scheduled tasks, login-capturing and hiding hooks, shared memory and blockchain traffic. New findings are logged and emailed; known-good items can be approved and are reported again if they change.
+* Opt-in measures: administrator lock (only approved administrators keep admin rights), file editor off, plugin/theme installs off, PHP blocked in uploads, blockchain RPC command channels blocked, protection against being switched off by code, and alerts on new administrators.
+* Malware Lockdown page with the scan, the administrator list (approve and withdraw), "Log out everyone", server configuration checks and the safe cleanup order.
+
+**Monitoring and tools**
+
+* Scheduled Tasks page (WP-Cron monitor): every task with its schedule, next and last run, failures and the PHP error that stopped it, the code it calls and where that code lives. Run now, pause/resume, change schedule and delete. Highlights overdue tasks, tasks with no code and tasks whose code lives in uploads or eval()'d code.
+* Security events log, dashboard and admin bar counter.
+* Test mode everywhere: global log-only mode with optional auto-expiry, per-module overrides, a decision simulator, an IP resolution simulator, a lockout tester, a block page preview and a test unlock email.
+* Documentation tab (Settings → Documentation) with this whole reference, generated from the plugin's own settings, plus the current administrator approvals.
+* Multisite: network-wide rules and settings; per-site overrides for the block page.
+* WP-CLI: `wp sentinel status|check|resolve-ip|block|allow|unblock|remove|list|lockout|test-mode|settings-get|settings-set|settings-keys|settings-export|settings-import|cloudflare-update|cron|feeds|feeds-update|scan|admins|approve-admin|revoke-admin|flush-cache|prune|unlock-link|events`.
+
+**Lockout safety**
+
+The admin's IP is auto-allowlisted on activation from wp-admin and on every settings save, a warning appears if your own IP matches a block rule, rules that would block your own IP are refused, and wp-cron.php from the server plus all WP-CLI requests are never blocked. See "I locked myself out" below for the ways back in.
+
+**Roadmap:** login protection and 2FA, 404 flood blocking, GeoIP login restriction, WAF (auto_prepend_file), file integrity against wordpress.org checksums, audit log and the full dashboard.
 
 == Installation ==
 
-1. Upload the `sentinel-shield` folder to `/wp-content/plugins/` (or install the zip).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.2.0.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
-5. Turn off test mode on Sentinel Shield → Tools & Testing.
+5. Turn off test mode on Settings → General & Test Mode.
+6. Go to Sentinel Shield → Malware Lockdown, run a scan, check the Administrators list, then switch on the lockdown measures you want on Settings → Malware Lockdown.
 
-Developers: run `composer install` for the test and coding-standards tools. The plugin itself has no runtime Composer dependencies in this release.
+Each release zip contains `checksums.sha256` (SHA-256 of every file) and `build.json` (version, git commit and build date). To check an installed copy, run `sha256sum -c checksums.sha256` inside the plugin folder.
+
+Developers: run `composer install` for the test and coding-standards tools, and `bin/build.sh` to build a release zip. The plugin has no runtime Composer dependencies.
+
+== Administrator approvals ==
+
+With the **Administrator lock** on (Settings → Malware Lockdown), only accounts on an approved list keep administrator rights. Any other account with administrator powers is treated as having no capabilities, however it got them. This stops backdoor administrators such as the one SC writes straight into the database and hides from the Users screen.
+
+= Where it is configured =
+
+* Sentinel Shield → Malware Lockdown → Administrators: lists every administrator account read directly from the database, including hidden ones, with Approve and Withdraw approval buttons.
+* WP-CLI: `wp sentinel admins`, `wp sentinel approve-admin <user>`, `wp sentinel revoke-admin <user>` (user ID, login or email).
+* Settings → Documentation shows the current approved list with who approved each account and when.
+
+The list is stored in its own option (`sentinel_shield_admin_approvals`, network-wide on multisite). It is not a settings field, is not included in settings export/import and cannot be changed with `settings-set`, so importing settings never approves accounts. Approving or withdrawing needs full administrator rights (manage_options; manage_network_options on multisite); a locked account cannot approve itself.
+
+= Which accounts count as administrators =
+
+* Single site: the Administrator role, or any account given one of these capabilities directly whatever its role: manage_options, activate_plugins, install_plugins, edit_plugins, edit_files, update_core. Such accounts are flagged "Admin powers without admin role".
+* Multisite: super administrators. Ordinary site administrators are not affected.
+* Accounts are found with a direct database query and compared with what the Users screen shows; accounts missing from the Users screen are flagged "Hidden from Users screen".
+
+= How it behaves =
+
+* **Turning it on:** if no one is approved yet, every administrator the Users screen shows is approved automatically, plus you. Hidden accounts are never approved automatically. Check the list for accounts you do not recognize first.
+* **Empty list:** while no account is approved the lock does nothing, so switching it on (or withdrawing every approval) can never lock out every administrator.
+* **New administrators:** have no rights until approved. Approved administrators see a "waiting for approval" notice, and the site admin email gets a "New administrator account" message saying who made the change and from which IP (if "Alert on new administrator accounts" is on).
+* **Locked accounts:** can log in and see their profile, but every admin screen and capability is refused, including through the REST API, AJAX and XML-RPC. They see a notice explaining how to get approved. Each locked account is logged once an hour as "Unapproved administrator denied".
+* **Withdrawing:** you cannot withdraw your own approval from the admin. Approvals are bound to user ID and login, so an account whose login is changed must be approved again. Removing someone's administrator role does not remove their approval; withdraw it when someone leaves.
+* Approvals and withdrawals are written to the Events log.
+* **Limit:** the list lives in the database. Malware that can write to the database and specifically targets Sentinel Shield could add itself. Keep the twice-daily scan and the new-administrator alerts on; they report hidden administrators, triggers and new admins independently.
+
+== Settings reference ==
+
+Every setting on Sentinel Shield → Settings, with its key (as used by `wp sentinel settings-get` / `settings-set` and exported settings files), default and recommended value. The same reference, with live values, is on Settings → Documentation.
+
+Malware Lockdown measures are not affected by test mode: once switched on, they are enforced.
+
+<!-- settings-reference:start (generated by bin/readme-settings.php; edit src/SettingsSchema.php instead) -->
+
+= Settings → General & Test Mode =
+
+* **Enable protection** (`general.enabled`; default: On; recommended: On). Master switch. When off, no module runs and nothing is blocked or logged. For emergencies you can also add define( 'SENTINEL_SHIELD_DISABLE', true ); to wp-config.php.
+* **Test mode (log only)** (`general.test_mode`; default: On; recommended: Off). Every block decision is recorded as "would block" in the Events log, but the request is allowed and no lockouts are created. Keep this on until you have confirmed IP detection and reviewed the Events log. Turn it off to enforce.
+* **End test mode automatically after (hours)** (`general.test_mode_hours`; default: 0; recommended: 24). Range 0–720. Counted from when you save. 0 keeps test mode on until you turn it off.
+* **Test mode applies to** (`general.test_mode_scope`; default: All blocks, including manual ones; recommended: All blocks, including manual ones). Choices: "All blocks, including manual ones"; "Automatic blocks only (manual blocks are enforced)". "Automatic blocks only" lets you test lockout thresholds while IPs you blocked by hand stay blocked.
+* **Response to blocked visitors** (`general.block_response`; default: 403 Forbidden page (with unlock form for admins); recommended: 403 Forbidden page (with unlock form for admins); per-site on multisite). Choices: "403 Forbidden page (with unlock form for admins)"; "Silent 404 Not Found". A 404 reveals less to attackers but hides the emailed unlock form. Locked-out admins can still use WP-CLI or the wp-config.php constant.
+* **Block page message** (`general.block_message`; default: (empty); recommended: your choice; per-site on multisite). Shown on the 403 page. Leave empty for the default text. Plain text only.
+* **Keep security events for (days)** (`general.event_retention_days`; default: 30; recommended: 30). Range 1–365. Older events are pruned hourly.
+* **Show admin bar indicator** (`general.admin_bar`; default: On; recommended: On; per-site on multisite). Shows blocked requests today and a test mode warning in the toolbar.
+* **Delete all data on uninstall** (`general.delete_data_on_uninstall`; default: Off; recommended: Off). When the plugin is deleted, drop its tables and options. Leave off if you might reinstall.
+
+= Settings → IP Detection =
+
+* **Trusted proxy** (`proxy.mode`; default: None: use REMOTE_ADDR only; recommended: None: use REMOTE_ADDR only). Choices: "None: use REMOTE_ADDR only"; "Cloudflare (CF-Connecting-IP, ranges auto-updated weekly)"; "Load balancer / reverse proxy with a header"; "Custom trusted proxy list". Forwarding headers are only read when the request arrives from a trusted proxy IP; otherwise anyone could fake their IP. Pick "None" unless your site sits behind a proxy or CDN. Compare the "Detected IP" above with your real IP before turning off test mode.
+* **Client IP header** (`proxy.header`; default: X-Forwarded-For; recommended: X-Forwarded-For). Used by the load balancer and custom presets, e.g. X-Forwarded-For, X-Real-IP, True-Client-IP or Forwarded. Ignored for Cloudflare and None. Your proxy must always set or overwrite this header; if it passes a visitor-supplied value through, visitors can fake their IP. A header the proxy overwrites (such as X-Real-IP from nginx) is safest.
+* **Trusted proxy IPs / CIDRs** (`proxy.trusted_cidrs`; default: (empty); recommended: your choice). One per line. IPv4, IPv6 and CIDR ranges allowed; # starts a comment. For the load balancer preset, an empty list trusts private network ranges. For Cloudflare, add any proxy that sits between Cloudflare and this server.
+* **This server's own IPs** (`proxy.server_ips`; default: (empty); recommended: your choice). Requests to wp-cron.php from these IPs are never blocked. Loopback and SERVER_ADDR are always included; add your public IP if loopback requests leave and re-enter through it.
+
+= Settings → Lockouts & Unlock =
+
+* **First lockout (minutes)** (`lockout.step1_minutes`; default: 15; recommended: 15). Range 0–525600. Duration of an IP's first lockout. 0 means permanent and makes later steps unused.
+* **Second lockout (minutes)** (`lockout.step2_minutes`; default: 60; recommended: 60). Range 0–525600. Used when the IP was locked out once before within the repeat window. 0 = permanent.
+* **Third lockout (minutes)** (`lockout.step3_minutes`; default: 1440; recommended: 1440). Range 0–525600. 0 = permanent.
+* **Fourth and later lockouts (minutes)** (`lockout.step4_minutes`; default: 0; recommended: 0). Range 0–525600. 0 = permanent block until removed by an admin.
+* **Repeat offense window (days)** (`lockout.repeat_window_days`; default: 7; recommended: 7). Range 1–365. Lockouts within this many days escalate to the next step. Older offenses are forgotten.
+* **Unlock link lifetime (minutes)** (`unlock.token_ttl_minutes`; default: 30; recommended: 30). Range 5–1440. Emailed unlock links are single-use and expire after this time.
+* **Temporary allowlist after unlock (hours)** (`unlock.allow_hours`; default: 24; recommended: 24). Range 1–720. After a successful unlock, the IP is allowlisted for this long so you can fix the cause.
+* **Unlock emails per IP per hour** (`unlock.max_requests_per_hour`; default: 3; recommended: 3). Range 1–20. Limits abuse of the unlock form.
+
+= Settings → Blocklists =
+
+* **Check for list updates** (`feeds.update_hours`; default: Daily; recommended: Daily). Choices: "Twice a day"; "Daily"; "Every 2 days"; "Weekly". How often each enabled list is downloaded. Lists whose provider asks for less frequent downloads are never fetched more often than the provider allows. Unchanged lists are not downloaded again.
+* **Spamhaus DROP** (`feeds.lists.spamhaus_drop`; default: Off; recommended: On). Hijacked and criminal-operated networks (IPv4 and IPv6). Very low false-positive rate. Free under the provider's terms, which forbid using the Spamhaus name in marketing. Terms: Free to use (https://www.spamhaus.org/drop/terms/).
+* **FireHOL Level 1** (`feeds.lists.firehol_level1`; default: Off; recommended: your choice). Aggregate of Spamhaus DROP, DShield, Feodo and bogon lists, aimed at minimal false positives. Includes DShield data (CC BY-NC-SA), so treat it as non-commercial. Private and reserved ranges in it are skipped automatically. Terms: Non-commercial only (https://iplists.firehol.org/?ipset=firehol_level1).
+* **Emerging Threats: compromised hosts** (`feeds.lists.et_compromised`; default: Off; recommended: your choice). Hosts known to be compromised, published by Proofpoint Emerging Threats. Small list. Terms: Check provider terms (https://rules.emergingthreats.net/blockrules/).
+* **blocklist.de (all)** (`feeds.lists.blocklist_de`; default: Off; recommended: your choice). IPs reported for SSH, mail, web and login attacks in the last 48 hours by fail2ban users. Large (20,000+ IPs) and fast-changing; dynamic IPs make occasional false positives more likely. Terms: Check provider terms (https://www.blocklist.de/en/export.html).
+* **CINS Army** (`feeds.lists.cins_army`; default: Off; recommended: your choice). IPs with poor reputation seen by the Sentinel IPS network. About 15,000 IPs. Terms: Check provider terms (https://cinsscore.com/).
+* **IPsum (level 3)** (`feeds.lists.ipsum_3`; default: Off; recommended: your choice). IPs that appear on at least 3 of 30+ public blocklists, rebuilt daily. Public domain (The Unlicense). Large (15,000+ IPs). Terms: Free to use (https://github.com/stamparm/ipsum).
+* **DShield top 20 attacking networks** (`feeds.lists.dshield_top`; default: Off; recommended: your choice). The 20 /24 networks with the most attack reports over the last three days, from SANS ISC. Licensed CC BY-NC-SA: non-commercial use only. Terms: Non-commercial only (https://feeds.dshield.org/block.txt).
+* **Tor exit nodes** (`feeds.lists.tor_exits`; default: Off; recommended: your choice). Not a list of attackers: blocks everyone using the Tor anonymity network, including legitimate privacy-conscious visitors. Enable only if your site has no Tor audience. Terms: Free to use (https://check.torproject.org/).
+
+= Settings → Malware Lockdown =
+
+* **Disable the plugin and theme file editor** (`lockdown.disable_file_editor`; default: Off; recommended: On). Removes Appearance → Theme File Editor and Plugins → Plugin File Editor for everyone, like DISALLOW_FILE_EDIT. A stolen admin login can then not be used to paste a backdoor into a theme, which is how SC's theme copy is often planted.
+* **Block installing and uploading plugins and themes** (`lockdown.block_installs`; default: Off; recommended: your choice). Nobody can add new plugins or themes from the admin (updates still work). SC installs itself as a fake plugin; turn this off briefly when you need to install something.
+* **Block PHP in uploads** (`lockdown.block_php_uploads`; default: Off; recommended: On). Rejects uploads whose name or content is a script (including double extensions such as shell.php.jpg and .htaccess/.user.ini files) and, on Apache, adds rules to uploads/.htaccess so PHP files there cannot run. On nginx, add the rule shown on the Malware Lockdown page to your server configuration.
+* **Administrator lock** (`lockdown.admin_lock`; default: Off; recommended: On). Only approved administrator accounts keep admin rights; any other account with admin powers (such as one SC writes straight into the database) is treated as having none until approved on the Malware Lockdown page. When first switched on, every administrator shown on the Users screen is approved, hidden ones are not. Recover with: wp sentinel approve-admin <user>.
+* **Protect Sentinel Shield from being switched off by code** (`lockdown.protect_self`; default: Off; recommended: On). SC deactivates and deletes security plugins. With this on, Sentinel Shield can only be deactivated or deleted by an administrator from the Plugins screen, during an update, or with WP-CLI.
+* **Block blockchain command channels** (`lockdown.block_chain_rpc`; default: Off; recommended: On). Stops the site from contacting public Ethereum and BNB Chain RPC gateways and from sending blockchain JSON-RPC calls (eth_call), which SC uses to fetch its commands. Each attempt is logged with the file that made it. Leave off if a plugin on this site legitimately talks to a blockchain.
+* **Alert on new administrator accounts** (`lockdown.alert_admin_changes`; default: On; recommended: On). Logs and emails the site admin address whenever an account becomes an administrator through WordPress. Accounts written directly into the database are caught by the scan instead.
+* **Email new malware scan findings** (`lockdown.scan_email`; default: On; recommended: On). The scan runs twice a day. New critical findings and warnings are logged; with this on they are also emailed to the site admin address.
+
+= Settings → Modules =
+
+* **Enable: IP blocklist & allowlist enforcement** (`modules.ip_gate.enabled`; default: On; recommended: On). Checks every request against the IP rules early in the WordPress load.
+* **Test mode: IP blocklist & allowlist enforcement** (`modules.ip_gate.test_mode`; default: Follow global test mode; recommended: Follow global test mode). Choices: "Follow global test mode"; "Always test mode (log only)"; "Always enforce". Override the global test mode for this module only.
+* **Enable: Progressive lockouts** (`modules.lockout.enabled`; default: On; recommended: On). Turns repeat offenses into escalating temporary blocks. Other modules (login protection, 404 blocking, WAF) use it.
+* **Test mode: Progressive lockouts** (`modules.lockout.test_mode`; default: Follow global test mode; recommended: Follow global test mode). Choices: "Follow global test mode"; "Always test mode (log only)"; "Always enforce". Override the global test mode for this module only.
+* **Enable: Emailed unlock links** (`modules.unlock.enabled`; default: On; recommended: On). Lets a locked-out administrator request a one-time unlock link from the block page.
+* **Enable: Blocklist feeds** (`modules.feeds.enabled`; default: On; recommended: On). Blocks IPs listed on the public blocklists chosen on the Blocklists tab and keeps them updated. Your allowlist always wins.
+* **Test mode: Blocklist feeds** (`modules.feeds.test_mode`; default: Follow global test mode; recommended: Follow global test mode). Choices: "Follow global test mode"; "Always test mode (log only)"; "Always enforce". Override the global test mode for this module only.
+* **Enable: Scheduled task monitor** (`modules.cron_monitor.enabled`; default: On; recommended: On). Records when each WP-Cron task last ran, how long it took and whether it failed, for the Scheduled Tasks page.
+* **Enable: Malware lockdown** (`modules.lockdown.enabled`; default: On; recommended: On). Applies the measures chosen on the Malware Lockdown tab and runs the twice-daily malware scan. Lockdown measures are not affected by test mode.
+
+<!-- settings-reference:end -->
+
+= wp-config.php constants =
+
+* `define( 'SENTINEL_SHIELD_DISABLE', true );` Emergency switch: Sentinel Shield loads nothing. Use it to get back in, fix the cause, then remove the line.
+* `define( 'DISALLOW_FILE_EDIT', true );` WordPress's own file editor switch. Stronger than the lockdown setting because it lives in a file instead of the database.
+* `define( 'DISABLE_WP_CRON', true );` Only with a real server cron job (the line is shown on the Scheduled Tasks page); otherwise blocklist updates and the malware scan stop.
+
+= Filters =
+
+* `sentinel_shield_allowed_chain_hosts` (array of host names): blockchain gateways a legitimate plugin may still reach while "Block blockchain command channels" is on.
 
 == Frequently Asked Questions ==
 
@@ -47,15 +180,49 @@ Any one of these works:
 * Run `wp sentinel unblock <your-ip> --allow-hours=24`.
 * Use "Send unlock link" on the block page (403 mode only) with your administrator email address.
 
+= My administrator rights are suspended. What now? =
+
+The administrator lock is on and your account is not approved. Ask an approved administrator to approve you on Sentinel Shield → Malware Lockdown, or run `wp sentinel approve-admin <your-login>`. Without WP-CLI, add the SENTINEL_SHIELD_DISABLE constant, approve yourself on the Malware Lockdown page, then remove the constant.
+
+= I cannot install a plugin or theme =
+
+"Block installing and uploading plugins and themes" is on. Untick it on Settings → Malware Lockdown, install, then tick it again, or install with WP-CLI. Updates are never blocked.
+
+= The malware scan found something. Is my site infected? =
+
+Not necessarily: drop-ins, must-use plugins and scheduled tasks are often legitimate. Items marked Critical matched known malware traits and need a close look. If you recognize an item, approve it and you will only be warned again if it changes. If the scan finds SC, follow the cleanup order on the Malware Lockdown page: the order matters, because the copies rebuild each other.
+
 = Why does every visitor have the same IP? =
 
 Your site is behind a proxy and Trusted Proxy is set to None. Pick the matching preset on the IP Detection tab and use the IP resolution simulator on the Tools page to check it.
 
+= What do blocklist providers learn about my site? =
+
+Your server downloads each enabled list directly from its provider (FireHOL and IPsum via GitHub), so the provider sees your server's IP address and when it checks for updates. Sentinel Shield sends a generic "SentinelShield" user agent without your site address, asks whether the list changed before downloading it again, and sends nothing about your visitors.
+
+= Can I use every list on a commercial site? =
+
+No. DShield and FireHOL Level 1 (which includes DShield data) are CC BY-NC-SA, non-commercial only. Spamhaus DROP is free under its terms, which forbid using the Spamhaus name in marketing. For Emerging Threats, blocklist.de and CINS Army, check the provider's terms (linked on the Blocklists tab).
+
 = Does test mode protect anything? =
 
-No. Test mode only records what would have been blocked. Use it to validate settings, then turn it off.
+No. Test mode only records what would have been blocked. Use it to validate settings, then turn it off. Malware Lockdown measures are the exception: they are always enforced once switched on.
 
 == Changelog ==
 
+= 0.2.0 =
+* Documentation tab (Settings → Documentation): administrator approvals explained in detail with the current approved list, every setting with its key, default and recommended value, wp-config.php constants, recovery steps and WP-CLI commands. The readme's settings reference is generated from the same source.
+* Release builds: `bin/build.sh` checks version numbers, coding standards and tests, and produces an install zip with `checksums.sha256` and `build.json`. The source is now under git, with each release tagged.
+* Malware Lockdown against the "SC" WordPress malware (Sucuri, September 2026): a read-only scan of every SC persistence point twice a day with email alerts and per-item approval; opt-in measures: administrator lock, file editor off, plugin/theme installs off, PHP blocked in uploads, blockchain RPC traffic blocked, protection against deactivation by code, and alerts on new administrators. WP-CLI: scan, admins, approve-admin, revoke-admin.
+* Fixed the "translation loading triggered too early" notice on the block page (WordPress 6.7+).
+* Scheduled Tasks page: WP-Cron monitor with last-run status, failures, callback origins and WP-CLI commands, plus run now, pause/resume (paused tasks cannot be re-added by their plugin), change schedule and delete. Deactivation resumes paused tasks.
+* Blocklist feeds: eight opt-in public lists with scheduled, additive updates; plain-text list upload on the IP Rules page.
+* Security hardening from a penetration test: unlock links need an explicit confirmation (email scanners cannot use them, and the requesting IP is only unblocked when the admin ticks it), blocked-request logging is throttled per IP and capped site-wide without an object cache, loopback and proxy addresses are never auto-allowlisted and requests that fall back to a proxy's IP get no allowlist privileges, and over-broad trusted proxy ranges (such as 0.0.0.0/0) are refused.
+
 = 0.1.0 =
 * Phase 1: core framework, client IP detection, IP rules, lockout engine, lockout safety, test mode tooling, events, WP-CLI.
+
+== Upgrade Notice ==
+
+= 0.2.0 =
+Adds Malware Lockdown (SC malware scan and opt-in hardening), blocklist feeds, the Scheduled Tasks page and a Documentation tab. All new protections are off until you switch them on.

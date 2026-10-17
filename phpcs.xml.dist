@@ -6,6 +6,8 @@
     <exclude-pattern>/vendor/*</exclude-pattern>
     <exclude-pattern>/node_modules/*</exclude-pattern>
     <exclude-pattern>/tests/*</exclude-pattern>
+    <exclude-pattern>/bin/*</exclude-pattern>
+    <exclude-pattern>/dist/*</exclude-pattern>
 
     <arg name="extensions" value="php"/>
     <arg name="colors"/>
@@ -17,6 +19,8 @@
     <rule ref="WordPress">
         <!-- PSR-4 file names (ClassName.php) instead of class-name.php. -->
         <exclude name="WordPress.Files.FileName"/>
+        <!-- Rejects generic docblock types such as list<string> on array parameters. -->
+        <exclude name="Squiz.Commenting.FunctionComment.IncorrectTypeHint"/>
     </rule>
     <rule ref="WordPress.WP.I18n">
         <properties>

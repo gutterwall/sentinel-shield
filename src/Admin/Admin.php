@@ -10,6 +10,8 @@ declare(strict_types=1);
 namespace SentinelShield\Admin;
 
 use SentinelShield\Container;
+use SentinelShield\Firewall\RuleCache;
+use SentinelShield\Net\IpAddress;
 use SentinelShield\Safety\AdminProtection;
 use SentinelShield\Safety\SafetyGuard;
 use SentinelShield\Settings;
@@ -78,6 +80,8 @@ final class Admin {
 			add_action( 'load-' . $hook, array( $rules, 'load' ) );
 		}
 		add_submenu_page( self::SLUG, __( 'Events', 'sentinel-shield' ), __( 'Events', 'sentinel-shield' ), $cap, 'sentinel-shield-events', array( new EventsPage( $this->c ), 'render' ) );
+		add_submenu_page( self::SLUG, __( 'Malware Lockdown', 'sentinel-shield' ), __( 'Malware Lockdown', 'sentinel-shield' ), $cap, 'sentinel-shield-lockdown', array( new LockdownPage( $this->c ), 'render' ) );
+		add_submenu_page( self::SLUG, __( 'Scheduled Tasks', 'sentinel-shield' ), __( 'Scheduled Tasks', 'sentinel-shield' ), $cap, 'sentinel-shield-cron', array( new CronPage( $this->c ), 'render' ) );
 		add_submenu_page( self::SLUG, __( 'Tools & Testing', 'sentinel-shield' ), __( 'Tools & Testing', 'sentinel-shield' ), $cap, 'sentinel-shield-tools', array( new ToolsPage( $this->c ), 'render' ) );
 	}
 
@@ -128,10 +132,19 @@ final class Admin {
 			echo '<div class="notice notice-error"><p><strong>' . esc_html__( 'Sentinel Shield:', 'sentinel-shield' ) . '</strong> ' . esc_html__( 'SENTINEL_SHIELD_DISABLE is defined in wp-config.php, so all blocking is off. Remove it once you have regained access.', 'sentinel-shield' ) . '</p></div>';
 		}
 
-		if ( get_site_option( 'sentinel_shield_welcome' ) ) {
-			$dismiss = wp_nonce_url( admin_url( 'admin-post.php?action=sentinel_shield_dismiss_welcome' ), 'sentinel_shield_dismiss_welcome' );
+		// Onboarding only makes sense while still in test mode; once it is off the claims below are no longer true.
+		if ( get_site_option( 'sentinel_shield_welcome' ) && $settings->is_enabled() && $settings->global_test_mode() ) {
+			$dismiss     = wp_nonce_url( admin_url( 'admin-post.php?action=sentinel_shield_dismiss_welcome' ), 'sentinel_shield_dismiss_welcome' );
+			$bin         = IpAddress::to_binary( (string) $this->c->get( 'client_ip' ) );
+			$allowlisted = null !== $bin && $this->c->get( RuleCache::class )->get( 'allow' )->contains( $bin );
 			echo '<div class="notice notice-info"><p><strong>' . esc_html__( 'Sentinel Shield is active in test mode.', 'sentinel-shield' ) . '</strong> '
-				. esc_html__( 'Nothing is blocked yet. Your IP has been allowlisted. Next: confirm IP detection, review the Events log, then turn test mode off.', 'sentinel-shield' )
+				. esc_html__( 'Nothing is blocked yet.', 'sentinel-shield' ) . ' '
+				. ( $allowlisted
+					? esc_html__( 'Your IP has been allowlisted.', 'sentinel-shield' )
+					: ( AdminProtection::is_real_client( (array) $this->c->get( 'client_ip_details' ) )
+						? esc_html__( 'Your IP is not allowlisted yet; it will be the first time you save settings.', 'sentinel-shield' )
+						: esc_html__( 'Your detected IP is a loopback or proxy address, so it will not be allowlisted. Configure IP Detection first.', 'sentinel-shield' ) ) ) . ' '
+				. esc_html__( 'Next: confirm IP detection, review the Events log, then turn test mode off.', 'sentinel-shield' )
 				. '</p><p><a class="button button-primary" href="' . esc_url( self::url( 'sentinel-shield-settings', array( 'tab' => 'ip_detection' ) ) ) . '">' . esc_html__( 'Check IP detection', 'sentinel-shield' ) . '</a> '
 				. '<a class="button" href="' . esc_url( $dismiss ) . '">' . esc_html__( 'Dismiss', 'sentinel-shield' ) . '</a></p></div>';
 		}
