@@ -174,16 +174,18 @@ final class BlockRepository {
 	/**
 	 * Active ranges for cache compilation.
 	 *
-	 * @param string $type List type.
+	 * @param string $type         List type.
+	 * @param bool   $without_auto Leave out automatic administrator entries.
 	 * @return list<array{start_hex:string, end_hex:string, expires_at:?string}>
 	 */
-	public function active_ranges( string $type ): array {
+	public function active_ranges( string $type, bool $without_auto = false ): array {
 		$rows = $this->db->get_results(
 			$this->db->prepare(
-				'SELECT HEX(ip_start) AS start_hex, HEX(ip_end) AS end_hex, expires_at FROM %i WHERE list_type = %s AND (expires_at IS NULL OR expires_at > %s)',
+				'SELECT HEX(ip_start) AS start_hex, HEX(ip_end) AS end_hex, expires_at FROM %i WHERE list_type = %s AND (expires_at IS NULL OR expires_at > %s) AND source <> %s',
 				$this->table(),
 				$type,
-				gmdate( 'Y-m-d H:i:s' )
+				gmdate( 'Y-m-d H:i:s' ),
+				$without_auto ? 'admin_auto' : ''
 			),
 			ARRAY_A
 		);

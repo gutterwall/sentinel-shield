@@ -16,11 +16,19 @@ defined( 'ABSPATH' ) || exit;
  * on RELEASE_LOCK() or when the connection closes (so a crashed request cannot
  * leave a lock behind). Re-entrant within a request.
  *
- * A database that does not support named locks (GET_LOCK() returns NULL, e.g. a
- * SQLite drop-in) does not stop the site: the work runs unlocked, as it would
- * without this class. Only a real timeout (another worker holds the lock) fails.
+ * When GET_LOCK() gives no answer (a database error, a database proxy that does
+ * not pass named locks through, or a backend without them such as a SQLite
+ * drop-in), an atomic lock row in the options table is used instead: INSERT
+ * IGNORE succeeds for exactly one worker, and a row older than its lease can be
+ * taken over with a compare-and-set. If that fails too, the lock is reported as
+ * not acquired, so callers refuse the sensitive operation rather than run it
+ * unprotected. The mode in use is recorded for the health screen.
  */
 final class Mutex {
+
+	public const HEALTH_OPTION = 'sentinel_shield_lock_health';
+
+	private const LEASE = 60;
 
 	/**
 	 * Hold counts of the locks this request holds.
@@ -30,11 +38,18 @@ final class Mutex {
 	private static array $held = array();
 
 	/**
+	 * How each held lock was taken: native or row.
+	 *
+	 * @var array<string, string>
+	 */
+	private static array $how = array();
+
+	/**
 	 * Takes a lock, waiting up to $timeout seconds.
 	 *
 	 * @param string $name    Lock name (any length).
 	 * @param int    $timeout Seconds to wait.
-	 * @return bool False only when another request holds the lock.
+	 * @return bool False when another request holds the lock, or no lock can be taken at all.
 	 */
 	public static function acquire( string $name, int $timeout = 5 ): bool {
 		if ( isset( self::$held[ $name ] ) ) {
@@ -42,15 +57,109 @@ final class Mutex {
 			return true;
 		}
 		global $wpdb;
-		$sql = $wpdb->prepare( 'SELECT GET_LOCK(%s, %d)', self::db_name( $name ), max( 0, $timeout ) );
-		$got = $wpdb->get_var( $sql ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery,WordPress.DB.PreparedSQL.NotPrepared -- Named locks are not cacheable; prepared above.
+		$sql      = $wpdb->prepare( 'SELECT GET_LOCK(%s, %d)', self::db_name( $name ), max( 0, $timeout ) );
+		$suppress = $wpdb->suppress_errors( true );
+		$got      = $wpdb->get_var( $sql ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery,WordPress.DB.PreparedSQL.NotPrepared -- Named locks are not cacheable; prepared above.
+		$wpdb->suppress_errors( $suppress );
 		if ( '0' === $got ) {
 			return false;
 		}
 		if ( '1' === (string) $got ) {
 			self::$held[ $name ] = 1;
+			self::$how[ $name ]  = 'native';
+			self::health( 'native' );
+			return true;
 		}
+		return self::acquire_row( $name, $timeout );
+	}
+
+	/**
+	 * Fallback: a lock row in the options table.
+	 *
+	 * @param string $name    Lock name.
+	 * @param int    $timeout Seconds to wait.
+	 */
+	private static function acquire_row( string $name, int $timeout ): bool {
+		global $wpdb;
+		$table    = $wpdb->base_prefix . 'options';
+		$key      = '_' . self::db_name( $name );
+		$deadline = microtime( true ) + max( 0, $timeout );
+		$suppress = $wpdb->suppress_errors( true );
+		try {
+			do {
+				$now = time();
+				$ins = $wpdb->query( $wpdb->prepare( 'INSERT IGNORE INTO %i (option_name, option_value, autoload) VALUES (%s, %s, %s)', $table, $key, (string) ( $now + self::LEASE ), 'no' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- A lock row must bypass the options cache.
+				if ( false === $ins ) {
+					self::health( 'failed', (string) $wpdb->last_error );
+					return false;
+				}
+				if ( 1 === (int) $ins ) {
+					return self::took_row( $name );
+				}
+				// Held by someone; take it over only once its lease has run out.
+				$until = $wpdb->get_var( $wpdb->prepare( 'SELECT option_value FROM %i WHERE option_name = %s', $table, $key ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- See above.
+				if ( null !== $until && (int) $until < $now ) {
+					$cas = $wpdb->query( $wpdb->prepare( 'UPDATE %i SET option_value = %s WHERE option_name = %s AND option_value = %s', $table, (string) ( $now + self::LEASE ), $key, (string) $until ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- See above.
+					if ( 1 === (int) $cas ) {
+						return self::took_row( $name );
+					}
+				}
+				if ( microtime( true ) >= $deadline ) {
+					return false;
+				}
+				usleep( 100000 );
+			} while ( true );
+		} finally {
+			$wpdb->suppress_errors( $suppress );
+		}
+	}
+
+	/**
+	 * Notes a lock taken with a lock row.
+	 *
+	 * @param string $name Lock name.
+	 */
+	private static function took_row( string $name ): bool {
+		self::$held[ $name ] = 1;
+		self::$how[ $name ]  = 'row';
+		self::health( 'row' );
 		return true;
+	}
+
+	/**
+	 * Records which locking mode works on this site (only when it changes).
+	 *
+	 * @param string $mode  native, row or failed.
+	 * @param string $error Database error, if any.
+	 */
+	private static function health( string $mode, string $error = '' ): void {
+		static $noted = array();
+		if ( isset( $noted[ $mode ] ) || ! function_exists( 'get_site_option' ) ) {
+			return;
+		}
+		$noted[ $mode ] = true;
+		$stored         = get_site_option( self::HEALTH_OPTION );
+		if ( is_array( $stored ) && ( $stored['mode'] ?? '' ) === $mode && 'failed' !== $mode ) {
+			return;
+		}
+		update_site_option(
+			self::HEALTH_OPTION,
+			array(
+				'mode'  => $mode,
+				'time'  => time(),
+				'error' => mb_substr( $error, 0, 200 ),
+			)
+		);
+	}
+
+	/**
+	 * Last recorded locking mode: {mode: native|row|failed, time, error}, or null.
+	 *
+	 * @return array{mode:string, time:int, error:string}|null
+	 */
+	public static function status(): ?array {
+		$stored = get_site_option( self::HEALTH_OPTION );
+		return is_array( $stored ) ? $stored : null;
 	}
 
 	/**
@@ -67,7 +176,12 @@ final class Mutex {
 		}
 		unset( self::$held[ $name ] );
 		global $wpdb;
-		$wpdb->query( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', self::db_name( $name ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Named locks are not cacheable.
+		if ( 'row' === ( self::$how[ $name ] ?? '' ) ) {
+			$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE option_name = %s', $wpdb->base_prefix . 'options', '_' . self::db_name( $name ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Lock row.
+		} else {
+			$wpdb->query( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', self::db_name( $name ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Named locks are not cacheable.
+		}
+		unset( self::$how[ $name ] );
 	}
 
 	/**

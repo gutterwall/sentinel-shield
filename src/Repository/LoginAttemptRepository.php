@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace SentinelShield\Repository;
 
+use SentinelShield\Support\Batch;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -34,52 +36,101 @@ final class LoginAttemptRepository {
 	}
 
 	/**
-	 * Records a failure.
+	 * Counters table: failures per IP and per account in one-minute buckets.
+	 * Enforcement reads these; the attempts table is history for reports.
+	 */
+	public function counters_table(): string {
+		return $this->db->base_prefix . 'sentinel_login_counters';
+	}
+
+	/**
+	 * Records a failed login: one history row, and one atomic increment each of
+	 * the IP's and the account's counters.
 	 *
 	 * @param string $bin     Packed IP.
 	 * @param string $account Account key.
 	 * @param int    $time    Unix time.
 	 */
 	public function record( string $bin, string $account, int $time ): void {
+		$account = mb_substr( $account, 0, 64 );
 		$this->db->query(
 			$this->db->prepare(
 				'INSERT INTO %i (ip, account, created_at) VALUES (UNHEX(%s), %s, %s)',
 				$this->table(),
 				bin2hex( $bin ),
-				mb_substr( $account, 0, 64 ),
+				$account,
 				gmdate( 'Y-m-d H:i:s', $time )
+			)
+		);
+		$bucket = intdiv( $time, 60 );
+		$this->db->query(
+			$this->db->prepare(
+				'INSERT INTO %i (scope, subject, bucket, n) VALUES (%s, %s, %d, 1), (%s, %s, %d, 1) ON DUPLICATE KEY UPDATE n = n + 1',
+				$this->counters_table(),
+				'i',
+				bin2hex( $bin ),
+				$bucket,
+				'a',
+				$account,
+				$bucket
 			)
 		);
 	}
 
 	/**
-	 * Failures from an IP since a time.
+	 * Failures counted against an IP since a time.
 	 *
 	 * @param string $bin   Packed IP.
 	 * @param int    $since Unix time.
 	 */
 	public function count_ip( string $bin, int $since ): int {
-		return (int) $this->db->get_var(
-			$this->db->prepare( 'SELECT COUNT(*) FROM %i WHERE ip = UNHEX(%s) AND created_at >= %s', $this->table(), bin2hex( $bin ), gmdate( 'Y-m-d H:i:s', $since ) )
+		return $this->counter( 'i', bin2hex( $bin ), $since );
+	}
+
+	/**
+	 * Failures counted against an account since a time; with $ips, also the
+	 * number of distinct IPs in the history (a heavier query, for reports).
+	 *
+	 * @param string $account Account key.
+	 * @param int    $since   Unix time.
+	 * @param bool   $ips     Also count distinct IPs.
+	 * @return array{failures:int, ips:int}
+	 */
+	public function count_account( string $account, int $since, bool $ips = false ): array {
+		$distinct = 0;
+		if ( $ips ) {
+			$distinct = (int) $this->db->get_var(
+				$this->db->prepare( 'SELECT COUNT(DISTINCT ip) FROM %i WHERE account = %s AND created_at >= %s', $this->table(), $account, gmdate( 'Y-m-d H:i:s', $since ) )
+			);
+		}
+		return array(
+			'failures' => $this->counter( 'a', mb_substr( $account, 0, 64 ), $since ),
+			'ips'      => $distinct,
 		);
 	}
 
 	/**
-	 * Failures against an account since a time, and from how many IPs.
+	 * Sum of one counter's buckets since a time.
 	 *
-	 * @param string $account Account key.
+	 * @param string $scope   i or a.
+	 * @param string $subject Hex IP or account key.
 	 * @param int    $since   Unix time.
-	 * @return array{failures:int, ips:int}
 	 */
-	public function count_account( string $account, int $since ): array {
-		$row = $this->db->get_row(
-			$this->db->prepare( 'SELECT COUNT(*) AS failures, COUNT(DISTINCT ip) AS ips FROM %i WHERE account = %s AND created_at >= %s', $this->table(), $account, gmdate( 'Y-m-d H:i:s', $since ) ),
-			ARRAY_A
+	private function counter( string $scope, string $subject, int $since ): int {
+		return (int) $this->db->get_var(
+			$this->db->prepare( 'SELECT COALESCE(SUM(n), 0) FROM %i WHERE scope = %s AND subject = %s AND bucket >= %d', $this->counters_table(), $scope, $subject, intdiv( $since, 60 ) )
 		);
-		return array(
-			'failures' => (int) ( $row['failures'] ?? 0 ),
-			'ips'      => (int) ( $row['ips'] ?? 0 ),
-		);
+	}
+
+	/**
+	 * Resets only an IP's enforcement counter (after it was locked out, so the
+	 * next lockout needs a fresh run). The history and the account counters it
+	 * contributed to are kept: they still count toward distributed-attack limits.
+	 *
+	 * @param string $bin Packed IP.
+	 */
+	public function reset_ip_counter( string $bin ): void {
+		$this->db->query( $this->db->prepare( 'DELETE FROM %i WHERE scope = %s AND subject = %s', $this->counters_table(), 'i', bin2hex( $bin ) ) );
 	}
 
 	/**
@@ -88,6 +139,7 @@ final class LoginAttemptRepository {
 	 * @param string $bin Packed IP.
 	 */
 	public function clear_ip( string $bin ): int {
+		$this->reset_ip_counter( $bin );
 		return (int) $this->db->query( $this->db->prepare( 'DELETE FROM %i WHERE ip = UNHEX(%s)', $this->table(), bin2hex( $bin ) ) );
 	}
 
@@ -97,6 +149,7 @@ final class LoginAttemptRepository {
 	 * @param string $account Account key.
 	 */
 	public function clear_account( string $account ): int {
+		$this->db->query( $this->db->prepare( 'DELETE FROM %i WHERE scope = %s AND subject = %s', $this->counters_table(), 'a', mb_substr( $account, 0, 64 ) ) );
 		return (int) $this->db->query( $this->db->prepare( 'DELETE FROM %i WHERE account = %s', $this->table(), $account ) );
 	}
 
@@ -104,6 +157,7 @@ final class LoginAttemptRepository {
 	 * Forgets every failure.
 	 */
 	public function clear_all(): int {
+		$this->db->query( $this->db->prepare( 'DELETE FROM %i', $this->counters_table() ) );
 		return (int) $this->db->query( $this->db->prepare( 'DELETE FROM %i', $this->table() ) );
 	}
 
@@ -179,6 +233,7 @@ final class LoginAttemptRepository {
 	 * @return int Rows deleted.
 	 */
 	public function prune( int $before ): int {
-		return (int) $this->db->query( $this->db->prepare( 'DELETE FROM %i WHERE created_at < %s', $this->table(), gmdate( 'Y-m-d H:i:s', $before ) ) );
+		$this->db->query( $this->db->prepare( 'DELETE FROM %i WHERE bucket < %d', $this->counters_table(), intdiv( $before, 60 ) ) );
+		return Batch::delete( $this->db, $this->db->prepare( 'DELETE FROM %i WHERE created_at < %s', $this->table(), gmdate( 'Y-m-d H:i:s', $before ) ) );
 	}
 }

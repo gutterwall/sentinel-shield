@@ -97,7 +97,8 @@ final class RuleCache {
 	}
 
 	/**
-	 * Compiled set for "block" or "allow".
+	 * Compiled set for "block", "allow", or "allow_login" (the allowlist without
+	 * automatic administrator entries, which exempt from blocking only).
 	 *
 	 * @param string $type List type.
 	 */
@@ -120,7 +121,7 @@ final class RuleCache {
 	 */
 	public function flush(): void {
 		$this->memo = array();
-		foreach ( array( 'rules_block', 'rules_allow' ) as $key ) {
+		foreach ( array( 'rules_block', 'rules_allow', 'rules_allow_login' ) as $key ) {
 			wp_cache_delete( $key, self::GROUP );
 			delete_site_transient( 'sentinel_shield_' . $key );
 		}
@@ -137,7 +138,8 @@ final class RuleCache {
 		$now   = time();
 		$next  = $now + HOUR_IN_SECONDS;
 		$pairs = array();
-		foreach ( $this->repo->active_ranges( $type ) as $row ) {
+		$rows  = 'allow_login' === $type ? $this->repo->active_ranges( 'allow', true ) : $this->repo->active_ranges( $type );
+		foreach ( $rows as $row ) {
 			$start = (string) hex2bin( (string) $row['start_hex'] );
 			$end   = (string) hex2bin( (string) $row['end_hex'] );
 			if ( '' === $start || '' === $end ) {

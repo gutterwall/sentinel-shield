@@ -137,14 +137,20 @@ final class Gate {
 	/**
 	 * Whether an IP may never be locked out (allowlisted or this server).
 	 *
-	 * @param string $ip IP text.
+	 * With $login, for login limits and location rules: automatic administrator
+	 * allowlist entries do not count there. They exist so an administrator is
+	 * never blocked from the site; they should not exempt everyone else behind
+	 * the same office, VPN or public Wi-Fi address from login protection.
+	 *
+	 * @param string $ip    IP text.
+	 * @param bool   $login Checking a login exemption.
 	 */
-	public function is_protected( string $ip ): bool {
+	public function is_protected( string $ip, bool $login = false ): bool {
 		$bin = IpAddress::to_binary( $ip );
 		if ( null === $bin ) {
 			return true;
 		}
-		return $this->guard->is_server_ip( $bin ) || $this->rules->get( 'allow' )->contains( $bin );
+		return $this->guard->is_server_ip( $bin ) || $this->rules->get( $login ? 'allow_login' : 'allow' )->contains( $bin );
 	}
 
 	/**

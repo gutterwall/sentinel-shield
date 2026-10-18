@@ -282,6 +282,41 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 	}
 
 	/**
+	 * Review 2 finding 6: when named locks give no answer, an atomic lock row is
+	 * used; when that fails too, the lock is not reported as taken.
+	 */
+	public function test_mutex_falls_back_to_a_lock_row_and_fails_closed(): void {
+		global $wpdb;
+		$no_named = static fn( string $q ): string => str_contains( $q, 'GET_LOCK' ) ? 'SELECT NULL' : $q;
+		add_filter( 'query', $no_named );
+		$row   = '_' . self::lock_name( 'fallback_test' );
+		$table = $wpdb->base_prefix . 'options';
+		try {
+			$this->assertTrue( Mutex::acquire( 'fallback_test', 0 ) );
+			$this->assertSame( 'row', Mutex::status()['mode'] );
+			$this->assertNotNull( $wpdb->get_var( $wpdb->prepare( 'SELECT option_value FROM %i WHERE option_name = %s', $table, $row ) ) );
+			Mutex::release( 'fallback_test' );
+			$this->assertNull( $wpdb->get_var( $wpdb->prepare( 'SELECT option_value FROM %i WHERE option_name = %s', $table, $row ) ), 'released' );
+
+			// Held by another worker: busy. Its lease ran out: taken over.
+			$wpdb->insert( $table, array( 'option_name' => $row, 'option_value' => (string) ( time() + 60 ), 'autoload' => 'no' ) );
+			$this->assertFalse( Mutex::acquire( 'fallback_test', 0 ) );
+			$wpdb->update( $table, array( 'option_value' => (string) ( time() - 5 ) ), array( 'option_name' => $row ) );
+			$this->assertTrue( Mutex::acquire( 'fallback_test', 0 ) );
+			Mutex::release( 'fallback_test' );
+
+			// No lock at all: refused, and reported for the health screen.
+			$broken = static fn( string $q ): string => str_contains( $q, 'INSERT IGNORE' ) ? 'INSERT INTO no_such_table_ss VALUES (1)' : $q;
+			add_filter( 'query', $broken );
+			$this->assertFalse( Mutex::acquire( 'fallback_test_2', 0 ) );
+			$this->assertSame( 'failed', Mutex::status()['mode'] );
+			remove_filter( 'query', $broken );
+		} finally {
+			remove_filter( 'query', $no_named );
+		}
+	}
+
+	/**
 	 * Concurrency in the brute-force limits: while another login from the same
 	 * IP is in progress, a parallel one is refused (not counted) instead of
 	 * slipping past the limit check.

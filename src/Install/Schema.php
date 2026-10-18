@@ -22,13 +22,13 @@ defined( 'ABSPATH' ) || exit;
  */
 final class Schema {
 
-	public const VERSION = 4;
+	public const VERSION = 5;
 	public const OPTION  = 'sentinel_shield_db_version';
 
 	/**
 	 * Short table names (without prefix).
 	 */
-	public const TABLES = array( 'sentinel_ip_rules', 'sentinel_events', 'sentinel_offenses', 'sentinel_unlock_tokens', 'sentinel_feed_ranges', 'sentinel_login_attempts' );
+	public const TABLES = array( 'sentinel_ip_rules', 'sentinel_events', 'sentinel_offenses', 'sentinel_unlock_tokens', 'sentinel_feed_ranges', 'sentinel_login_attempts', 'sentinel_login_counters' );
 
 	/**
 	 * Installs or upgrades when the stored version is behind. Cheap on every request.
@@ -176,6 +176,14 @@ final class Schema {
   KEY ip_time (ip,created_at),
   KEY account_time (account,created_at),
   KEY created_at (created_at)
+) $charset;",
+			"CREATE TABLE {$p}sentinel_login_counters (
+  scope char(1) NOT NULL DEFAULT 'i',
+  subject varchar(64) NOT NULL DEFAULT '',
+  bucket int(10) unsigned NOT NULL DEFAULT 0,
+  n int(10) unsigned NOT NULL DEFAULT 0,
+  PRIMARY KEY  (scope,subject,bucket),
+  KEY bucket (bucket)
 ) $charset;",
 		);
 	}

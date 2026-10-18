@@ -44,7 +44,12 @@ final class BruteForceGuard {
 	public const ERROR_INVALID = 'sentinel_shield_invalid_login';
 	public const KNOWN_IPS     = '_sentinel_shield_known_ips';
 	public const KNOWN_MAX     = 10;
-	public const LOCK_WAIT     = 3;
+	public const LOCK_WAIT     = 1;
+
+	/**
+	 * WordPress's credential checks, skipped for logins refused at admission.
+	 */
+	private const CREDENTIAL_CHECKS = array( 'wp_authenticate_username_password', 'wp_authenticate_email_password', 'wp_authenticate_application_password' );
 
 	/**
 	 * IPs locked out during this request.
@@ -59,6 +64,34 @@ final class BruteForceGuard {
 	 * @var string|null
 	 */
 	private ?string $held = null;
+
+	/**
+	 * Credential checks taken off `authenticate` for the current call: callback => priority.
+	 *
+	 * @var array<string, int>
+	 */
+	private array $suspended = array();
+
+	/**
+	 * Name admitted by admit() in the current `authenticate` call, so the final
+	 * check does not repeat the same queries.
+	 *
+	 * @var string|null
+	 */
+	private ?string $admitted = null;
+
+	/**
+	 * Refusal of the current REST request's application password, if any.
+	 *
+	 * @var \WP_Error|null
+	 */
+	private ?\WP_Error $rest_denied = null;
+
+	/**
+	 * Credential errors that count as a guess (others, such as application
+	 * passwords being switched off, do not).
+	 */
+	private const GUESS_ERRORS = array( 'invalid_username', 'invalid_email', 'incorrect_password' );
 
 	/**
 	 * Time source.
@@ -96,8 +129,13 @@ final class BruteForceGuard {
 	 * Hooks the checks.
 	 */
 	public function register(): void {
+		add_filter( 'authenticate', array( $this, 'admit' ), 1, 3 );
 		add_filter( 'authenticate', array( $this, 'authenticate' ), 95, 3 );
 		add_action( 'wp_authenticate_application_password_errors', array( $this, 'application_password' ), 10, 2 );
+		// REST API Basic authentication checks application passwords outside `authenticate`.
+		add_filter( 'determine_current_user', array( $this, 'rest_admit' ), 19 );
+		add_action( 'application_password_failed_authentication', array( $this, 'application_password_failed' ) );
+		add_filter( 'rest_authentication_errors', array( $this, 'rest_error' ), 5 );
 		add_action( 'wp_login_failed', array( $this, 'failed' ), 10, 2 );
 		add_action( 'wp_login', array( $this, 'succeeded' ), 10, 2 );
 		add_action( 'shutdown', array( $this, 'release' ) );
@@ -151,6 +189,63 @@ final class BruteForceGuard {
 	}
 
 	/**
+	 * `authenticate` filter, first: refuses logins over a limit before WordPress
+	 * checks the password, so a refused login costs no password hashing. Also
+	 * takes the per-IP lock, which then covers the password check until the
+	 * result is counted.
+	 *
+	 * @param \WP_User|\WP_Error|null $user     Result so far.
+	 * @param string                  $username Submitted name or email.
+	 * @param string                  $password Submitted password (unused).
+	 * @return \WP_User|\WP_Error|null
+	 */
+	public function admit( $user, $username = '', $password = '' ) {
+		unset( $password );
+		$username = is_string( $username ) ? $username : '';
+		if ( '' === $username || $user instanceof \WP_User ) {
+			return $user;
+		}
+		$denied = $this->deny_if_needed( $username );
+		if ( null === $denied ) {
+			$this->admitted = $username;
+			return $user;
+		}
+		$this->suspend_credential_checks();
+		return $denied;
+	}
+
+	/**
+	 * Takes WordPress's password checks off this `authenticate` call; they are
+	 * put back at the end of it (resume_credential_checks()).
+	 */
+	private function suspend_credential_checks(): void {
+		foreach ( self::CREDENTIAL_CHECKS as $callback ) {
+			$priority = has_filter( 'authenticate', $callback );
+			if ( false !== $priority ) {
+				remove_filter( 'authenticate', $callback, (int) $priority );
+				$this->suspended[ $callback ] = (int) $priority;
+			}
+		}
+		add_filter( 'authenticate', array( $this, 'resume_credential_checks' ), PHP_INT_MAX );
+	}
+
+	/**
+	 * `authenticate` filter, last: restores the password checks for the next
+	 * login in the same request (an XML-RPC multicall can hold many).
+	 *
+	 * @param \WP_User|\WP_Error|null $user Result.
+	 * @return \WP_User|\WP_Error|null
+	 */
+	public function resume_credential_checks( $user ) {
+		foreach ( $this->suspended as $callback => $priority ) {
+			add_filter( 'authenticate', $callback, $priority, 3 );
+		}
+		$this->suspended = array();
+		remove_filter( 'authenticate', array( $this, 'resume_credential_checks' ), PHP_INT_MAX );
+		return $user;
+	}
+
+	/**
 	 * `authenticate` filter: refuses logins over a limit, whatever the password.
 	 *
 	 * @param \WP_User|\WP_Error|null $user     Result so far.
@@ -163,6 +258,11 @@ final class BruteForceGuard {
 		$username = is_string( $username ) ? $username : '';
 		if ( '' === $username ) {
 			// Nothing submitted (or an existing login cookie being checked).
+			return $user;
+		}
+		if ( $this->admitted === $username ) {
+			// Checked at admission a moment ago; nothing was counted since.
+			$this->admitted = null;
 			return $user;
 		}
 		$denied = $this->deny_if_needed( $username );
@@ -183,6 +283,55 @@ final class BruteForceGuard {
 		if ( null !== $denied ) {
 			$error->add( self::ERROR_CODE, $denied->get_error_message() );
 		}
+	}
+
+	/**
+	 * `determine_current_user`, just before WordPress validates an application
+	 * password sent with HTTP Basic authentication (REST API): applies the same
+	 * limits as the login form, before any password hashing. A refused request
+	 * stays logged out and gets a 429 error.
+	 *
+	 * @param int|false $user_id User found so far.
+	 * @return int|false
+	 */
+	public function rest_admit( $user_id ) {
+		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- Compared as a login name only.
+		$name = isset( $_SERVER['PHP_AUTH_USER'] ) && is_string( $_SERVER['PHP_AUTH_USER'] ) ? (string) wp_unslash( $_SERVER['PHP_AUTH_USER'] ) : '';
+		if ( $user_id || '' === $name || null !== $this->rest_denied ) {
+			return $user_id;
+		}
+		$denied = $this->deny_if_needed( $name );
+		if ( null !== $denied ) {
+			$this->rest_denied = new \WP_Error( self::ERROR_CODE, wp_strip_all_tags( $denied->get_error_message() ), array( 'status' => 429 ) );
+			remove_filter( 'determine_current_user', 'wp_validate_application_password', 20 );
+		}
+		return $user_id;
+	}
+
+	/**
+	 * `rest_authentication_errors`: reports a refused application password.
+	 *
+	 * @param \WP_Error|true|null $result Result so far.
+	 * @return \WP_Error|true|null
+	 */
+	public function rest_error( $result ) {
+		return null === $this->rest_denied || is_wp_error( $result ) ? $result : $this->rest_denied;
+	}
+
+	/**
+	 * `application_password_failed_authentication`: counts a wrong application
+	 * password sent to the REST API. During the normal login flow (XML-RPC,
+	 * login forms) `wp_login_failed` counts it instead, so it is not counted twice.
+	 *
+	 * @param \WP_Error $error Why it failed.
+	 */
+	public function application_password_failed( $error ): void {
+		if ( doing_filter( 'authenticate' ) || ! $error instanceof \WP_Error || ! array_intersect( $error->get_error_codes(), self::GUESS_ERRORS ) ) {
+			return;
+		}
+		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- Compared as a login name only.
+		$name = isset( $_SERVER['PHP_AUTH_USER'] ) && is_string( $_SERVER['PHP_AUTH_USER'] ) ? (string) wp_unslash( $_SERVER['PHP_AUTH_USER'] ) : '';
+		$this->failed( $name, $error );
 	}
 
 	/**
@@ -225,7 +374,7 @@ final class BruteForceGuard {
 	 */
 	private function record_failure( $username, $error ): void {
 		// Refusals by this plugin are not password guesses.
-		if ( $error instanceof \WP_Error && array_intersect( $error->get_error_codes(), array( self::ERROR_CODE, LoginGeoGuard::ERROR_CODE, TwoFactorLogin::ERROR_API, TwoFactorLogin::ERROR_SETUP ) ) ) {
+		if ( $error instanceof \WP_Error && array_intersect( $error->get_error_codes(), array( self::ERROR_CODE, LoginGeoGuard::ERROR_CODE, TwoFactorLogin::ERROR_API, TwoFactorLogin::ERROR_SETUP, TwoFactorLogin::ERROR_LIMIT ) ) ) {
 			return;
 		}
 		$ip  = (string) ( $this->ip )();
@@ -258,6 +407,7 @@ final class BruteForceGuard {
 		if ( $account_max > 0 && '' !== $username ) {
 			$count = $this->attempts->count_account( $account, $since );
 			if ( $count['failures'] >= $account_max && Throttle::once( 'login_account_' . md5( $account ), $this->window_minutes() * MINUTE_IN_SECONDS ) ) {
+				$count = $this->attempts->count_account( $account, $since, true );
 				$this->log(
 					'account_attack',
 					$ip,
@@ -398,7 +548,7 @@ final class BruteForceGuard {
 	 */
 	private function is_protected( string $ip, bool $current ): bool {
 		// A request that fell back to a proxy's own IP must not inherit the proxy's allowlist entry.
-		return ! ( $current && ( $this->ip_fallback )() ) && $this->gate->is_protected( $ip );
+		return ! ( $current && ( $this->ip_fallback )() ) && $this->gate->is_protected( $ip, true );
 	}
 
 	/**
@@ -475,7 +625,9 @@ final class BruteForceGuard {
 		$bin     = (string) IpAddress::to_binary( $ip );
 		if ( $lockout instanceof Lockout ) {
 			// The block takes over; the next lockout needs a fresh run of failures.
-			$this->attempts->clear_ip( $bin );
+			// Only the IP's counter is reset: its failures still count against the
+			// account, so a distributed attack cannot launder them through lockouts.
+			$this->attempts->reset_ip_counter( $bin );
 			if ( ! $lockout->is_test ) {
 				$this->locked[ $ip ] = true;
 			}

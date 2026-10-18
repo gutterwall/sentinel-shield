@@ -62,6 +62,7 @@ final class EventsPage {
 			'twofa_failed'          => __( 'Wrong two-factor codes', 'sentinel-shield' ),
 			'twofa_backup_used'     => __( 'Backup code used', 'sentinel-shield' ),
 			'twofa_no_method'       => __( 'Two-factor login impossible', 'sentinel-shield' ),
+			'twofa_devices_revoked' => __( 'Trusted browsers revoked', 'sentinel-shield' ),
 			'would_deny_login'      => __( 'Would deny login (test mode)', 'sentinel-shield' ),
 			'geo_db_updated'        => __( 'Country database updated', 'sentinel-shield' ),
 			'geo_db_error'          => __( 'Country database update failed', 'sentinel-shield' ),

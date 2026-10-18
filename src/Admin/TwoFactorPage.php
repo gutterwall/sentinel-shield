@@ -191,10 +191,25 @@ final class TwoFactorPage {
 
 		// Trusted browsers.
 		if ( (int) $this->settings()->get( 'twofa.remember_days', 0 ) > 0 ) {
-			echo '<div class="ss-card"><h2>' . esc_html__( 'Trusted browsers', 'sentinel-shield' ) . '</h2><p>' . esc_html__( 'Browsers where you ticked "Trust this browser" are not asked for a code for a while. Forget them all if you lost a device or used a shared computer.', 'sentinel-shield' ) . '</p>';
+			echo '<div class="ss-card"><h2>' . esc_html__( 'Trusted browsers', 'sentinel-shield' ) . '</h2><p>' . esc_html__( 'Browsers where you ticked "Trust this browser" are not asked for a code for a while. Revoke any you do not recognize, or forget them all if you lost a device or used a shared computer. Changing your password, or adding, replacing or removing a method, forgets them all automatically.', 'sentinel-shield' ) . '</p>';
+			$devices = $this->users()->devices( (int) wp_get_current_user()->ID );
+			if ( $devices ) {
+				echo '<table class="widefat striped ss-narrow"><thead><tr><th>' . esc_html__( 'Browser', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Trusted', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Last used', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Until', 'sentinel-shield' ) . '</th><th></th></tr></thead><tbody>';
+				foreach ( $devices as $device_id => $device ) {
+					echo '<tr><td>' . esc_html( '' === $device['agent'] ? __( 'Unknown browser', 'sentinel-shield' ) : self::browser_label( (string) $device['agent'] ) ) . '<br><span class="description">' . esc_html( (string) $device['ip'] ) . '</span></td>';
+					echo '<td>' . esc_html( wp_date( 'Y-m-d H:i', (int) $device['created'] ) ) . '</td><td>' . esc_html( wp_date( 'Y-m-d H:i', (int) $device['used'] ) ) . '</td><td>' . esc_html( wp_date( 'Y-m-d', (int) $device['expires'] ) ) . '</td><td>';
+					$this->form_open( 'forget_device' );
+					echo '<input type="hidden" name="device" value="' . esc_attr( (string) $device_id ) . '">';
+					submit_button( __( 'Revoke', 'sentinel-shield' ), 'small', 'submit', false );
+					echo '</form></td></tr>';
+				}
+				echo '</tbody></table><p>';
+			} else {
+				echo '<p class="description">' . esc_html__( 'No browser is trusted right now.', 'sentinel-shield' ) . '</p><p>';
+			}
 			$this->form_open( 'forget_devices' );
 			submit_button( __( 'Forget all trusted browsers', 'sentinel-shield' ), 'secondary', 'submit', false );
-			echo '</form></div>';
+			echo '</form></p></div>';
 		}
 		echo '</div>';
 	}
@@ -262,10 +277,60 @@ final class TwoFactorPage {
 				$users->forget_devices( $id );
 				View::flash( 'success', __( 'All trusted browsers were forgotten. Each will be asked for a code at the next login.', 'sentinel-shield' ) );
 				break;
+			case 'forget_device':
+				$device = isset( $_POST['device'] ) ? sanitize_key( wp_unslash( $_POST['device'] ) ) : '';
+				if ( $users->forget_device( $id, $device ) ) {
+					View::flash( 'success', __( 'That browser was revoked. It will be asked for a code at the next login.', 'sentinel-shield' ) );
+					$this->log( 'twofa_devices_revoked', $user, __( 'One trusted browser revoked', 'sentinel-shield' ) );
+				}
+				break;
 			default:
 				View::flash( 'error', __( 'Unknown action.', 'sentinel-shield' ) );
 		}
 		View::redirect( $back );
+	}
+
+	/**
+	 * Short browser name from a user agent, e.g. "Firefox on Windows".
+	 *
+	 * @param string $agent User agent.
+	 */
+	public static function browser_label( string $agent ): string {
+		$browsers = array(
+			'Edg/'     => 'Edge',
+			'OPR/'     => 'Opera',
+			'Firefox/' => 'Firefox',
+			'Chrome/'  => 'Chrome',
+			'Safari/'  => 'Safari',
+		);
+		$systems  = array(
+			'Windows'  => 'Windows',
+			'iPhone'   => 'iPhone',
+			'iPad'     => 'iPad',
+			'Android'  => 'Android',
+			'Mac OS X' => 'macOS',
+			'CrOS'     => 'ChromeOS',
+			'Linux'    => 'Linux',
+		);
+		$browser  = '';
+		foreach ( $browsers as $needle => $name ) {
+			if ( str_contains( $agent, $needle ) ) {
+				$browser = $name;
+				break;
+			}
+		}
+		$system = '';
+		foreach ( $systems as $needle => $name ) {
+			if ( str_contains( $agent, $needle ) ) {
+				$system = $name;
+				break;
+			}
+		}
+		if ( '' === $browser ) {
+			return mb_substr( $agent, 0, 60 );
+		}
+		/* translators: 1: browser, 2: operating system. */
+		return '' === $system ? $browser : sprintf( __( '%1$s on %2$s', 'sentinel-shield' ), $browser, $system );
 	}
 
 	/**

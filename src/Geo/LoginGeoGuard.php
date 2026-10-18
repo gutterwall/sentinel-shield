@@ -125,7 +125,7 @@ final class LoginGeoGuard {
 		}
 		// A request that fell back to a proxy's own IP must not inherit the proxy's allowlist entry.
 		// An unusable IP is not "protected" here: it falls under the unknown-country rule.
-		if ( null !== IpAddress::to_binary( $ip ) && ! ( $current && ( $this->ip_fallback )() ) && $this->gate->is_protected( $ip ) ) {
+		if ( null !== IpAddress::to_binary( $ip ) && ! ( $current && ( $this->ip_fallback )() ) && $this->gate->is_protected( $ip, true ) ) {
 			$out['reason'] = 'allowlist';
 			return $out;
 		}

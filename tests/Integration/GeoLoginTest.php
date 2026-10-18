@@ -296,10 +296,19 @@ final class GeoLoginTest extends \WP_UnitTestCase {
 			GeoLoginModule::protect_current_admin( $c );
 			$this->assertSame( 'off', $settings->get( 'modules.geo_login.test_mode' ) );
 
-			// Denied by country but allowlisted (as the admin save does for real client IPs): nothing changes.
+			// Denied by country; the automatic administrator allowlist entry does not
+			// exempt from login rules, so this still switches to test mode.
 			$all['geo']['countries'] = 'US';
 			$settings->save_network( $all );
 			$c->get( BlockRepository::class )->add( 'allow', Cidr::parse( '203.0.113.9' ), 'admin', 'admin_auto' );
+			$c->get( RuleCache::class )->flush();
+			GeoLoginModule::protect_current_admin( $c );
+			$this->assertSame( 'on', $settings->get( 'modules.geo_login.test_mode' ) );
+
+			// An allowlist entry added by hand does exempt: nothing changes.
+			$all['modules']['geo_login']['test_mode'] = 'off';
+			$settings->save_network( $all );
+			$c->get( BlockRepository::class )->add( 'allow', Cidr::parse( '203.0.113.9' ), 'my office', 'manual' );
 			$c->get( RuleCache::class )->flush();
 			GeoLoginModule::protect_current_admin( $c );
 			$this->assertSame( 'off', $settings->get( 'modules.geo_login.test_mode' ) );

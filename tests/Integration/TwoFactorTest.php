@@ -154,7 +154,7 @@ final class TwoFactorTest extends \WP_UnitTestCase {
 			unset( $_REQUEST['redirect_to'], $_POST['rememberme'] );
 		}
 		$this->assertSame( 0, did_action( 'set_auth_cookie' ), 'no login cookie yet' );
-		$pending = get_user_meta( $user->ID, UserTwoFactor::META . 'login', true );
+		$pending = array_values( (array) get_user_meta( $user->ID, UserTwoFactor::META . 'login', true ) )[0];
 		$this->assertSame( 'http://example.org/wp-admin/edit.php', $pending['redirect'] );
 		$this->assertTrue( $pending['remember'] );
 		$this->assertSame( $this->now + 600, $pending['expires'] );
@@ -240,15 +240,24 @@ final class TwoFactorTest extends \WP_UnitTestCase {
 		$this->assertSame( 'wrong', $step->attempt( $admin, $token, '12345678' === $m[1] . $m[2] ? '87654321' : '12345678' )['result'] );
 		$this->assertSame( array( 'ok', 'email' ), array_values( $step->attempt( $admin, $token, $m[1] . ' ' . $m[2] ) ) );
 
-		// Resend limits: one a minute, five per login.
+		// Resend limits are per account, whichever login asks: one a minute, EMAILS_PER_HOUR an hour.
+		$this->now += 61;
 		$token = $step->begin( $admin );
+		$this->assertCount( 2, tests_retrieve_phpmailer_instance()->mock_sent );
 		$this->assertWPError( $step->send_email_code( $admin, $token ), 'less than a minute' );
-		for ( $i = 2; $i <= 5; $i++ ) {
+		for ( $i = 3; $i <= TwoFactorLogin::EMAILS_PER_HOUR; $i++ ) {
 			$this->now += 61;
 			$this->assertTrue( $step->send_email_code( $admin, $token ) );
 		}
 		$this->now += 61;
-		$this->assertWPError( $step->send_email_code( $admin, $token ), 'sixth code' );
+		$this->assertWPError( $step->send_email_code( $admin, $token ), 'hourly budget used up' );
+		// Starting a new login does not reset it.
+		$this->now += 61;
+		$fresh = $step->begin( $admin );
+		$this->assertIsString( $fresh );
+		$this->assertCount( TwoFactorLogin::EMAILS_PER_HOUR, tests_retrieve_phpmailer_instance()->mock_sent, 'no extra email' );
+		$this->assertWPError( $step->send_email_code( $admin, $fresh ) );
+		$this->assertNotNull( $step->pending( $admin->ID, $token ), 'the earlier login is still pending' );
 
 		// Everyone; and email codes switched off.
 		$this->login_step( array( 'required' => 'all' ) );
@@ -292,23 +301,135 @@ final class TwoFactorTest extends \WP_UnitTestCase {
 		$step     = $this->login_step( array( 'remember_days' => 30 ) );
 		$name     = $step->trust_cookie_name( $user->ID );
 		$this->assertMatchesRegularExpression( '/^sentinel_shield_2fa_trust_[0-9a-f]{16}$/', $name, 'the name does not reveal the user ID' );
+		$until  = $this->now + DAY_IN_SECONDS;
+		$laptop = $this->users->add_device( $user->ID, $until, 'Mozilla/5.0 (Windows NT 10.0) Firefox/140.0', '198.51.100.20', $this->now );
+		$phone  = $this->users->add_device( $user->ID, $until, 'Mozilla/5.0 (iPhone) Safari/605.1', '198.51.100.21', $this->now );
 
-		$_COOKIE[ $name ] = $step->trust_value( $user->ID, $this->now + DAY_IN_SECONDS );
+		$_COOKIE[ $name ] = $step->trust_value( $user->ID, $laptop, $until );
 		$this->assertSame( $user, $step->authenticate( $user ) );
 
-		$_COOKIE[ $name ] = $step->trust_value( $user->ID, $this->now - 1 );
+		$_COOKIE[ $name ] = $step->trust_value( $user->ID, $laptop, $this->now - 1 );
 		$this->assertFalse( $step->trusted_browser( $user ), 'expired' );
 
-		$_COOKIE[ $name ] = ( $this->now + 999 ) . '|' . substr( $step->trust_value( $user->ID, $this->now + DAY_IN_SECONDS ), -64 );
+		$_COOKIE[ $name ] = $laptop . '|' . ( $this->now + 999 ) . '|' . substr( $step->trust_value( $user->ID, $laptop, $until ), -64 );
 		$this->assertFalse( $step->trusted_browser( $user ), 'expiry cannot be changed' );
 
-		$_COOKIE[ $name ] = $step->trust_value( $user->ID, $this->now + DAY_IN_SECONDS );
-		$this->users->forget_devices( $user->ID );
-		$this->assertFalse( $step->trusted_browser( $user ), 'forgotten' );
+		$_COOKIE[ $name ] = $step->trust_value( $user->ID, str_repeat( 'a', 24 ), $until );
+		$this->assertFalse( $step->trusted_browser( $user ), 'a correctly signed but unregistered browser is not trusted' );
 
-		$_COOKIE[ $name ] = $step->trust_value( $user->ID, $this->now + DAY_IN_SECONDS );
+		// Revoking one browser leaves the others.
+		$this->assertTrue( $this->users->forget_device( $user->ID, $laptop ) );
+		$_COOKIE[ $name ] = $step->trust_value( $user->ID, $laptop, $until );
+		$this->assertFalse( $step->trusted_browser( $user ), 'revoked' );
+		$_COOKIE[ $name ] = $step->trust_value( $user->ID, $phone, $until );
+		$this->assertTrue( $step->trusted_browser( $user ) );
+
+		$this->users->forget_devices( $user->ID );
+		$this->assertFalse( $step->trusted_browser( $user ), 'all forgotten' );
+
+		$phone            = $this->users->add_device( $user->ID, $until, 'x', '198.51.100.21', $this->now );
+		$_COOKIE[ $name ] = $step->trust_value( $user->ID, $phone, $until );
 		$this->login_step( array( 'remember_days' => 0 ) );
 		$this->assertFalse( $this->login->trusted_browser( $user ), 'feature off' );
+	}
+
+	/**
+	 * Review finding 4: a password change or reset, or a new authenticator,
+	 * ends trust in every browser and every pending code screen.
+	 */
+	public function test_credential_changes_revoke_trusted_browsers_and_pending_logins(): void {
+		[ $user ] = $this->app_user();
+		$step     = $this->login_step( array( 'remember_days' => 30 ) );
+		$name     = $step->trust_cookie_name( $user->ID );
+		$until    = $this->now + DAY_IN_SECONDS;
+		$trust    = function () use ( $user, $step, $name, $until ): void {
+			$device           = $this->users->add_device( $user->ID, $until, 'x', '198.51.100.20', $this->now );
+			$_COOKIE[ $name ] = $step->trust_value( $user->ID, $device, $until );
+			$this->assertTrue( $step->trusted_browser( $user ) );
+		};
+
+		$trust();
+		$token = $step->begin( $user );
+		wp_set_password( 'new-password-1', $user->ID );
+		$this->assertFalse( $step->trusted_browser( $user ), 'wp_set_password' );
+		$this->assertNull( $step->pending( $user->ID, $token ), 'pending code screen ended' );
+		$this->assertContains( 'twofa_devices_revoked', $this->event_types() );
+
+		$trust();
+		wp_update_user(
+			array(
+				'ID'        => $user->ID,
+				'user_pass' => 'new-password-2',
+			)
+		);
+		$this->assertFalse( $step->trusted_browser( $user ), 'profile password change' );
+
+		$trust();
+		do_action( 'after_password_reset', get_userdata( $user->ID ), 'x' );
+		$this->assertFalse( $step->trusted_browser( $user ), 'password reset' );
+
+		$trust();
+		wp_update_user(
+			array(
+				'ID'           => $user->ID,
+				'display_name' => 'Renamed',
+			)
+		);
+		$this->assertTrue( $step->trusted_browser( $user ), 'other profile changes keep trust' );
+
+		$secret = $this->users->pending_secret( $user->ID, true );
+		$this->assertTrue( $this->users->enable_totp( $user->ID, Totp::code( $secret, intdiv( $this->now, 30 ) ), $this->now ) );
+		$this->assertFalse( $step->trusted_browser( $user ), 'replaced authenticator' );
+	}
+
+	/**
+	 * Review finding 5: logins live side by side, and the budgets are per account.
+	 */
+	public function test_restarting_the_login_cannot_reset_limits_or_cancel_others(): void {
+		[ $user, $secret ] = $this->app_user();
+		$step              = $this->login_step();
+		$first             = $step->begin( $user );
+		$second            = $step->begin( $user );
+		$this->assertNotNull( $step->pending( $user->ID, $first ), 'a new login does not cancel the first' );
+		$this->assertNotNull( $step->pending( $user->ID, $second ) );
+
+		// Wrong codes count across logins.
+		$wrong = '000000' === $this->code( $secret ) ? '111111' : '000000';
+		for ( $i = 0; $i < 4; $i++ ) {
+			$this->assertSame( 'wrong', $step->attempt( $user, $first, $wrong )['result'] );
+		}
+		$third = $step->begin( $user );
+		$this->assertSame( 'wrong', $step->attempt( $user, $third, $wrong )['result'], 'a fresh login has its own five tries' );
+
+		// ...but not past the hourly account budget.
+		$tokens = array( $third );
+		$wrongs = 5;
+		while ( $wrongs < TwoFactorLogin::WRONG_PER_HOUR ) {
+			$token = end( $tokens );
+			$out   = $step->attempt( $user, $token, $wrong )['result'];
+			++$wrongs;
+			if ( 'too_many' === $out || null === $step->pending( $user->ID, $token ) ) {
+				$tokens[] = $step->begin( $user );
+			}
+		}
+		$blocked = $step->begin( $user );
+		$this->assertWPError( $blocked, 'no new logins after too many wrong codes' );
+		$this->assertSame( TwoFactorLogin::ERROR_LIMIT, $blocked->get_error_code() );
+
+		// A day later everything works again, and a correct code ends all pending logins.
+		$this->now += DAY_IN_SECONDS;
+		$a = $step->begin( $user );
+		$b = $step->begin( $user );
+		$this->assertSame( 'ok', $step->attempt( $user, $b, $this->code( $secret ) )['result'] );
+		$this->assertNull( $step->pending( $user->ID, $a ) );
+
+		// At most CHALLENGES_PER_HOUR new logins an hour.
+		$this->now += DAY_IN_SECONDS;
+		for ( $i = 0; $i < TwoFactorLogin::CHALLENGES_PER_HOUR; $i++ ) {
+			$this->assertIsString( $step->begin( $user ) );
+		}
+		$this->assertWPError( $step->begin( $user ) );
+		$this->assertLessThanOrEqual( TwoFactorLogin::MAX_CHALLENGES, count( (array) get_user_meta( $user->ID, UserTwoFactor::META . 'login', true ) ) );
 	}
 
 	public function test_unreadable_secret_never_falls_back_to_password_only(): void {
@@ -334,11 +455,11 @@ final class TwoFactorTest extends \WP_UnitTestCase {
 		$this->users->set_email( $user->ID, true );
 		$this->users->new_backup_codes( $user->ID );
 		$step->begin( $user );
-		$trust = $step->trust_value( $user->ID, $this->now + 999 );
+		$trust = $step->trust_value( $user->ID, 'device', $this->now + 999 );
 		$this->users->reset( $user->ID );
 		$this->assertSame( array( 'totp' => false, 'totp_readable' => false, 'email' => false, 'backup' => 0 ), $this->users->summary( $user->ID ) );
 		$this->assertSame( '', get_user_meta( $user->ID, UserTwoFactor::META . 'login', true ) );
-		$this->assertNotSame( $trust, $step->trust_value( $user->ID, $this->now + 999 ), 'trusted browsers forgotten' );
+		$this->assertNotSame( $trust, $step->trust_value( $user->ID, 'device', $this->now + 999 ), 'trusted browsers forgotten' );
 		$this->assertFalse( $step->needs_second_step( $user ) );
 	}
 

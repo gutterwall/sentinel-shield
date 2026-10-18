@@ -22,7 +22,7 @@ final class UserTwoFactor {
 	/**
 	 * Every meta key this class and the login flow write.
 	 */
-	public const KEYS = array( 'totp', 'totp_pending', 'totp_last_step', 'totp_added', 'email', 'backup', 'backup_created', 'devices', 'login' );
+	public const KEYS = array( 'totp', 'totp_pending', 'totp_last_step', 'totp_added', 'email', 'backup', 'backup_created', 'devices', 'trusted', 'login', 'budget' );
 
 	/**
 	 * Constructor.
@@ -83,6 +83,8 @@ final class UserTwoFactor {
 		update_user_meta( $user_id, self::META . 'totp_last_step', $step );
 		update_user_meta( $user_id, self::META . 'totp_added', $now );
 		delete_user_meta( $user_id, self::META . 'totp_pending' );
+		// A new or replaced authenticator starts with no trusted browsers.
+		$this->forget_devices( $user_id );
 		return true;
 	}
 
@@ -95,6 +97,7 @@ final class UserTwoFactor {
 		foreach ( array( 'totp', 'totp_pending', 'totp_last_step', 'totp_added' ) as $key ) {
 			delete_user_meta( $user_id, self::META . $key );
 		}
+		$this->forget_devices( $user_id );
 	}
 
 	/**
@@ -137,6 +140,7 @@ final class UserTwoFactor {
 			update_user_meta( $user_id, self::META . 'email', '1' );
 		} else {
 			delete_user_meta( $user_id, self::META . 'email' );
+			$this->forget_devices( $user_id );
 		}
 	}
 
@@ -215,6 +219,79 @@ final class UserTwoFactor {
 	 */
 	public function forget_devices( int $user_id ): void {
 		update_user_meta( $user_id, self::META . 'devices', $this->device_version( $user_id ) + 1 );
+		delete_user_meta( $user_id, self::META . 'trusted' );
+	}
+
+	/**
+	 * Trusted browsers that have not expired: id => {created, expires, used, agent, ip}.
+	 *
+	 * @param int      $user_id User.
+	 * @param int|null $now     Unix time.
+	 * @return array<string, array{created:int, expires:int, used:int, agent:string, ip:string}>
+	 */
+	public function devices( int $user_id, ?int $now = null ): array {
+		$now     = $now ?? time();
+		$devices = get_user_meta( $user_id, self::META . 'trusted', true );
+		if ( ! is_array( $devices ) ) {
+			return array();
+		}
+		return array_filter( $devices, static fn( $d ): bool => is_array( $d ) && (int) ( $d['expires'] ?? 0 ) > $now );
+	}
+
+	/**
+	 * Registers a trusted browser and returns its ID.
+	 *
+	 * @param int    $user_id User.
+	 * @param int    $expires Unix time.
+	 * @param string $agent   Browser (user agent).
+	 * @param string $ip      IP it was trusted from.
+	 * @param int    $now     Unix time.
+	 */
+	public function add_device( int $user_id, int $expires, string $agent, string $ip, int $now ): string {
+		$id             = bin2hex( random_bytes( 12 ) );
+		$devices        = $this->devices( $user_id, $now );
+		$devices[ $id ] = array(
+			'created' => $now,
+			'expires' => $expires,
+			'used'    => $now,
+			'agent'   => mb_substr( $agent, 0, 200 ),
+			'ip'      => $ip,
+		);
+		// Keep the 20 most recent.
+		uasort( $devices, static fn( array $a, array $b ): int => $b['created'] <=> $a['created'] );
+		update_user_meta( $user_id, self::META . 'trusted', array_slice( $devices, 0, 20, true ) );
+		return $id;
+	}
+
+	/**
+	 * Notes that a trusted browser was used (at most hourly writes).
+	 *
+	 * @param int    $user_id User.
+	 * @param string $id   Device ID.
+	 * @param int    $now  Unix time.
+	 */
+	public function touch_device( int $user_id, string $id, int $now ): void {
+		$devices = $this->devices( $user_id, $now );
+		if ( isset( $devices[ $id ] ) && $now - (int) $devices[ $id ]['used'] > HOUR_IN_SECONDS ) {
+			$devices[ $id ]['used'] = $now;
+			update_user_meta( $user_id, self::META . 'trusted', $devices );
+		}
+	}
+
+	/**
+	 * Revokes one trusted browser.
+	 *
+	 * @param int    $user_id User.
+	 * @param string $id      Device ID.
+	 */
+	public function forget_device( int $user_id, string $id ): bool {
+		$devices = $this->devices( $user_id );
+		if ( ! isset( $devices[ $id ] ) ) {
+			return false;
+		}
+		unset( $devices[ $id ] );
+		update_user_meta( $user_id, self::META . 'trusted', $devices );
+		return true;
 	}
 
 	/**

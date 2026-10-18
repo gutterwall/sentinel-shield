@@ -78,6 +78,12 @@ final class BruteForceTest extends \WP_UnitTestCase {
 	}
 
 	private static function unhook( BruteForceGuard $guard ): void {
+		remove_filter( 'authenticate', array( $guard, 'admit' ), 1 );
+		remove_filter( 'authenticate', array( $guard, 'resume_credential_checks' ), PHP_INT_MAX );
+		remove_filter( 'determine_current_user', array( $guard, 'rest_admit' ), 19 );
+		remove_action( 'application_password_failed_authentication', array( $guard, 'application_password_failed' ) );
+		remove_filter( 'rest_authentication_errors', array( $guard, 'rest_error' ), 5 );
+		remove_action( 'shutdown', array( $guard, 'release' ) );
 		remove_filter( 'authenticate', array( $guard, 'authenticate' ), 95 );
 		remove_filter( 'authenticate', array( $guard, 'generic_error' ), 100 );
 		remove_action( 'wp_authenticate_application_password_errors', array( $guard, 'application_password' ) );
@@ -140,6 +146,126 @@ final class BruteForceTest extends \WP_UnitTestCase {
 	 */
 	private function events(): array {
 		return Plugin::instance()->container()->get( EventRepository::class )->query( array() )[0];
+	}
+
+	/**
+	 * Review 2 finding 2: a lockout resets the IP's counter only; its failures
+	 * still count against the account, so rotating IPs cannot launder them.
+	 */
+	public function test_ip_lockouts_do_not_erase_account_history(): void {
+		self::factory()->user->create( array( 'user_login' => 'target', 'user_pass' => 'right' ) );
+		$this->guard( array( 'max_failures' => 5, 'account_max_failures' => 20 ) );
+		foreach ( array( '198.51.100.31', '198.51.100.32', '198.51.100.33', '198.51.100.34' ) as $ip ) {
+			$this->ip = $ip;
+			for ( $i = 0; $i < 5; $i++ ) {
+				$this->login( 'target', 'wrong' . $i );
+			}
+		}
+		$this->assertCount( 4, $this->locks, 'each IP was locked out once' );
+		$repo  = Plugin::instance()->container()->get( LoginAttemptRepository::class );
+		$since = $this->now - 900;
+		$this->assertSame( 0, $repo->count_ip( (string) inet_pton( '198.51.100.31' ), $since ), 'IP counter reset by its lockout' );
+		$this->assertSame( 20, $repo->count_account( BruteForceGuard::account_key( 'target' ), $since )['failures'], 'account keeps all 20' );
+		$this->assertSame( 20, $repo->count_since( 0 ), 'history kept for reports' );
+
+		$this->ip = '198.51.100.35';
+		$this->assertSame( BruteForceGuard::ERROR_CODE, $this->login( 'target', 'right' )->get_error_code(), 'distributed limit reached' );
+	}
+
+	/**
+	 * Review 2 finding 3: a refused login is refused before WordPress hashes the
+	 * password, and the password checks come back for the next login.
+	 */
+	public function test_refused_logins_skip_password_hashing(): void {
+		self::factory()->user->create( array( 'user_login' => 'hashme', 'user_pass' => 'right' ) );
+		$this->guard( array( 'max_failures' => 2 ) );
+		$this->lock_result = 'off';
+		$checks            = 0;
+		$count             = static function ( $check ) use ( &$checks ) {
+			++$checks;
+			return $check;
+		};
+		add_filter( 'check_password', $count );
+		$this->login( 'hashme', 'wrong1' );
+		$this->login( 'hashme', 'wrong2' );
+		$this->assertSame( 2, $checks );
+
+		$this->assertSame( BruteForceGuard::ERROR_CODE, $this->login( 'hashme', 'right' )->get_error_code() );
+		$this->assertSame( BruteForceGuard::ERROR_CODE, $this->login( 'nosuchuser', 'x' )->get_error_code() );
+		$this->assertSame( 2, $checks, 'no password was checked for refused logins' );
+		$this->assertSame( 20, has_filter( 'authenticate', 'wp_authenticate_username_password' ), 'core checks restored' );
+
+		$this->ip = '198.51.100.40';
+		$this->assertInstanceOf( \WP_User::class, $this->login( 'hashme', 'right' ) );
+		$this->assertSame( 3, $checks );
+		remove_filter( 'check_password', $count );
+	}
+
+	/**
+	 * Review 2 finding 1: wrong application passwords sent to the REST API are
+	 * counted, and once over the limit refused before any hashing.
+	 */
+	public function test_rest_application_password_guesses_are_counted_and_refused_early(): void {
+		$user = self::factory()->user->create_and_get( array( 'user_login' => 'restuser' ) );
+		[ $password ] = \WP_Application_Passwords::create_new_application_password( $user->ID, array( 'name' => 'test' ) );
+		$this->guard( array( 'max_failures' => 3 ) );
+		$this->lock_result = 'off';
+		add_filter( 'wp_is_application_passwords_available', '__return_true' );
+		add_filter( 'application_password_is_api_request', '__return_true' );
+		$checks = 0;
+		$count  = static function ( $check ) use ( &$checks ) {
+			++$checks;
+			return $check;
+		};
+		add_filter( 'check_password', $count );
+		$rest = function ( string $pass ) use ( $user ) {
+			$_SERVER['PHP_AUTH_USER'] = $user->user_login;
+			$_SERVER['PHP_AUTH_PW']   = $pass;
+			$id                       = apply_filters( 'determine_current_user', false );
+			unset( $_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW'] );
+			return $id;
+		};
+		try {
+			$this->assertSame( $user->ID, $rest( $password ), 'a correct application password works' );
+			$repo = Plugin::instance()->container()->get( LoginAttemptRepository::class );
+			for ( $i = 0; $i < 3; $i++ ) {
+				$this->assertFalse( $rest( 'wrong wrong wrong' ) );
+			}
+			$this->assertSame( 3, $repo->count_ip( (string) inet_pton( $this->ip ), 0 ), 'each REST guess counted once' );
+
+			$before = $checks;
+			$this->assertFalse( $rest( $password ), 'refused even with the right password' );
+			$this->assertSame( $before, $checks, 'refused before hashing' );
+			$error = apply_filters( 'rest_authentication_errors', null );
+			$this->assertWPError( $error );
+			$this->assertSame( 429, $error->get_error_data()['status'] );
+		} finally {
+			remove_filter( 'check_password', $count );
+			remove_filter( 'wp_is_application_passwords_available', '__return_true' );
+			remove_filter( 'application_password_is_api_request', '__return_true' );
+			if ( ! has_filter( 'determine_current_user', 'wp_validate_application_password' ) ) {
+				add_filter( 'determine_current_user', 'wp_validate_application_password', 20 );
+			}
+		}
+	}
+
+	/**
+	 * A wrong application password on the normal login path (XML-RPC) is counted
+	 * once, by wp_login_failed, not twice.
+	 */
+	public function test_application_password_failure_on_the_login_path_counts_once(): void {
+		$user = self::factory()->user->create_and_get( array( 'user_login' => 'xmlrpcuser' ) );
+		\WP_Application_Passwords::create_new_application_password( $user->ID, array( 'name' => 'test' ) );
+		$this->guard();
+		add_filter( 'wp_is_application_passwords_available', '__return_true' );
+		add_filter( 'application_password_is_api_request', '__return_true' );
+		try {
+			$this->assertWPError( $this->login( 'xmlrpcuser', 'abcd efgh ijkl mnop qrst uvwx' ) );
+			$this->assertSame( 1, Plugin::instance()->container()->get( LoginAttemptRepository::class )->count_ip( (string) inet_pton( $this->ip ), 0 ) );
+		} finally {
+			remove_filter( 'wp_is_application_passwords_available', '__return_true' );
+			remove_filter( 'application_password_is_api_request', '__return_true' );
+		}
 	}
 
 	public function test_ip_limit_locks_out_and_refuses_the_rest_of_the_request(): void {

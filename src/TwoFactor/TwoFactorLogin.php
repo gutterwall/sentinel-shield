@@ -38,11 +38,18 @@ final class TwoFactorLogin {
 	public const ERROR_API     = 'sentinel_shield_2fa_api';
 	public const ERROR_WRONG   = 'sentinel_shield_2fa_failed';
 	public const ERROR_SETUP   = 'sentinel_shield_2fa_setup';
+	public const ERROR_LIMIT   = 'sentinel_shield_2fa_limit';
 	public const LOGIN_TIMEOUT = 600;
 	public const MAX_TRIES     = 5;
 	public const EMAIL_MAX     = 5;
 	public const EMAIL_GAP     = 60;
-	public const LOCK_WAIT     = 10;
+	public const LOCK_WAIT     = 2;
+
+	// Account-wide budgets, across all logins of the last hour.
+	public const CHALLENGES_PER_HOUR = 10;
+	public const EMAILS_PER_HOUR     = 6;
+	public const WRONG_PER_HOUR      = 15;
+	public const MAX_CHALLENGES      = 3;
 
 	/**
 	 * Redirects and stops: fn( string $url ): never.
@@ -91,6 +98,10 @@ final class TwoFactorLogin {
 	public function register(): void {
 		add_filter( 'authenticate', array( $this, 'authenticate' ), 9999, 3 );
 		add_action( 'login_form_' . self::ACTION, array( $this, 'screen' ) );
+		// A changed password ends trust in every browser and every pending code screen.
+		add_action( 'after_password_reset', array( $this, 'password_reset' ) );
+		add_action( 'wp_set_password', array( $this, 'password_set' ), 10, 2 );
+		add_action( 'profile_update', array( $this, 'profile_updated' ), 10, 2 );
 		add_filter(
 			'shake_error_codes',
 			static function ( array $codes ): array {
@@ -205,40 +216,86 @@ final class TwoFactorLogin {
 		$interim  = ! empty( $_REQUEST['interim-login'] );
 		// phpcs:enable
 		$token = $this->begin( $user, $redirect, $remember, $interim );
+		if ( is_wp_error( $token ) ) {
+			return $token;
+		}
 		$this->set_cookie( self::COOKIE, $user->ID . '|' . $token, 0 );
 		( $this->redirect )( $this->screen_url( $interim ) );
 	}
 
 	/**
-	 * Starts the second step: stores the pending login and, when email is the
-	 * only way in, sends the first code.
+	 * Starts the second step: stores a new pending login next to any others
+	 * (up to MAX_CHALLENGES, so starting a login does not cancel someone else's)
+	 * and, when email is the only way in, sends the first code. Each account can
+	 * start CHALLENGES_PER_HOUR logins an hour, and the email budget is shared
+	 * by all of them, so restarting the login does not reset any limit.
 	 *
 	 * @param \WP_User $user     Account.
 	 * @param string   $redirect Where to go afterwards.
 	 * @param bool     $remember "Remember me" was ticked.
 	 * @param bool     $interim  Session-expired login popup.
-	 * @return string Token for the cookie.
+	 * @return string|\WP_Error Token for the cookie.
 	 */
-	public function begin( \WP_User $user, string $redirect = '', bool $remember = false, bool $interim = false ): string {
-		$token = bin2hex( random_bytes( 32 ) );
-		$this->save_pending(
-			(int) $user->ID,
-			array(
-				'hash'     => hash( 'sha256', $token ),
-				'expires'  => ( $this->clock )() + self::LOGIN_TIMEOUT,
-				'redirect' => $redirect,
-				'remember' => $remember,
-				'interim'  => $interim,
-				'tries'    => 0,
-				'email'    => '',
-				'email_at' => array(),
-			)
+	public function begin( \WP_User $user, string $redirect = '', bool $remember = false, bool $interim = false ): string|\WP_Error {
+		$out = Mutex::run(
+			self::lock_name( (int) $user->ID ),
+			self::LOCK_WAIT,
+			fn(): array|\WP_Error => $this->begin_locked( $user, $redirect, $remember, $interim ),
+			new \WP_Error( self::ERROR_LIMIT, __( '<strong>Error:</strong> The site is busy. Please try again.', 'sentinel-shield' ) )
 		);
+		if ( is_wp_error( $out ) ) {
+			return $out;
+		}
+		if ( '' !== $out['code'] ) {
+			$this->mail_code( $user, $out['code'] );
+		}
+		return $out['token'];
+	}
+
+	/**
+	 * Starts the login under the account's lock; returns the token and any code to email.
+	 *
+	 * @param \WP_User $user     Account.
+	 * @param string   $redirect Where to go afterwards.
+	 * @param bool     $remember "Remember me" was ticked.
+	 * @param bool     $interim  Session-expired login popup.
+	 * @return array{token:string, code:string}|\WP_Error
+	 */
+	private function begin_locked( \WP_User $user, string $redirect, bool $remember, bool $interim ): array|\WP_Error {
+		$id = (int) $user->ID;
+		self::refresh( $id );
+		$now    = ( $this->clock )();
+		$budget = $this->budget( $id, $now );
+		if ( count( $budget['started'] ) >= self::CHALLENGES_PER_HOUR || count( $budget['wrong'] ) >= self::WRONG_PER_HOUR ) {
+			if ( Throttle::once( 'twofa_limit_' . $id, HOUR_IN_SECONDS ) ) {
+				$this->log( 'twofa_failed', $user, __( 'Too many two-factor logins or wrong codes for this account in the last hour; new logins are refused for now. Someone may know the password.', 'sentinel-shield' ) );
+			}
+			return new \WP_Error( self::ERROR_LIMIT, __( '<strong>Error:</strong> Too many login attempts for this account. Please try again later.', 'sentinel-shield' ) );
+		}
+		$budget['started'][] = $now;
+		$this->save_budget( $id, $budget );
+		$token   = bin2hex( random_bytes( 32 ) );
+		$pending = array(
+			'hash'     => hash( 'sha256', $token ),
+			'expires'  => $now + self::LOGIN_TIMEOUT,
+			'redirect' => $redirect,
+			'remember' => $remember,
+			'interim'  => $interim,
+			'tries'    => 0,
+			'email'    => '',
+			'email_at' => array(),
+		);
+		$this->save_pending( $id, $pending );
+		$code    = '';
 		$methods = $this->methods( $user );
 		if ( ! in_array( 'totp', $methods, true ) && in_array( 'email', $methods, true ) ) {
-			$this->send_email_code( $user, $token );
+			$reserved = $this->reserve_email( $user, $pending );
+			$code     = is_string( $reserved ) ? $reserved : '';
 		}
-		return $token;
+		return array(
+			'token' => $token,
+			'code'  => $code,
+		);
 	}
 
 	/**
@@ -249,59 +306,132 @@ final class TwoFactorLogin {
 	 * @return array<string, mixed>|null
 	 */
 	public function pending( int $user_id, string $token ): ?array {
-		$pending = get_user_meta( $user_id, UserTwoFactor::META . 'login', true );
-		if ( ! is_array( $pending ) || '' === $token || ! hash_equals( (string) ( $pending['hash'] ?? '' ), hash( 'sha256', $token ) ) ) {
+		if ( '' === $token ) {
 			return null;
 		}
-		if ( (int) ( $pending['expires'] ?? 0 ) < ( $this->clock )() ) {
-			delete_user_meta( $user_id, UserTwoFactor::META . 'login' );
-			return null;
-		}
-		return $pending;
+		return $this->challenges( $user_id )[ hash( 'sha256', $token ) ] ?? null;
 	}
 
 	/**
-	 * Emails a new 8-digit code (at most five per login, one a minute).
+	 * Pending logins that have not expired, keyed by token hash.
+	 *
+	 * @param int $user_id User.
+	 * @return array<string, array<string, mixed>>
+	 */
+	private function challenges( int $user_id ): array {
+		$stored = get_user_meta( $user_id, UserTwoFactor::META . 'login', true );
+		if ( ! is_array( $stored ) ) {
+			return array();
+		}
+		$now = ( $this->clock )();
+		return array_filter( $stored, static fn( $c ): bool => is_array( $c ) && isset( $c['hash'] ) && (int) ( $c['expires'] ?? 0 ) >= $now );
+	}
+
+	/**
+	 * Ends one pending login, or all of them.
+	 *
+	 * @param int         $user_id User.
+	 * @param string|null $hash    Token hash, or null for all.
+	 */
+	private function drop_pending( int $user_id, ?string $hash = null ): void {
+		if ( null === $hash ) {
+			delete_user_meta( $user_id, UserTwoFactor::META . 'login' );
+			return;
+		}
+		$all = $this->challenges( $user_id );
+		unset( $all[ $hash ] );
+		update_user_meta( $user_id, UserTwoFactor::META . 'login', $all );
+	}
+
+	/**
+	 * The account's two-factor activity of the last hour.
+	 *
+	 * @param int $user_id User.
+	 * @param int $now     Unix time.
+	 * @return array{started:list<int>, emails:list<int>, wrong:list<int>}
+	 */
+	private function budget( int $user_id, int $now ): array {
+		$stored = get_user_meta( $user_id, UserTwoFactor::META . 'budget', true );
+		$out    = array();
+		foreach ( array( 'started', 'emails', 'wrong' ) as $key ) {
+			$times       = is_array( $stored ) ? (array) ( $stored[ $key ] ?? array() ) : array();
+			$out[ $key ] = array_values( array_filter( array_map( 'intval', $times ), static fn( int $t ): bool => $t > $now - HOUR_IN_SECONDS ) );
+		}
+		return $out;
+	}
+
+	/**
+	 * Stores the account's two-factor activity.
+	 *
+	 * @param int                      $user_id User.
+	 * @param array<string, list<int>> $budget  Activity.
+	 */
+	private function save_budget( int $user_id, array $budget ): void {
+		update_user_meta( $user_id, UserTwoFactor::META . 'budget', $budget );
+	}
+
+	/**
+	 * Emails a new 8-digit code: at most five per login and EMAILS_PER_HOUR per
+	 * account, one a minute. The code is reserved under the account's lock and
+	 * sent after the lock is released, so a slow mail server holds no lock.
 	 *
 	 * @param \WP_User $user  Account.
 	 * @param string   $token Pending login token.
 	 * @return true|\WP_Error
 	 */
 	public function send_email_code( \WP_User $user, string $token ): bool|\WP_Error {
-		return Mutex::run(
+		$code = Mutex::run(
 			self::lock_name( (int) $user->ID ),
 			self::LOCK_WAIT,
-			fn() => $this->send_email_code_locked( $user, $token ),
+			function () use ( $user, $token ) {
+				self::refresh( (int) $user->ID );
+				$pending = $this->pending( (int) $user->ID, $token );
+				if ( null === $pending || ! in_array( 'email', $this->methods( $user ), true ) ) {
+					return new \WP_Error( 'sentinel_shield_2fa_email', __( 'Email codes are not available for this login.', 'sentinel-shield' ) );
+				}
+				return $this->reserve_email( $user, $pending );
+			},
 			new \WP_Error( 'sentinel_shield_2fa_email', __( 'The site is busy. Please try again.', 'sentinel-shield' ) )
 		);
+		return is_wp_error( $code ) ? $code : $this->mail_code( $user, (string) $code );
 	}
 
 	/**
-	 * Sends the code while holding the account's lock (see send_email_code()).
+	 * Creates and stores an email code for a pending login, within the limits.
+	 * Call with the account's lock held.
 	 *
-	 * @param \WP_User $user  Account.
-	 * @param string   $token Pending login token.
-	 * @return true|\WP_Error
+	 * @param \WP_User             $user    Account.
+	 * @param array<string, mixed> $pending Pending login.
+	 * @return string|\WP_Error The code to send.
 	 */
-	private function send_email_code_locked( \WP_User $user, string $token ): bool|\WP_Error {
-		self::refresh( (int) $user->ID );
-		$pending = $this->pending( (int) $user->ID, $token );
-		if ( null === $pending || ! in_array( 'email', $this->methods( $user ), true ) ) {
-			return new \WP_Error( 'sentinel_shield_2fa_email', __( 'Email codes are not available for this login.', 'sentinel-shield' ) );
+	private function reserve_email( \WP_User $user, array $pending ): string|\WP_Error {
+		$id     = (int) $user->ID;
+		$now    = ( $this->clock )();
+		$budget = $this->budget( $id, $now );
+		$sent   = array_map( 'intval', (array) $pending['email_at'] );
+		if ( count( $sent ) >= self::EMAIL_MAX || count( $budget['emails'] ) >= self::EMAILS_PER_HOUR ) {
+			return new \WP_Error( 'sentinel_shield_2fa_email', __( 'Too many codes were emailed for this account. Please wait, or use your authenticator app or a backup code.', 'sentinel-shield' ) );
 		}
-		$now  = ( $this->clock )();
-		$sent = array_map( 'intval', (array) $pending['email_at'] );
-		if ( count( $sent ) >= self::EMAIL_MAX ) {
-			return new \WP_Error( 'sentinel_shield_2fa_email', __( 'Too many codes were emailed for this login. Please log in again.', 'sentinel-shield' ) );
-		}
-		if ( $sent && $now - max( $sent ) < self::EMAIL_GAP ) {
+		if ( $budget['emails'] && $now - max( $budget['emails'] ) < self::EMAIL_GAP ) {
 			return new \WP_Error( 'sentinel_shield_2fa_email', __( 'A code was emailed less than a minute ago. Please wait before asking for another.', 'sentinel-shield' ) );
 		}
 		$code                = str_pad( (string) random_int( 0, 99999999 ), 8, '0', STR_PAD_LEFT );
 		$pending['email']    = BackupCodes::hash( $code, $this->box->hash_key() );
 		$pending['email_at'] = array_merge( $sent, array( $now ) );
-		$this->save_pending( (int) $user->ID, $pending );
+		$this->save_pending( $id, $pending );
+		$budget['emails'][] = $now;
+		$this->save_budget( $id, $budget );
+		return $code;
+	}
 
+	/**
+	 * Sends a reserved code.
+	 *
+	 * @param \WP_User $user Account.
+	 * @param string   $code Code.
+	 * @return true|\WP_Error
+	 */
+	private function mail_code( \WP_User $user, string $code ): bool|\WP_Error {
 		$site = wp_specialchars_decode( (string) get_bloginfo( 'name' ), ENT_QUOTES );
 		/* translators: %s: site name. */
 		$subject = sprintf( __( '[%s] Your login code', 'sentinel-shield' ), $site );
@@ -359,8 +489,17 @@ final class TwoFactorLogin {
 				'method' => '',
 			);
 		}
+		$now    = ( $this->clock )();
+		$budget = $this->budget( $id, $now );
+		if ( count( $budget['wrong'] ) >= self::WRONG_PER_HOUR ) {
+			// Too many wrong codes across all logins of this account: end them all.
+			$this->drop_pending( $id );
+			return array(
+				'result' => 'too_many',
+				'method' => '',
+			);
+		}
 		$methods = $this->methods( $user );
-		$now     = ( $this->clock )();
 		$digits  = (string) preg_replace( '/\s+/', '', $code );
 		$method  = '';
 		if ( in_array( 'totp', $methods, true ) && $this->users->verify_totp( $id, $digits, $now ) ) {
@@ -372,7 +511,8 @@ final class TwoFactorLogin {
 		}
 
 		if ( '' !== $method ) {
-			delete_user_meta( $id, UserTwoFactor::META . 'login' );
+			// The account is in: any other pending login (perhaps someone else's) ends too.
+			$this->drop_pending( $id );
 			if ( 'backup' === $method ) {
 				$this->log(
 					'twofa_backup_used',
@@ -387,12 +527,14 @@ final class TwoFactorLogin {
 			);
 		}
 
-		$pending['tries'] = (int) $pending['tries'] + 1;
+		$pending['tries']  = (int) $pending['tries'] + 1;
+		$budget['wrong'][] = $now;
+		$this->save_budget( $id, $budget );
 		// Counts toward the brute-force limits like a wrong password.
 		$wrong = new \WP_Error( self::ERROR_WRONG, __( 'Invalid authentication code.', 'sentinel-shield' ) );
 		do_action( 'wp_login_failed', $user->user_login, $wrong ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core hook.
 		if ( $pending['tries'] >= self::MAX_TRIES ) {
-			delete_user_meta( $id, UserTwoFactor::META . 'login' );
+			$this->drop_pending( $id, (string) $pending['hash'] );
 			/* translators: %d: number of tries. */
 			$this->log( 'twofa_failed', $user, sprintf( __( '%d wrong two-factor codes after a correct password; the login was cancelled', 'sentinel-shield' ), self::MAX_TRIES ) );
 			return array(
@@ -419,20 +561,77 @@ final class TwoFactorLogin {
 			return false;
 		}
 		$parts = explode( '|', sanitize_text_field( wp_unslash( (string) $_COOKIE[ $name ] ) ) );
-		if ( 2 !== count( $parts ) || (int) $parts[0] < ( $this->clock )() ) {
+		$now   = ( $this->clock )();
+		if ( 3 !== count( $parts ) || (int) $parts[1] < $now || ! hash_equals( $this->trust_mac( (int) $user->ID, $parts[0], (int) $parts[1] ), $parts[2] ) ) {
 			return false;
 		}
-		return hash_equals( $this->trust_mac( (int) $user->ID, (int) $parts[0] ), $parts[1] );
+		// The browser must still be on the account's list (revoked ones are not).
+		if ( ! isset( $this->users->devices( (int) $user->ID, $now )[ $parts[0] ] ) ) {
+			return false;
+		}
+		$this->users->touch_device( (int) $user->ID, $parts[0], $now );
+		return true;
 	}
 
 	/**
-	 * Cookie value marking this browser as trusted until a time.
+	 * Cookie value marking a browser as trusted until a time.
 	 *
-	 * @param int $user_id User.
-	 * @param int $expires Unix time.
+	 * @param int    $user_id User.
+	 * @param string $device  Device ID from UserTwoFactor::add_device().
+	 * @param int    $expires Unix time.
 	 */
-	public function trust_value( int $user_id, int $expires ): string {
-		return $expires . '|' . $this->trust_mac( $user_id, $expires );
+	public function trust_value( int $user_id, string $device, int $expires ): string {
+		return $device . '|' . $expires . '|' . $this->trust_mac( $user_id, $device, $expires );
+	}
+
+	/**
+	 * `after_password_reset`.
+	 *
+	 * @param \WP_User $user Account.
+	 */
+	public function password_reset( $user ): void {
+		if ( $user instanceof \WP_User ) {
+			$this->credentials_changed( (int) $user->ID );
+		}
+	}
+
+	/**
+	 * `wp_set_password` (WordPress 6.2+).
+	 *
+	 * @param string     $password New password (unused).
+	 * @param int|string $user_id  Account.
+	 */
+	public function password_set( $password, $user_id ): void {
+		unset( $password );
+		$this->credentials_changed( (int) $user_id );
+	}
+
+	/**
+	 * `profile_update`: catches password changes made on the profile screen.
+	 *
+	 * @param int|string $user_id  Account.
+	 * @param mixed      $old_data User data before the update.
+	 */
+	public function profile_updated( $user_id, $old_data = null ): void {
+		$now = get_userdata( (int) $user_id );
+		if ( $now instanceof \WP_User && $old_data instanceof \WP_User && $old_data->user_pass !== $now->user_pass ) {
+			$this->credentials_changed( (int) $user_id );
+		}
+	}
+
+	/**
+	 * Revokes every trusted browser and pending code screen of an account.
+	 *
+	 * @param int $user_id Account.
+	 */
+	public function credentials_changed( int $user_id ): void {
+		$had = (bool) $this->users->devices( $user_id ) || (bool) $this->challenges( $user_id );
+		$this->users->forget_devices( $user_id );
+		$this->drop_pending( $user_id );
+		$user = get_userdata( $user_id );
+		if ( $had && $user instanceof \WP_User && Throttle::once( 'twofa_revoked_' . $user_id, MINUTE_IN_SECONDS ) ) {
+			$this->log( 'twofa_devices_revoked', $user, __( 'Password changed: trusted browsers and pending two-factor logins were revoked', 'sentinel-shield' ) );
+		}
 	}
 
 	/**
@@ -503,8 +702,10 @@ final class TwoFactorLogin {
 		$this->set_cookie( self::COOKIE, '', 1 );
 		$days = (int) $this->settings->get( 'twofa.remember_days', 0 );
 		if ( $trust && $days > 0 ) {
-			$expires = ( $this->clock )() + $days * DAY_IN_SECONDS;
-			$this->set_cookie( $this->trust_cookie_name( (int) $user->ID ), $this->trust_value( (int) $user->ID, $expires ), $expires );
+			$now     = ( $this->clock )();
+			$expires = $now + $days * DAY_IN_SECONDS;
+			$device  = $this->users->add_device( (int) $user->ID, $expires, Request::user_agent(), (string) ( $this->ip )(), $now );
+			$this->set_cookie( $this->trust_cookie_name( (int) $user->ID ), $this->trust_value( (int) $user->ID, $device, $expires ), $expires );
 		}
 		wp_set_auth_cookie( (int) $user->ID, (bool) $pending['remember'] );
 		/** This action is documented in wp-includes/user.php */
@@ -634,17 +835,22 @@ final class TwoFactorLogin {
 	 * @param array<string, mixed> $pending Data.
 	 */
 	private function save_pending( int $user_id, array $pending ): void {
-		update_user_meta( $user_id, UserTwoFactor::META . 'login', $pending );
+		$all                     = $this->challenges( $user_id );
+		$all[ $pending['hash'] ] = $pending;
+		// Keep the newest MAX_CHALLENGES.
+		uasort( $all, static fn( array $a, array $b ): int => (int) $b['expires'] <=> (int) $a['expires'] );
+		update_user_meta( $user_id, UserTwoFactor::META . 'login', array_slice( $all, 0, self::MAX_CHALLENGES, true ) );
 	}
 
 	/**
 	 * MAC for the trusted-browser cookie, tied to the account's device version.
 	 *
-	 * @param int $user_id User.
-	 * @param int $expires Unix time.
+	 * @param int    $user_id User.
+	 * @param string $device  Device ID.
+	 * @param int    $expires Unix time.
 	 */
-	private function trust_mac( int $user_id, int $expires ): string {
-		return hash_hmac( 'sha256', $user_id . '|' . $expires . '|' . $this->users->device_version( $user_id ), $this->box->hash_key() );
+	private function trust_mac( int $user_id, string $device, int $expires ): string {
+		return hash_hmac( 'sha256', $user_id . '|' . $device . '|' . $expires . '|' . $this->users->device_version( $user_id ), $this->box->hash_key() );
 	}
 
 	/**
