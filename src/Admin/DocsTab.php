@@ -38,6 +38,7 @@ final class DocsTab {
 		echo '<h2>' . esc_html__( 'Contents', 'sentinel-shield' ) . '</h2><ol>';
 		$sections = array(
 			'ss-doc-admins'    => __( 'Administrator approvals (who may be an administrator)', 'sentinel-shield' ),
+			'ss-doc-login'     => __( 'Login security: brute-force protection and two-factor authentication', 'sentinel-shield' ),
 			'ss-doc-settings'  => __( 'Every setting and what it does', 'sentinel-shield' ),
 			'ss-doc-constants' => __( 'wp-config.php constants', 'sentinel-shield' ),
 			'ss-doc-recovery'  => __( 'Locked out? Ways back in', 'sentinel-shield' ),
@@ -51,6 +52,7 @@ final class DocsTab {
 		echo '<p class="description">' . esc_html( sprintf( __( 'Sentinel Shield %s. The same reference is in readme.txt in the plugin folder.', 'sentinel-shield' ), SENTINEL_SHIELD_VERSION ) ) . '</p></div>';
 
 		$this->admins();
+		$this->login();
 		$this->settings();
 		$this->constants();
 		$this->recovery();
@@ -246,6 +248,36 @@ final class DocsTab {
 	}
 
 	/**
+	 * Brute-force protection and two-factor authentication.
+	 */
+	private function login(): void {
+		echo '<div class="ss-card ss-docs" id="ss-doc-login"><h2>' . esc_html__( 'Login security', 'sentinel-shield' ) . '</h2>';
+		$this->section(
+			__( 'Brute-force protection', 'sentinel-shield' ),
+			array(
+				__( 'Every failed login is counted: a wrong password, a username that does not exist, and a wrong two-factor code. Failures are counted per IP and per account over the counting window (15 minutes by default). Allowlisted IPs and this server are never counted.', 'sentinel-shield' ),
+				__( 'Per IP: when one IP reaches the limit (5 by default) it is locked out with the progressive lockouts from the Lockouts & Unlock tab: 15 minutes, then 1 hour, 24 hours and finally a permanent block if it keeps coming back within the repeat window. The lockout appears on the IP Rules page and blocks the whole site for that IP. The login in progress is refused as well, so an XML-RPC "multicall" request cannot try hundreds of passwords at once.', 'sentinel-shield' ),
+				__( 'Per account: attackers often spread guesses over thousands of IPs, a few each. When one account reaches its limit (20 by default) from any number of IPs, password logins to it are refused for a while, except from IPs that account logged in from successfully before (its last 10, for 90 days) and allowlisted IPs. No IP is locked out for this, so an attacker cannot use it to block the real user, who usually logs in from a known IP.', 'sentinel-shield' ),
+				__( 'A refused login always gets "Too many failed login attempts", whether or not the password was right, so the limits cannot be used to test passwords. With "Do not reveal which usernames exist", wrong usernames and wrong passwords get the same message too.', 'sentinel-shield' ),
+				__( 'Usernames on the instant lockout list (such as admin, when no account uses it) lock an IP out at its first try. Turning off XML-RPC logins closes the most common brute-force target if nothing on the site needs it.', 'sentinel-shield' ),
+				__( 'Test mode: logins over a limit are allowed and logged as "would deny login", and lockouts are logged as "would lock out". The Login Security tab lists the IPs and accounts with the most failed logins in the last 24 hours.', 'sentinel-shield' ),
+			)
+		);
+		$this->section(
+			__( 'Two-factor authentication', 'sentinel-shield' ),
+			array(
+				__( 'After a correct password, accounts with two-factor authentication are asked for a code before they are logged in. No login cookie exists until the code is right. The code screen lasts 10 minutes and allows five tries; each wrong code counts as a failed login for the brute-force limits.', 'sentinel-shield' ),
+				__( 'Methods, set up by each user under Users → Two-Factor Authentication: an authenticator app (any app that supports time-based codes; the QR code is drawn by this site, so the secret never leaves it), codes by email (8 digits, valid 10 minutes, if this site allows them), and ten one-time backup codes for a lost phone. Authenticator secrets are encrypted with keys from wp-config.php; backup and email codes are stored only as keyed hashes.', 'sentinel-shield' ),
+				__( 'Requiring it: "Required for administrator-level accounts" (recommended) or "for every account". An account that is required to use it but has no authenticator app gets a code by email at each login and a reminder in the dashboard until it sets one up. If email codes are off, such accounts can still log in with only their password and see the reminder. Check that this site can send email before requiring it.', 'sentinel-shield' ),
+				__( 'XML-RPC and the REST API cannot show a code screen, so password logins there are refused for two-factor accounts. Application passwords (Users → Profile) keep working: they are separate, revocable secrets that only a logged-in user can create.', 'sentinel-shield' ),
+				__( 'If an administrator changes the security keys and salts in wp-config.php, stored authenticator secrets can no longer be read. Those users log in with a backup or email code and set up their app again; an account with no other method needs a reset.', 'sentinel-shield' ),
+				__( 'Lost phone: use a backup code, or an email code if allowed. Otherwise another administrator ticks "Reset two-factor authentication" on the user\'s profile, or run wp sentinel 2fa <user> --reset. "Trust this browser" (if offered) skips the code on that browser for the chosen number of days; users can forget all trusted browsers on their page.', 'sentinel-shield' ),
+			)
+		);
+		echo '</div>';
+	}
+
+	/**
 	 * Recovery options.
 	 */
 	private function recovery(): void {
@@ -254,6 +286,8 @@ final class DocsTab {
 			array( __( 'Your IP is blocked', 'sentinel-shield' ), __( 'wp sentinel unblock <ip> --allow-hours=24, or "Send unlock link" on the block page (403 mode, Emailed unlock links module on), or the SENTINEL_SHIELD_DISABLE constant.', 'sentinel-shield' ) ),
 			array( __( 'Your administrator rights are suspended', 'sentinel-shield' ), __( 'Ask an approved administrator to approve you, or run wp sentinel approve-admin <your login>. If SENTINEL_SHIELD_ADMINS is defined, add your login#ID to it in wp-config.php instead. As a last resort, use the SENTINEL_SHIELD_DISABLE constant and approve yourself from the Malware Lockdown page, then remove the constant.', 'sentinel-shield' ) ),
 			array( __( 'Your login is refused because of your location', 'sentinel-shield' ), __( 'Add your IP to the allowlist with wp sentinel allow <ip>, or change the countries with wp sentinel settings-set geo.countries "US, CA" (or geo.mode off). The SENTINEL_SHIELD_DISABLE constant also works. Check where an IP is with wp sentinel geo <ip>.', 'sentinel-shield' ) ),
+			array( __( 'Too many failed logins', 'sentinel-shield' ), __( 'Wait for the lockout to end, or run wp sentinel unblock <ip> and wp sentinel login-attempts --clear --ip=<ip>. If your account is protected after an attack, log in from an IP you used before, or clear it with wp sentinel login-attempts --clear --account=<login>.', 'sentinel-shield' ) ),
+			array( __( 'You lost your two-factor phone', 'sentinel-shield' ), __( 'Use a backup code or an emailed code. Otherwise ask another administrator to reset two-factor on your profile, or run wp sentinel 2fa <your login> --reset. The SENTINEL_SHIELD_DISABLE constant also turns two-factor off.', 'sentinel-shield' ) ),
 			array( __( 'You need to install a plugin or theme', 'sentinel-shield' ), __( 'Untick "Block installing and uploading plugins and themes" on the Malware Lockdown tab, install, then tick it again. Or install with WP-CLI.', 'sentinel-shield' ) ),
 			array( __( 'A plugin needs a blockchain gateway', 'sentinel-shield' ), __( 'Untick "Block blockchain command channels", or allow the specific host with the sentinel_shield_allowed_chain_hosts filter.', 'sentinel-shield' ) ),
 			array( __( 'You cannot deactivate Sentinel Shield', 'sentinel-shield' ), __( 'Deactivate it from the Plugins screen as an administrator, or run wp plugin deactivate sentinel-shield. Only code-initiated deactivation is refused.', 'sentinel-shield' ) ),
@@ -283,7 +317,9 @@ final class DocsTab {
 			'settings-keys'                     => __( 'Lists every setting key.', 'sentinel-shield' ),
 			'settings-export / settings-import' => __( 'Saves or loads all settings as JSON (administrator approvals are not included).', 'sentinel-shield' ),
 			'cloudflare-update'                 => __( 'Downloads the current Cloudflare IP ranges.', 'sentinel-shield' ),
-			'geo <ip>'                          => __( 'Shows an IP\'s country and whether a login from it would be allowed (--user=<user> for a specific account).', 'sentinel-shield' ),
+			'login-attempts'                    => __( 'Failed logins by IP and account; --ip / --account show whether a login is allowed now; --clear forgets them.', 'sentinel-shield' ),
+			'2fa [<user>]'                      => __( 'Two-factor status of administrators and every account using it; --reset removes all methods of a user (lost phone).', 'sentinel-shield' ),
+			'geo <ip>'                          => __( 'Shows an IP\'s country and whether a login from it would be allowed (--account=<user> for a specific account).', 'sentinel-shield' ),
 			'geo-update'                        => __( 'Downloads the DB-IP country database now.', 'sentinel-shield' ),
 			'feeds / feeds-update'              => __( 'Shows blocklist status, or downloads enabled lists now.', 'sentinel-shield' ),
 			'cron'                              => __( 'Lists scheduled tasks with last-run status and origin.', 'sentinel-shield' ),

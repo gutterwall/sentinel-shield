@@ -27,13 +27,16 @@ use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockout\LockoutService;
 use SentinelShield\Lockout\RepositoryBlockWriter;
 use SentinelShield\Lockout\Unblocker;
+use SentinelShield\Login\BruteForceGuard;
 use SentinelShield\Modules\CronMonitorModule;
 use SentinelShield\Modules\FeedsModule;
 use SentinelShield\Modules\IpGateModule;
 use SentinelShield\Modules\GeoLoginModule;
 use SentinelShield\Modules\LockdownModule;
+use SentinelShield\Modules\LoginGuardModule;
 use SentinelShield\Modules\LockoutModule;
 use SentinelShield\Modules\MaintenanceModule;
+use SentinelShield\Modules\TwoFactorModule;
 use SentinelShield\Modules\ModuleInterface;
 use SentinelShield\Modules\UnlockModule;
 use SentinelShield\Net\ClientIpFactory;
@@ -41,11 +44,15 @@ use SentinelShield\Net\CloudflareRanges;
 use SentinelShield\Repository\BlockRepository;
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Repository\FeedRepository;
+use SentinelShield\Repository\LoginAttemptRepository;
 use SentinelShield\Repository\OffenseRepository;
 use SentinelShield\Repository\TokenRepository;
 use SentinelShield\Safety\AdminProtection;
 use SentinelShield\Safety\SafetyGuard;
 use SentinelShield\Support\I18n;
+use SentinelShield\TwoFactor\SecretBox;
+use SentinelShield\TwoFactor\TwoFactorLogin;
+use SentinelShield\TwoFactor\UserTwoFactor;
 use SentinelShield\Unlock\UnlockService;
 
 defined( 'ABSPATH' ) || exit;
@@ -169,6 +176,32 @@ final class Plugin {
 				static fn(): bool => (bool) $c->get( 'client_ip_details' )['fallback']
 			)
 		);
+		$c->set( LoginAttemptRepository::class, static fn(): LoginAttemptRepository => new LoginAttemptRepository( $GLOBALS['wpdb'] ) );
+		$c->set(
+			BruteForceGuard::class,
+			static fn( Container $c ): BruteForceGuard => new BruteForceGuard(
+				$c->get( Settings::class ),
+				$c->get( LoginAttemptRepository::class ),
+				$c->get( Gate::class ),
+				$c->get( EventRepository::class ),
+				static fn(): string => (string) $c->get( 'client_ip' ),
+				static fn(): bool => (bool) $c->get( 'client_ip_details' )['fallback'],
+				static fn( string $ip, string $module, string $reason ) => LockoutModule::apply( $c, $ip, $module, $reason )
+			)
+		);
+		// The key comes from wp-config.php salts, so it is derived when first needed (after pluggable.php).
+		$c->set( SecretBox::class, static fn(): SecretBox => new SecretBox( static fn(): string => wp_salt( 'auth' ) ) );
+		$c->set( UserTwoFactor::class, static fn( Container $c ): UserTwoFactor => new UserTwoFactor( $c->get( SecretBox::class ) ) );
+		$c->set(
+			TwoFactorLogin::class,
+			static fn( Container $c ): TwoFactorLogin => new TwoFactorLogin(
+				$c->get( Settings::class ),
+				$c->get( UserTwoFactor::class ),
+				$c->get( SecretBox::class ),
+				$c->get( EventRepository::class ),
+				static fn(): string => (string) $c->get( 'client_ip' )
+			)
+		);
 		$c->set( RuleCache::class, static fn( Container $c ): RuleCache => new RuleCache( $c->get( BlockRepository::class ), $c->get( FeedRepository::class ) ) );
 		$c->set(
 			FeedUpdater::class,
@@ -269,6 +302,8 @@ final class Plugin {
 			'cron_monitor' => new CronMonitorModule(),
 			'lockdown'     => new LockdownModule(),
 			'geo_login'    => new GeoLoginModule(),
+			'login_guard'  => new LoginGuardModule(),
+			'two_factor'   => new TwoFactorModule(),
 		);
 
 		( new MaintenanceModule() )->register( $this->container );

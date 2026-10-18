@@ -68,6 +68,8 @@ final class SettingsPage {
 			$this->blocklists_panel( $settings );
 		} elseif ( 'geo' === $tab ) {
 			( new GeoPanel( $this->c ) )->render();
+		} elseif ( 'login' === $tab ) {
+			( new LoginSecurityPanel( $this->c ) )->render();
 		}
 
 		View::form_open( 'save_settings' );

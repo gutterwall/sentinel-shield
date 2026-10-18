@@ -30,12 +30,16 @@ final class BackupCodes {
 	public static function generate( int $count = self::COUNT ): array {
 		$codes = array();
 		$max   = strlen( self::ALPHABET ) - 1;
-		while ( count( $codes ) < $count ) {
+		$made  = 0;
+		while ( $made < $count ) {
 			$code = '';
 			for ( $i = 0; $i < 8; $i++ ) {
 				$code .= self::ALPHABET[ random_int( 0, $max ) ];
 			}
-			$codes[ $code ] = substr( $code, 0, 4 ) . '-' . substr( $code, 4 );
+			if ( ! isset( $codes[ $code ] ) ) {
+				$codes[ $code ] = substr( $code, 0, 4 ) . '-' . substr( $code, 4 );
+				++$made;
+			}
 		}
 		return array_values( $codes );
 	}

@@ -28,6 +28,7 @@ use SentinelShield\Geo\LoginGeoGuard;
 use SentinelShield\Lockdown\AdminRegistry;
 use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockout\Unblocker;
+use SentinelShield\Repository\LoginAttemptRepository;
 use SentinelShield\Modules\GeoLoginModule;
 use SentinelShield\Modules\LockdownModule;
 use SentinelShield\Modules\LockoutModule;
@@ -77,6 +78,7 @@ final class Actions {
 			'cron_control'       => 'cron_control',
 			'lockdown'           => 'lockdown',
 			'geo'                => 'geo',
+			'login_security'     => 'login_security',
 		);
 		foreach ( $map as $action => $method ) {
 			add_action( 'admin_post_sentinel_shield_' . $action, array( $this, $method ) );
@@ -369,6 +371,23 @@ final class Actions {
 			View::flash( 'error', __( 'Unknown action.', 'sentinel-shield' ) );
 		}
 		View::redirect( $back );
+	}
+
+	/**
+	 * Login Security tools: forget failed logins.
+	 */
+	public function login_security(): void {
+		View::guard( 'sentinel_shield_login_security' );
+		$op = isset( $_POST['op'] ) ? sanitize_key( wp_unslash( $_POST['op'] ) ) : '';
+		if ( 'clear' === $op ) {
+			$rows = $this->c->get( LoginAttemptRepository::class )->clear_all();
+			/* translators: %d: number of records. */
+			View::flash( 'success', sprintf( __( 'Forgot %d failed logins.', 'sentinel-shield' ), $rows ) );
+			$this->audit( 'login_attempts_cleared', array( 'rows' => $rows ) );
+		} else {
+			View::flash( 'error', __( 'Unknown action.', 'sentinel-shield' ) );
+		}
+		View::redirect( Admin::url( 'sentinel-shield-settings', array( 'tab' => 'login' ) ) );
 	}
 
 	/**

@@ -22,6 +22,7 @@ use SentinelShield\Geo\LoginGeoGuard;
 use SentinelShield\Lockdown\AdminRegistry;
 use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockout\Unblocker;
+use SentinelShield\Login\BruteForceGuard;
 use SentinelShield\Modules\LockdownModule;
 use SentinelShield\Modules\LockoutModule;
 use SentinelShield\Modules\MaintenanceModule;
@@ -31,9 +32,12 @@ use SentinelShield\Net\CloudflareRanges;
 use SentinelShield\Net\IpAddress;
 use SentinelShield\Repository\BlockRepository;
 use SentinelShield\Repository\EventRepository;
+use SentinelShield\Repository\LoginAttemptRepository;
 use SentinelShield\Safety\SafetyGuard;
 use SentinelShield\Settings;
 use SentinelShield\SettingsSchema;
+use SentinelShield\TwoFactor\TwoFactorLogin;
+use SentinelShield\TwoFactor\UserTwoFactor;
 use SentinelShield\Unlock\UnlockService;
 use WP_CLI;
 
@@ -799,7 +803,7 @@ final class Command {
 	 * <ip>
 	 * : IP address.
 	 *
-	 * [--user=<user>]
+	 * [--account=<user>]
 	 * : Account to check (ID, login or email); matters when the restriction applies to administrators only.
 	 *
 	 * [--format=<format>]
@@ -811,7 +815,7 @@ final class Command {
 	 * ## EXAMPLES
 	 *
 	 *     wp sentinel geo 8.8.8.8
-	 *     wp sentinel geo 203.0.113.7 --user=admin
+	 *     wp sentinel geo 203.0.113.7 --account=admin
 	 *
 	 * @param array<int, string>    $args       Positional.
 	 * @param array<string, string> $assoc_args Named.
@@ -821,7 +825,7 @@ final class Command {
 		if ( '' === $ip ) {
 			WP_CLI::error( "Not a valid IP address: {$args[0]}" );
 		}
-		$user  = isset( $assoc_args['user'] ) ? $this->find_user( (string) $assoc_args['user'] ) : null;
+		$user  = isset( $assoc_args['account'] ) ? $this->find_user( (string) $assoc_args['account'] ) : null;
 		$check = $this->c->get( LoginGeoGuard::class )->check( $ip, $user );
 		$geo   = '' === $check['source'] ? $this->c->get( GeoResolver::class )->resolve( $ip ) : $check;
 		$row   = array(
@@ -856,6 +860,192 @@ final class Command {
 			WP_CLI::error( $result->get_error_message() . ' The previous database (if any) was kept.' );
 		}
 		WP_CLI::success( sprintf( 'Country database %s: %d IPv4 and %d IPv6 ranges. IP Geolocation by DB-IP (https://db-ip.com).', (string) ( $result['month'] ?? '?' ), (int) ( $result['v4'] ?? 0 ), (int) ( $result['v6'] ?? 0 ) ) );
+	}
+
+	/**
+	 * Shows two-factor status, or resets an account's two-factor authentication.
+	 *
+	 * Without a user, lists administrator-level accounts and every account with
+	 * a method set up. --reset removes the authenticator app, email codes, backup
+	 * codes and trusted browsers (the way back in after a lost phone).
+	 *
+	 * ## OPTIONS
+	 *
+	 * [<user>]
+	 * : User ID, login or email.
+	 *
+	 * [--reset]
+	 * : Remove every two-factor method of the user.
+	 *
+	 * [--format=<format>]
+	 * : table, csv, json or yaml.
+	 * ---
+	 * default: table
+	 * ---
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp sentinel 2fa
+	 *     wp sentinel 2fa jane --reset
+	 *
+	 * @subcommand 2fa
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function two_factor( array $args, array $assoc_args ): void {
+		$users = $this->c->get( UserTwoFactor::class );
+		$login = $this->c->get( TwoFactorLogin::class );
+		if ( isset( $assoc_args['reset'] ) ) {
+			if ( ! isset( $args[0] ) ) {
+				WP_CLI::error( 'Name the user to reset: wp sentinel 2fa <user> --reset' );
+			}
+			$user = $this->find_user( $args[0] );
+			$users->reset( (int) $user->ID );
+			$this->audit( 'twofa_reset:' . $user->user_login, array( 'user_id' => $user->ID ) );
+			WP_CLI::success( "Two-factor authentication reset for {$user->user_login}." . ( $login->required( $user ) && $login->email_allowed() ? ' It is required for this account, so login codes will be emailed until a new app is set up.' : '' ) );
+			return;
+		}
+		if ( isset( $args[0] ) ) {
+			$list = array( $this->find_user( $args[0] ) );
+		} else {
+			$ids  = array_map( static fn( array $u ): int => (int) $u['id'], $this->c->get( AdminRegistry::class )->privileged_users() );
+			$ids  = array_merge(
+				$ids,
+				get_users(
+					array(
+						'fields'       => 'ID',
+						'blog_id'      => 0,
+						'meta_key'     => UserTwoFactor::META . 'totp', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key -- Admin listing.
+						'meta_compare' => 'EXISTS',
+					)
+				),
+				get_users(
+					array(
+						'fields'   => 'ID',
+						'blog_id'  => 0,
+						'meta_key' => UserTwoFactor::META . 'email', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key -- Admin listing.
+					)
+				)
+			);
+			$list = array_filter( array_map( 'get_userdata', array_unique( array_map( 'intval', $ids ) ) ) );
+		}
+		$rows = array();
+		foreach ( $list as $user ) {
+			$summary = $users->summary( (int) $user->ID );
+			$rows[]  = array(
+				'id'       => $user->ID,
+				'login'    => $user->user_login,
+				'app'      => $summary['totp'] ? ( $summary['totp_readable'] ? 'yes' : 'UNREADABLE' ) : 'no',
+				'email'    => $summary['email'] ? 'yes' : 'no',
+				'backup'   => $summary['backup'],
+				'required' => $login->required( $user ) ? 'yes' : 'no',
+				'at_login' => $login->needs_second_step( $user ) ? 'code' : 'password only',
+			);
+		}
+		WP_CLI\Utils\format_items( (string) ( $assoc_args['format'] ?? 'table' ), $rows, array( 'id', 'login', 'app', 'email', 'backup', 'required', 'at_login' ) );
+	}
+
+	/**
+	 * Shows failed logins by IP and account, or forgets them.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--clear]
+	 * : Forget failed logins (all, or only those of --ip / --account).
+	 *
+	 * [--ip=<ip>]
+	 * : One IP: show whether a login from it is allowed now.
+	 *
+	 * [--account=<user>]
+	 * : One account (login, email or a name that matches no account).
+	 *
+	 * [--hours=<hours>]
+	 * : How far back to list.
+	 * ---
+	 * default: 24
+	 * ---
+	 *
+	 * [--format=<format>]
+	 * : table, csv, json or yaml.
+	 * ---
+	 * default: table
+	 * ---
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp sentinel login-attempts
+	 *     wp sentinel login-attempts --ip=203.0.113.7
+	 *     wp sentinel login-attempts --clear --account=admin
+	 *
+	 * @subcommand login-attempts
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function login_attempts( array $args, array $assoc_args ): void {
+		unset( $args );
+		$repo  = $this->c->get( LoginAttemptRepository::class );
+		$guard = $this->c->get( BruteForceGuard::class );
+		$ip    = isset( $assoc_args['ip'] ) ? (string) IpAddress::normalize( (string) $assoc_args['ip'] ) : '';
+		if ( isset( $assoc_args['ip'] ) && '' === $ip ) {
+			WP_CLI::error( "Not a valid IP address: {$assoc_args['ip']}" );
+		}
+		$name = (string) ( $assoc_args['account'] ?? '' );
+		if ( isset( $assoc_args['clear'] ) ) {
+			$rows = 0;
+			if ( '' !== $ip ) {
+				$rows += $repo->clear_ip( (string) IpAddress::to_binary( $ip ) );
+			}
+			if ( '' !== $name ) {
+				$rows += $repo->clear_account( BruteForceGuard::account_key( $name ) );
+			}
+			if ( '' === $ip && '' === $name ) {
+				$rows = $repo->clear_all();
+			}
+			$this->audit( 'login_attempts_cleared', array( 'rows' => $rows ) );
+			WP_CLI::success( "Forgot $rows failed logins. Lockouts already applied stay; lift them with wp sentinel unblock <ip>." );
+			return;
+		}
+		$format = (string) ( $assoc_args['format'] ?? 'table' );
+		if ( '' !== $ip || '' !== $name ) {
+			$check = $guard->check( '' === $ip ? '0.0.0.0' : $ip, $name );
+			$since = time() - $guard->window_minutes() * MINUTE_IN_SECONDS;
+			$row   = array(
+				'ip'               => $ip,
+				'ip_failures'      => '' === $ip ? '' : $repo->count_ip( (string) IpAddress::to_binary( $ip ), $since ),
+				'account'          => '' === $name ? '' : BruteForceGuard::account_label( BruteForceGuard::account_key( $name ) ),
+				'account_failures' => '' === $name ? '' : $repo->count_account( BruteForceGuard::account_key( $name ), $since )['failures'],
+				'login'            => '' === $ip ? '' : ( $check['allowed'] ? 'allowed' : 'refused' ),
+				'reason'           => '' === $ip ? '' : BruteForceGuard::explain( $check ),
+			);
+			WP_CLI\Utils\format_items( $format, array( $row ), array_keys( $row ) );
+			WP_CLI::log( sprintf( 'Counts cover the last %d minutes (limits: %d per IP, %d per account).', $guard->window_minutes(), $guard->max_failures(), (int) $this->c->get( Settings::class )->get( 'login.account_max_failures', 20 ) ) );
+			return;
+		}
+		$since = time() - max( 1, (int) ( $assoc_args['hours'] ?? 24 ) ) * HOUR_IN_SECONDS;
+		$rows  = array();
+		foreach ( $repo->top_ips( $since, 20 ) as $r ) {
+			$rows[] = array(
+				'type'     => 'ip',
+				'subject'  => $r['ip'],
+				'failures' => $r['failures'],
+				'spread'   => $r['accounts'] . ' accounts',
+				'last'     => $r['last'],
+			);
+		}
+		foreach ( $repo->top_accounts( $since, 20 ) as $r ) {
+			$rows[] = array(
+				'type'     => 'account',
+				'subject'  => BruteForceGuard::account_label( $r['account'] ),
+				'failures' => $r['failures'],
+				'spread'   => $r['ips'] . ' IPs',
+				'last'     => $r['last'],
+			);
+		}
+		if ( ! $rows && 'table' === $format ) {
+			WP_CLI::success( 'No failed logins in that period.' );
+			return;
+		}
+		WP_CLI\Utils\format_items( $format, $rows, array( 'type', 'subject', 'failures', 'spread', 'last' ) );
 	}
 
 	/**

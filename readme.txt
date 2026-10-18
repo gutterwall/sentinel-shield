@@ -1,14 +1,14 @@
 === Sentinel Shield ===
 Contributors: sentinelshield
-Tags: security, firewall, malware, geoip, login
+Tags: security, firewall, two-factor, brute force, login
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.4.0
+Stable tag: 0.5.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Self-hosted firewall, IP blocklists, login location restriction, lockouts and malware lockdown. No paid cloud service required.
+Self-hosted firewall, brute-force protection, two-factor authentication, IP blocklists, login location restriction and malware lockdown. No paid cloud service required.
 
 == Description ==
 
@@ -20,6 +20,21 @@ Sentinel Shield is a self-hosted security plugin. Everything runs on your server
 * IP allowlist and blocklist for single IPs, CIDR ranges and IPv6, with reason, source, created/expiry time and hit counts. CSV and plain-text import, CSV export.
 * Public blocklist feeds (all opt-in, one checkbox each): Spamhaus DROP, FireHOL Level 1, Emerging Threats compromised hosts, blocklist.de, CINS Army, IPsum, DShield top 20 and Tor exit nodes. Lists combine additively, update on a polite schedule (twice daily to weekly, never more often than the provider allows, conditional requests, random jitter, backoff on errors), never include private/reserved ranges, and never override your allowlist.
 * Progressive lockout engine (for example 15 min → 1 h → 24 h → permanent).
+
+**Login brute-force protection**
+
+* Failed logins (wrong passwords, unknown usernames, wrong two-factor codes) are counted per IP and per account over a sliding window. An IP over the limit (5 failures in 15 minutes by default) is locked out with the progressive lockouts (15 min → 1 h → 24 h → permanent), and the login in progress is refused, so XML-RPC multicall cannot try hundreds of passwords in one request.
+* Distributed attacks: an account with too many failures from many IPs (20 by default) accepts password logins only from IPs it logged in from before (and allowlisted IPs) until the failures age out. No IP gets locked out for this, so attackers cannot use it to lock out the real user.
+* Refusals do not depend on the password. Optional: one message for wrong usernames and wrong passwords (on by default), instant lockout for usernames like "admin" that nobody uses, and XML-RPC logins turned off.
+* The Login Security tab lists the IPs and accounts with the most failed logins; test mode logs "would deny login" and "would lock out".
+
+**Two-factor authentication**
+
+* Authenticator apps (TOTP, with a QR code drawn on your own server), codes by email, and one-time backup codes. Each user sets it up under Users → Two-Factor Authentication.
+* Optional for everyone, or required for administrator-level accounts or every account. Required accounts without an app get a code by email until they set one up, plus a dashboard reminder.
+* Works with wp-login.php, the session-expired login popup and other login forms that use WordPress's login (such as WooCommerce). Password logins over XML-RPC and the REST API are refused for two-factor accounts; application passwords keep working.
+* Authenticator secrets are encrypted with keys from wp-config.php; backup and email codes are stored only as keyed hashes. Codes cannot be reused, five wrong codes cancel the login, and each wrong code counts toward the brute-force limits. Optional "Trust this browser" for a set number of days.
+* Administrators can reset a user who lost their phone from the user's profile or with `wp sentinel 2fa <user> --reset`.
 
 **Login location (GeoIP) restriction**
 
@@ -43,22 +58,23 @@ Protection against the "SC" WordPress malware (described by Sucuri in September 
 * Test mode everywhere: global log-only mode with optional auto-expiry, per-module overrides, a decision simulator, an IP resolution simulator, a lockout tester, a block page preview and a test unlock email.
 * Documentation tab (Settings → Documentation) with this whole reference, generated from the plugin's own settings, plus the current administrator approvals.
 * Multisite: network-wide rules and settings; per-site overrides for the block page.
-* WP-CLI: `wp sentinel status|check|resolve-ip|block|allow|unblock|remove|list|lockout|test-mode|settings-get|settings-set|settings-keys|settings-export|settings-import|cloudflare-update|cron|feeds|feeds-update|geo|geo-update|scan|admins|approve-admin|revoke-admin|flush-cache|prune|unlock-link|events`.
+* WP-CLI: `wp sentinel status|check|resolve-ip|block|allow|unblock|remove|list|lockout|test-mode|settings-get|settings-set|settings-keys|settings-export|settings-import|cloudflare-update|cron|feeds|feeds-update|login-attempts|2fa|geo|geo-update|scan|admins|approve-admin|revoke-admin|flush-cache|prune|unlock-link|events`.
 
 **Lockout safety**
 
 The admin's IP is auto-allowlisted on activation from wp-admin and on every settings save, a warning appears if your own IP matches a block rule, rules that would block your own IP are refused, and wp-cron.php from the server plus all WP-CLI requests are never blocked. See "I locked myself out" below for the ways back in.
 
-**Roadmap:** login brute-force protection and 2FA, 404 flood blocking, WAF (auto_prepend_file), file integrity against wordpress.org checksums, audit log and the full dashboard.
+**Roadmap:** 404 flood blocking, WAF (auto_prepend_file), file integrity against wordpress.org checksums, audit log and the full dashboard.
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.4.0.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.5.0.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
 5. Turn off test mode on Settings → General & Test Mode.
-6. Go to Sentinel Shield → Malware Lockdown, run a scan, check the Administrators list, then switch on the lockdown measures you want on Settings → Malware Lockdown.
+6. Set up two-factor authentication for your own account under Users → Two-Factor Authentication, then consider requiring it for administrators on Settings → Login Security.
+7. Go to Sentinel Shield → Malware Lockdown, run a scan, check the Administrators list, then switch on the lockdown measures you want on Settings → Malware Lockdown.
 
 Each release zip contains `checksums.sha256` (SHA-256 of every file) and `build.json` (version, git commit and build date). To check an installed copy, run `sha256sum -c checksums.sha256` inside the plugin folder.
 
@@ -146,6 +162,18 @@ Malware Lockdown measures are not affected by test mode: once switched on, they 
 * **Temporary allowlist after unlock (hours)** (`unlock.allow_hours`; default: 24; recommended: 24). Range 1–720. After a successful unlock, the IP is allowlisted for this long so you can fix the cause.
 * **Unlock emails per IP per hour** (`unlock.max_requests_per_hour`; default: 3; recommended: 3). Range 1–20. Limits abuse of the unlock form.
 
+= Settings → Login Security =
+
+* **Failed logins per IP before a lockout** (`login.max_failures`; default: 5; recommended: 5). Range 1–100. When one IP fails this many logins within the counting window, it is locked out using the progressive lockout durations on the Lockouts & Unlock tab (15 minutes, then 1 hour, 24 hours and permanent by default), and the login in progress is refused. Wrong passwords, unknown usernames and wrong two-factor codes all count. Allowlisted IPs and this server are never counted. If the Progressive lockouts module is off, logins from the IP are refused until its failures age out.
+* **Counting window (minutes)** (`login.window_minutes`; default: 15; recommended: 15). Range 1–1440. Failed logins older than this are no longer counted against an IP or account.
+* **Failed logins per account before it is protected** (`login.account_max_failures`; default: 20; recommended: 20). Range 0–1000. Stops attacks spread over many IPs. When one account (by username or email) fails this many logins within the counting window, from any number of IPs, password logins to it are refused except from IPs it logged in from successfully before (the last 10, for 90 days) and allowlisted IPs, until the failures age out. No IP is locked out for this, and the refusal looks the same whether or not the password was right. 0 turns this off.
+* **Lock out at once for these usernames** (`login.instant_usernames`; default: (empty); recommended: your choice). Usernames that nobody on this site uses but attackers try first, e.g. "admin, administrator, test, root". Separated by commas, spaces or new lines. A login attempt with one of them locks the IP out after the first failure. A name is ignored while an account with that username or email exists.
+* **Do not reveal which usernames exist** (`login.generic_errors`; default: On; recommended: On). WordPress normally says "The username is not registered" or "The password you entered for the username ... is incorrect", which tells attackers which accounts exist. With this on, both become "The username, email address or password is incorrect".
+* **Turn off logins over XML-RPC** (`login.disable_xmlrpc`; default: Off; recommended: your choice). XML-RPC (xmlrpc.php) lets programs log in with a username and password and is a favourite brute-force target. With this on, every XML-RPC method that needs a login is refused; pingbacks still work. Leave off if you use the WordPress mobile app with XML-RPC, Jetpack, or a desktop blogging client.
+* **Two-factor authentication** (`twofa.required`; default: Optional for everyone; recommended: Required for administrator-level accounts). Choices: "Optional for everyone"; "Required for administrator-level accounts"; "Required for every account". Every user can set up two-factor authentication under Users → Two-Factor Authentication (an authenticator app, codes by email, and backup codes). When it is required, an account without an authenticator app gets a code by email at every login until it sets one up (if email codes are allowed below), and sees a reminder in the dashboard. Administrator-level means the same accounts as the administrator lock. Make sure this site can send email before requiring it.
+* **Allow codes by email** (`twofa.email`; default: On; recommended: On). Lets users get an 8-digit login code by email (valid 10 minutes) instead of using an app. Weaker than an app, because anyone who controls the mailbox can log in with the password, but much stronger than a password alone. When off, required accounts without an app can log in with their password and are reminded to set one up.
+* **Offer "Trust this browser" for (days)** (`twofa.remember_days`; default: 0; recommended: your choice). Range 0–90. Shows a "Trust this browser" box on the code screen; a trusted browser is not asked for a code again for this many days (the password is still needed). Users can forget all their trusted browsers on their Two-Factor Authentication page, and resetting an account's two-factor forgets them too. 0 asks for a code at every login.
+
 = Settings → Login Location =
 
 * **Login location restriction** (`geo.mode`; default: Off: no location check; recommended: your choice). Choices: "Off: no location check"; "Allow logins only from the countries listed"; "Block logins from the countries listed". Checks the country of every login on wp-login.php, XML-RPC and application passwords (REST API). "Allow only" is the strongest choice when everyone who logs in is in a few known countries. A denied login gets "Logging in from your location is not allowed", whether or not the password was right. Allowlisted IPs and this server are never denied, existing login sessions are not ended, and WP-CLI is not affected.
@@ -188,6 +216,9 @@ Malware Lockdown measures are not affected by test mode: once switched on, they 
 * **Enable: Blocklist feeds** (`modules.feeds.enabled`; default: On; recommended: On). Blocks IPs listed on the public blocklists chosen on the Blocklists tab and keeps them updated. Your allowlist always wins.
 * **Test mode: Blocklist feeds** (`modules.feeds.test_mode`; default: Follow global test mode; recommended: Follow global test mode). Choices: "Follow global test mode"; "Always test mode (log only)"; "Always enforce". Override the global test mode for this module only.
 * **Enable: Scheduled task monitor** (`modules.cron_monitor.enabled`; default: On; recommended: On). Records when each WP-Cron task last ran, how long it took and whether it failed, for the Scheduled Tasks page.
+* **Enable: Login brute-force protection** (`modules.login_guard.enabled`; default: On; recommended: On). Counts failed logins and locks out IPs or protects accounts as set on the Login Security tab, and hides which usernames exist.
+* **Test mode: Login brute-force protection** (`modules.login_guard.test_mode`; default: Follow global test mode; recommended: Follow global test mode). Choices: "Follow global test mode"; "Always test mode (log only)"; "Always enforce". Override the global test mode for this module only.
+* **Enable: Two-factor authentication** (`modules.two_factor.enabled`; default: On; recommended: On). Asks for an authenticator app, email or backup code after the password, for accounts that set it up or are required to. Switching this off turns two-factor off for everyone. Not affected by test mode.
 * **Enable: Login location restriction** (`modules.geo_login.enabled`; default: On; recommended: On). Allows or blocks logins by country as set on the Login Location tab, and keeps the country database updated.
 * **Test mode: Login location restriction** (`modules.geo_login.test_mode`; default: Follow global test mode; recommended: Follow global test mode). Choices: "Follow global test mode"; "Always test mode (log only)"; "Always enforce". Override the global test mode for this module only.
 * **Enable: Malware lockdown** (`modules.lockdown.enabled`; default: On; recommended: On). Applies the measures chosen on the Malware Lockdown tab and runs the twice-daily malware scan. Lockdown measures are not affected by test mode.
@@ -214,6 +245,22 @@ Any one of these works:
 * Add `define( 'SENTINEL_SHIELD_DISABLE', true );` to wp-config.php, log in, fix the rule, then remove the line.
 * Run `wp sentinel unblock <your-ip> --allow-hours=24`.
 * Use "Send unlock link" on the block page (403 mode only) with your administrator email address.
+
+= I am locked out after too many failed logins. What now? =
+
+Wait for the lockout to end (15 minutes the first time by default), or:
+
+* `wp sentinel unblock <your-ip>` lifts the lockout, and `wp sentinel login-attempts --clear --ip=<your-ip>` resets the count.
+* If your account is protected after a distributed attack, log in from an IP you used before, or run `wp sentinel login-attempts --clear --account=<your-login>`.
+* Add your IP to the allowlist (`wp sentinel allow <your-ip>`): allowlisted IPs are never counted or locked out.
+
+= I lost the phone with my authenticator app. What now? =
+
+Use one of your backup codes, or "Email me a code" if email codes are allowed. Otherwise ask another administrator to tick "Reset two-factor authentication" on your profile, or run `wp sentinel 2fa <your-login> --reset`. As a last resort, the `SENTINEL_SHIELD_DISABLE` constant in wp-config.php turns two-factor off until you remove it. Then set up your app again and create new backup codes.
+
+= Why does XML-RPC or the REST API refuse my password? =
+
+Your account uses two-factor authentication, and those interfaces cannot ask for a code. Create an application password under Users → Profile and use it instead of your normal password. If "Turn off logins over XML-RPC" is on, XML-RPC logins are refused for everyone.
 
 = My administrator rights are suspended. What now? =
 
@@ -263,6 +310,10 @@ No. Test mode only records what would have been blocked. Use it to validate sett
 
 == Changelog ==
 
+= 0.5.0 =
+* Login brute-force protection: failed logins (including unknown usernames and wrong two-factor codes) are counted per IP and per account. IPs over the limit are locked out with the progressive lockouts and the login in progress is refused, so XML-RPC multicall cannot get around the limit. Accounts attacked from many IPs accept password logins only from IPs they used before. Refusals do not depend on the password. Also: one message for wrong usernames and passwords, an instant lockout username list, an option to turn off XML-RPC logins, failed-login overview on the new Login Security tab, and WP-CLI `login-attempts`.
+* Two-factor authentication: authenticator apps (QR code drawn on your server), email codes and backup codes, set up by each user under Users → Two-Factor Authentication. Can be required for administrators or everyone; required accounts without an app get email codes and a reminder. Encrypted secrets, single-use codes, five tries per login, optional "Trust this browser", administrator reset from the profile, and WP-CLI `2fa`.
+
 = 0.4.0 =
 * Login location (GeoIP) restriction: allow logins only from listed countries or block listed countries, for all accounts or administrators only, on wp-login.php, XML-RPC and application passwords. Country from Cloudflare (verified), a server variable, or the free DB-IP country database (downloaded and updated automatically; a compact local file, about 10 µs per lookup). Unknown-country policy, allowlist bypass, test mode, self-lockout protection, a status panel with IP lookup on Settings → Login Location, and WP-CLI `geo` and `geo-update`.
 
@@ -283,6 +334,9 @@ No. Test mode only records what would have been blocked. Use it to validate sett
 * Phase 1: core framework, client IP detection, IP rules, lockout engine, lockout safety, test mode tooling, events, WP-CLI.
 
 == Upgrade Notice ==
+
+= 0.5.0 =
+Adds login brute-force protection (on by default: 5 failed logins in 15 minutes lock an IP out, allowlisted IPs excepted) and two-factor authentication (optional until you require it on Settings → Login Security).
 
 = 0.4.0 =
 Adds the login location (GeoIP) restriction. It is off until you choose a mode and countries on Settings → Login Location.

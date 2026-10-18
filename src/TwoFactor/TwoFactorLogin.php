@@ -326,7 +326,8 @@ final class TwoFactorLogin {
 
 		$pending['tries'] = (int) $pending['tries'] + 1;
 		// Counts toward the brute-force limits like a wrong password.
-		do_action( 'wp_login_failed', $user->user_login, new \WP_Error( self::ERROR_WRONG, __( 'Invalid authentication code.', 'sentinel-shield' ) ) );
+		$wrong = new \WP_Error( self::ERROR_WRONG, __( 'Invalid authentication code.', 'sentinel-shield' ) );
+		do_action( 'wp_login_failed', $user->user_login, $wrong ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core hook.
 		if ( $pending['tries'] >= self::MAX_TRIES ) {
 			delete_user_meta( $id, UserTwoFactor::META . 'login' );
 			/* translators: %d: number of tries. */
@@ -438,14 +439,14 @@ final class TwoFactorLogin {
 		}
 		wp_set_auth_cookie( (int) $user->ID, (bool) $pending['remember'] );
 		/** This action is documented in wp-includes/user.php */
-		do_action( 'wp_login', $user->user_login, $user );
+		do_action( 'wp_login', $user->user_login, $user ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core hook.
 
 		if ( ! empty( $pending['interim'] ) ) {
 			$GLOBALS['interim_login'] = 'success'; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- Read by login_header() for the session-expired popup.
 			login_header( '', '<p class="message">' . esc_html__( 'You have logged in successfully.', 'sentinel-shield' ) . '</p>' );
 			echo '</div>';
 			/** This action is documented in wp-login.php */
-			do_action( 'login_footer' );
+			do_action( 'login_footer' ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core hook.
 			echo '</body></html>';
 			exit;
 		}

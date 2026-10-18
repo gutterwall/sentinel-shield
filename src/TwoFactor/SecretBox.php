@@ -23,11 +23,19 @@ final class SecretBox {
 	private const PREFIX = 'sb1:';
 
 	/**
+	 * Key material, once read.
+	 *
+	 * @var string|null
+	 */
+	private ?string $material = null;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param string $key_material Secret key material (e.g. wp_salt( 'auth' )).
+	 * @param \Closure $key_source fn(): string returning secret key material, e.g. wp_salt( 'auth' ).
+	 *                            Called on first use, so it may need pluggable functions.
 	 */
-	public function __construct( private string $key_material ) {}
+	public function __construct( private \Closure $key_source ) {}
 
 	/**
 	 * Encrypts text.
@@ -60,13 +68,21 @@ final class SecretBox {
 	 * Keyed hash for values that are only compared (backup and email codes).
 	 */
 	public function hash_key(): string {
-		return hash_hmac( 'sha256', 'sentinel-shield-2fa-hash', $this->key_material );
+		return hash_hmac( 'sha256', 'sentinel-shield-2fa-hash', $this->material() );
 	}
 
 	/**
 	 * The encryption key.
 	 */
 	private function key(): string {
-		return hash_hmac( 'sha256', 'sentinel-shield-2fa-secretbox', $this->key_material, true );
+		return hash_hmac( 'sha256', 'sentinel-shield-2fa-secretbox', $this->material(), true );
+	}
+
+	/**
+	 * The key material.
+	 */
+	private function material(): string {
+		$this->material ??= (string) ( $this->key_source )();
+		return $this->material;
 	}
 }

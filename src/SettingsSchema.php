@@ -32,6 +32,7 @@ final class SettingsSchema {
 			'general'      => __( 'General & Test Mode', 'sentinel-shield' ),
 			'ip_detection' => __( 'IP Detection', 'sentinel-shield' ),
 			'lockout'      => __( 'Lockouts & Unlock', 'sentinel-shield' ),
+			'login'        => __( 'Login Security', 'sentinel-shield' ),
 			'geo'          => __( 'Login Location', 'sentinel-shield' ),
 			'blocklists'   => __( 'Blocklists', 'sentinel-shield' ),
 			'lockdown'     => __( 'Malware Lockdown', 'sentinel-shield' ),
@@ -266,6 +267,92 @@ final class SettingsSchema {
 		);
 
 		$fields[] = array(
+			'key'         => 'login.max_failures',
+			'tab'         => 'login',
+			'type'        => 'number',
+			'min'         => 1,
+			'max'         => 100,
+			'label'       => __( 'Failed logins per IP before a lockout', 'sentinel-shield' ),
+			'help'        => __( 'When one IP fails this many logins within the counting window, it is locked out using the progressive lockout durations on the Lockouts & Unlock tab (15 minutes, then 1 hour, 24 hours and permanent by default), and the login in progress is refused. Wrong passwords, unknown usernames and wrong two-factor codes all count. Allowlisted IPs and this server are never counted. If the Progressive lockouts module is off, logins from the IP are refused until its failures age out.', 'sentinel-shield' ),
+			'recommended' => 5,
+		);
+		$fields[] = array(
+			'key'         => 'login.window_minutes',
+			'tab'         => 'login',
+			'type'        => 'number',
+			'min'         => 1,
+			'max'         => 1440,
+			'label'       => __( 'Counting window (minutes)', 'sentinel-shield' ),
+			'help'        => __( 'Failed logins older than this are no longer counted against an IP or account.', 'sentinel-shield' ),
+			'recommended' => 15,
+		);
+		$fields[] = array(
+			'key'         => 'login.account_max_failures',
+			'tab'         => 'login',
+			'type'        => 'number',
+			'min'         => 0,
+			'max'         => 1000,
+			'label'       => __( 'Failed logins per account before it is protected', 'sentinel-shield' ),
+			'help'        => __( 'Stops attacks spread over many IPs. When one account (by username or email) fails this many logins within the counting window, from any number of IPs, password logins to it are refused except from IPs it logged in from successfully before (the last 10, for 90 days) and allowlisted IPs, until the failures age out. No IP is locked out for this, and the refusal looks the same whether or not the password was right. 0 turns this off.', 'sentinel-shield' ),
+			'recommended' => 20,
+		);
+		$fields[] = array(
+			'key'         => 'login.instant_usernames',
+			'tab'         => 'login',
+			'type'        => 'textarea',
+			'label'       => __( 'Lock out at once for these usernames', 'sentinel-shield' ),
+			'help'        => __( 'Usernames that nobody on this site uses but attackers try first, e.g. "admin, administrator, test, root". Separated by commas, spaces or new lines. A login attempt with one of them locks the IP out after the first failure. A name is ignored while an account with that username or email exists.', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'login.generic_errors',
+			'tab'         => 'login',
+			'type'        => 'checkbox',
+			'label'       => __( 'Do not reveal which usernames exist', 'sentinel-shield' ),
+			'help'        => __( 'WordPress normally says "The username is not registered" or "The password you entered for the username ... is incorrect", which tells attackers which accounts exist. With this on, both become "The username, email address or password is incorrect".', 'sentinel-shield' ),
+			'recommended' => true,
+		);
+		$fields[] = array(
+			'key'         => 'login.disable_xmlrpc',
+			'tab'         => 'login',
+			'type'        => 'checkbox',
+			'label'       => __( 'Turn off logins over XML-RPC', 'sentinel-shield' ),
+			'help'        => __( 'XML-RPC (xmlrpc.php) lets programs log in with a username and password and is a favourite brute-force target. With this on, every XML-RPC method that needs a login is refused; pingbacks still work. Leave off if you use the WordPress mobile app with XML-RPC, Jetpack, or a desktop blogging client.', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'twofa.required',
+			'tab'         => 'login',
+			'type'        => 'select',
+			'options'     => array(
+				'none'       => __( 'Optional for everyone', 'sentinel-shield' ),
+				'privileged' => __( 'Required for administrator-level accounts', 'sentinel-shield' ),
+				'all'        => __( 'Required for every account', 'sentinel-shield' ),
+			),
+			'label'       => __( 'Two-factor authentication', 'sentinel-shield' ),
+			'help'        => __( 'Every user can set up two-factor authentication under Users → Two-Factor Authentication (an authenticator app, codes by email, and backup codes). When it is required, an account without an authenticator app gets a code by email at every login until it sets one up (if email codes are allowed below), and sees a reminder in the dashboard. Administrator-level means the same accounts as the administrator lock. Make sure this site can send email before requiring it.', 'sentinel-shield' ),
+			'recommended' => 'privileged',
+		);
+		$fields[] = array(
+			'key'         => 'twofa.email',
+			'tab'         => 'login',
+			'type'        => 'checkbox',
+			'label'       => __( 'Allow codes by email', 'sentinel-shield' ),
+			'help'        => __( 'Lets users get an 8-digit login code by email (valid 10 minutes) instead of using an app. Weaker than an app, because anyone who controls the mailbox can log in with the password, but much stronger than a password alone. When off, required accounts without an app can log in with their password and are reminded to set one up.', 'sentinel-shield' ),
+			'recommended' => true,
+		);
+		$fields[] = array(
+			'key'         => 'twofa.remember_days',
+			'tab'         => 'login',
+			'type'        => 'number',
+			'min'         => 0,
+			'max'         => 90,
+			'label'       => __( 'Offer "Trust this browser" for (days)', 'sentinel-shield' ),
+			'help'        => __( 'Shows a "Trust this browser" box on the code screen; a trusted browser is not asked for a code again for this many days (the password is still needed). Users can forget all their trusted browsers on their Two-Factor Authentication page, and resetting an account\'s two-factor forgets them too. 0 asks for a code at every login.', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+
+		$fields[] = array(
 			'key'         => 'geo.mode',
 			'tab'         => 'geo',
 			'type'        => 'select',
@@ -433,6 +520,16 @@ final class SettingsSchema {
 			'cron_monitor' => array(
 				__( 'Scheduled task monitor', 'sentinel-shield' ),
 				__( 'Records when each WP-Cron task last ran, how long it took and whether it failed, for the Scheduled Tasks page.', 'sentinel-shield' ),
+				false,
+			),
+			'login_guard'  => array(
+				__( 'Login brute-force protection', 'sentinel-shield' ),
+				__( 'Counts failed logins and locks out IPs or protects accounts as set on the Login Security tab, and hides which usernames exist.', 'sentinel-shield' ),
+				true,
+			),
+			'two_factor'   => array(
+				__( 'Two-factor authentication', 'sentinel-shield' ),
+				__( 'Asks for an authenticator app, email or backup code after the password, for accounts that set it up or are required to. Switching this off turns two-factor off for everyone. Not affected by test mode.', 'sentinel-shield' ),
 				false,
 			),
 			'geo_login'    => array(

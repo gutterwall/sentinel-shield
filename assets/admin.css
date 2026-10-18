@@ -47,3 +47,11 @@
 .ss-wrap .ss-docs td{vertical-align:top}
 .ss-wrap .ss-code{background:#f6f7f7;border:1px solid #dcdcde;padding:8px 12px;overflow-x:auto;max-width:860px}
 .ss-wrap .ss-codes{column-width:16em;font-size:12px;line-height:1.8}
+/* Two-factor setup page */
+.ss-wrap .ss-qr{margin:10px 0;line-height:0}
+.ss-wrap .ss-qr svg{max-width:100%;height:auto;border:1px solid #dcdcde}
+.ss-wrap .ss-secret{font-size:14px;letter-spacing:.05em;user-select:all}
+.ss-wrap .ss-steps li{margin-bottom:12px}
+.ss-wrap .ss-code-input{width:9em;font-size:18px;letter-spacing:.15em}
+.ss-wrap .ss-inline-form{margin:8px 0}
+.ss-wrap .ss-backup-codes{font-size:16px;column-width:9em;list-style:none;padding:0}

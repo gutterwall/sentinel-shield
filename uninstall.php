@@ -14,13 +14,16 @@ if ( ! is_array( $sentinel_shield_settings ) || empty( $sentinel_shield_settings
 
 global $wpdb;
 
-foreach ( array( 'sentinel_ip_rules', 'sentinel_events', 'sentinel_offenses', 'sentinel_unlock_tokens', 'sentinel_feed_ranges' ) as $sentinel_shield_table ) {
+foreach ( array( 'sentinel_ip_rules', 'sentinel_events', 'sentinel_offenses', 'sentinel_unlock_tokens', 'sentinel_feed_ranges', 'sentinel_login_attempts' ) as $sentinel_shield_table ) {
 	$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $wpdb->base_prefix . $sentinel_shield_table ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.SchemaChange -- Uninstall cleanup.
 }
 
 foreach ( array( 'sentinel_shield_settings', 'sentinel_shield_db_version', 'sentinel_shield_secret', 'sentinel_shield_cloudflare_ranges', 'sentinel_shield_welcome', 'sentinel_shield_feeds_state', 'sentinel_shield_admin_approvals', 'sentinel_shield_scan_report', 'sentinel_shield_scan_baseline', 'sentinel_shield_geo_db' ) as $sentinel_shield_option ) {
 	delete_site_option( $sentinel_shield_option );
 }
+
+// Two-factor settings and known login IPs (user meta is shared by the whole network).
+$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE meta_key LIKE %s OR meta_key = %s', $wpdb->usermeta, $wpdb->esc_like( '_sentinel_shield_2fa_' ) . '%', '_sentinel_shield_known_ips' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 
 // Transients (single site: options table; multisite: sitemeta).
 $sentinel_shield_like  = $wpdb->esc_like( '_site_transient_sentinel_shield_' ) . '%';

@@ -32,7 +32,7 @@ final class Settings {
 	/**
 	 * Module slugs that exist in this build.
 	 */
-	public const MODULES = array( 'ip_gate', 'lockout', 'unlock', 'feeds', 'cron_monitor', 'lockdown', 'geo_login' );
+	public const MODULES = array( 'ip_gate', 'lockout', 'unlock', 'feeds', 'cron_monitor', 'lockdown', 'geo_login', 'login_guard', 'two_factor' );
 
 	/**
 	 * Memoized merged settings.
@@ -84,6 +84,21 @@ final class Settings {
 				'update_hours' => '24',
 				'lists'        => array_fill_keys( array_keys( FeedCatalog::NAMES ), false ),
 			),
+			// Brute-force limits are on by default; account-enumeration hiding too.
+			'login'    => array(
+				'max_failures'         => 5,
+				'window_minutes'       => 15,
+				'account_max_failures' => 20,
+				'instant_usernames'    => '',
+				'generic_errors'       => true,
+				'disable_xmlrpc'       => false,
+			),
+			// Two-factor authentication is optional for every account until required here.
+			'twofa'    => array(
+				'required'      => 'none',
+				'email'         => true,
+				'remember_days' => 0,
+			),
 			// Login location restriction is off until a mode and countries are chosen.
 			'geo'      => array(
 				'mode'       => 'off',
@@ -130,6 +145,13 @@ final class Settings {
 				'geo_login'    => array(
 					'enabled'   => true,
 					'test_mode' => 'inherit',
+				),
+				'login_guard'  => array(
+					'enabled'   => true,
+					'test_mode' => 'inherit',
+				),
+				'two_factor'   => array(
+					'enabled' => true,
 				),
 			),
 		);

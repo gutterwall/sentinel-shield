@@ -14,6 +14,7 @@ use SentinelShield\Firewall\RuleCache;
 use SentinelShield\Net\CloudflareRanges;
 use SentinelShield\Repository\BlockRepository;
 use SentinelShield\Repository\EventRepository;
+use SentinelShield\Repository\LoginAttemptRepository;
 use SentinelShield\Repository\OffenseRepository;
 use SentinelShield\Repository\TokenRepository;
 use SentinelShield\Settings;
@@ -84,6 +85,8 @@ final class MaintenanceModule implements ModuleInterface {
 			'events'   => $container->get( EventRepository::class )->prune( (int) $settings->get( 'general.event_retention_days', 30 ) ),
 			'offenses' => $container->get( OffenseRepository::class )->prune( time() - $settings->lockout_window() ),
 			'tokens'   => $container->get( TokenRepository::class )->prune(),
+			// Kept a week for the Login Security overview; limits use far shorter windows.
+			'logins'   => $container->get( LoginAttemptRepository::class )->prune( time() - max( WEEK_IN_SECONDS, (int) $settings->get( 'login.window_minutes', 15 ) * MINUTE_IN_SECONDS ) ),
 		);
 		if ( $result['rules'] > 0 ) {
 			$container->get( RuleCache::class )->flush();

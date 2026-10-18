@@ -161,7 +161,8 @@ final class QrCode {
 		$bits    .= str_repeat( '0', min( 4, $capacity - strlen( $bits ) ) );
 		$bits    .= str_repeat( '0', ( 8 - strlen( $bits ) % 8 ) % 8 );
 		$data     = array_map( 'bindec', str_split( $bits, 8 ) );
-		for ( $pad = 0; count( $data ) < $capacity / 8; $pad ^= 1 ) {
+		$total    = intdiv( $capacity, 8 );
+		for ( $i = count( $data ), $pad = 0; $i < $total; $i++, $pad ^= 1 ) {
 			$data[] = $pad ? 0x11 : 0xEC;
 		}
 
@@ -250,7 +251,7 @@ final class QrCode {
 	private static function gf_mul( int $a, int $b ): int {
 		$result = 0;
 		for ( $i = 7; $i >= 0; $i-- ) {
-			$result = ( $result << 1 ) ^ ( ( $result >> 7 ) * 0x11D );
+			$result  = ( $result << 1 ) ^ ( ( $result >> 7 ) * 0x11D );
 			$result ^= ( ( $b >> $i ) & 1 ) * $a;
 		}
 		return $result & 0xff;
@@ -263,9 +264,9 @@ final class QrCode {
 	 * @return list<int>
 	 */
 	private static function rs_generator( int $degree ): array {
-		$result               = array_fill( 0, $degree, 0 );
+		$result                = array_fill( 0, $degree, 0 );
 		$result[ $degree - 1 ] = 1;
-		$root                 = 1;
+		$root                  = 1;
 		for ( $i = 0; $i < $degree; $i++ ) {
 			for ( $j = 0; $j < $degree; $j++ ) {
 				$result[ $j ] = self::gf_mul( $result[ $j ], $root );
@@ -289,7 +290,7 @@ final class QrCode {
 		$degree = count( $generator );
 		$result = array_fill( 0, $degree, 0 );
 		foreach ( $data as $byte ) {
-			$factor = $byte ^ array_shift( $result );
+			$factor   = $byte ^ array_shift( $result );
 			$result[] = 0;
 			for ( $i = 0; $i < $degree; $i++ ) {
 				$result[ $i ] ^= self::gf_mul( $generator[ $i ], $factor );
@@ -343,7 +344,8 @@ final class QrCode {
 				}
 				for ( $dy = -2; $dy <= 2; $dy++ ) {
 					for ( $dx = -2; $dx <= 2; $dx++ ) {
-						$this->set( $cx + $dx, $cy + $dy, 1 !== max( abs( $dx ), abs( $dy ) ) );
+						$ring = max( abs( $dx ), abs( $dy ) );
+						$this->set( $cx + $dx, $cy + $dy, 1 !== $ring );
 					}
 				}
 			}
@@ -436,16 +438,17 @@ final class QrCode {
 				if ( $this->reserved[ $y ][ $x ] ) {
 					continue;
 				}
-				$flip = match ( $mask ) {
-					0 => 0 === ( $x + $y ) % 2,
-					1 => 0 === $y % 2,
-					2 => 0 === $x % 3,
-					3 => 0 === ( $x + $y ) % 3,
-					4 => 0 === ( intdiv( $x, 3 ) + intdiv( $y, 2 ) ) % 2,
-					5 => 0 === ( $x * $y ) % 2 + ( $x * $y ) % 3,
-					6 => 0 === ( ( $x * $y ) % 2 + ( $x * $y ) % 3 ) % 2,
-					default => 0 === ( ( $x + $y ) % 2 + ( $x * $y ) % 3 ) % 2,
+				$value = match ( $mask ) {
+					0 => ( $x + $y ) % 2,
+					1 => $y % 2,
+					2 => $x % 3,
+					3 => ( $x + $y ) % 3,
+					4 => ( intdiv( $x, 3 ) + intdiv( $y, 2 ) ) % 2,
+					5 => ( $x * $y ) % 2 + ( $x * $y ) % 3,
+					6 => ( ( $x * $y ) % 2 + ( $x * $y ) % 3 ) % 2,
+					default => ( ( $x + $y ) % 2 + ( $x * $y ) % 3 ) % 2,
 				};
+				$flip = 0 === $value;
 				if ( $flip ) {
 					$this->modules[ $y ][ $x ] = ! $this->modules[ $y ][ $x ];
 				}
