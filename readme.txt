@@ -1,5 +1,5 @@
 === Sentinel Shield ===
-Contributors: sentinelshield
+Contributors: gutterwall
 Tags: security, firewall, two-factor, brute force, login
 Requires at least: 6.4
 Tested up to: 7.1
