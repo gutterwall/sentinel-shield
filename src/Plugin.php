@@ -22,6 +22,7 @@ use SentinelShield\Geo\GeoResolver;
 use SentinelShield\Geo\GeoUpdater;
 use SentinelShield\Geo\LoginGeoGuard;
 use SentinelShield\Lockdown\AdminRegistry;
+use SentinelShield\Lockdown\FileIntegrity;
 use SentinelShield\Lockdown\Hardening;
 use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockout\LockoutService;
@@ -138,6 +139,7 @@ final class Plugin {
 		$c->set( CloudflareRanges::class, static fn(): CloudflareRanges => new CloudflareRanges() );
 		$c->set( FeedRepository::class, static fn(): FeedRepository => new FeedRepository( $GLOBALS['wpdb'] ) );
 		$c->set( AdminRegistry::class, static fn(): AdminRegistry => new AdminRegistry() );
+		$c->set( FileIntegrity::class, static fn(): FileIntegrity => new FileIntegrity() );
 		$c->set(
 			IntegrityScanner::class,
 			static fn( Container $c ): IntegrityScanner => new IntegrityScanner( $c->get( AdminRegistry::class ), $c->get( EventRepository::class ), $c->get( Settings::class ) )

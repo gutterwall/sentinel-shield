@@ -16,6 +16,7 @@ use SentinelShield\Net\Cidr;
 use SentinelShield\Net\IpAddress;
 use SentinelShield\Repository\BlockRepository;
 use SentinelShield\Repository\EventRepository;
+use SentinelShield\Support\Throttle;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -40,15 +41,22 @@ final class AdminProtection {
 	) {}
 
 	/**
-	 * Adds the IP to the permanent allowlist if it is not already covered.
+	 * Allowlists the IP if it is not already covered: for $days days (renewed
+	 * while administrators keep using it, see renew()), or permanently with 0.
+	 * Home and office IPs change and get reassigned, so an entry nobody uses
+	 * any more should not trust its next owner forever.
 	 *
 	 * @param string $ip      Admin IP.
 	 * @param int    $user_id Admin user ID.
+	 * @param int    $days    Days the entry lasts without use (0 = permanent).
 	 * @return bool True when a new entry was added.
 	 */
-	public function ensure_allowlisted( string $ip, int $user_id ): bool {
+	public function ensure_allowlisted( string $ip, int $user_id, int $days = 0 ): bool {
 		$cidr = Cidr::parse( $ip );
-		if ( null === $cidr || $this->cache->get( 'allow' )->contains( $cidr->start ) ) {
+		if ( null === $cidr ) {
+			return false;
+		}
+		if ( $this->renew( $ip, $days, true ) || $this->cache->get( 'allow' )->contains( $cidr->start ) ) {
 			return false;
 		}
 		$this->repo->add(
@@ -57,7 +65,7 @@ final class AdminProtection {
 			/* translators: %d: user ID. */
 			sprintf( __( 'Administrator IP, auto-allowlisted when settings were saved (user #%d)', 'sentinel-shield' ), $user_id ),
 			'admin_auto',
-			null,
+			$days > 0 ? time() + $days * DAY_IN_SECONDS : null,
 			$user_id
 		);
 		$this->cache->flush();
@@ -70,6 +78,35 @@ final class AdminProtection {
 				'user_id' => $user_id,
 			)
 		);
+		return true;
+	}
+
+	/**
+	 * Pushes back the expiry of the IP's automatic allowlist entry (only an
+	 * entry this plugin added for an administrator; manual entries are never
+	 * touched). Throttled to one write per IP per day unless $force.
+	 *
+	 * @param string $ip    Admin IP.
+	 * @param int    $days  Days from now (0 = make it permanent).
+	 * @param bool   $force Skip the daily throttle.
+	 * @return bool True when the IP has an automatic entry (renewed or not).
+	 */
+	public function renew( string $ip, int $days, bool $force = false ): bool {
+		if ( ! $force && ! Throttle::once( 'admin_allow_renew_' . md5( $ip ), DAY_IN_SECONDS ) ) {
+			return false;
+		}
+		$cidr = Cidr::parse( $ip );
+		$row  = null === $cidr ? null : $this->repo->find_exact( 'allow', $cidr );
+		if ( null === $cidr || null === $row || 'admin_auto' !== $row['source'] ) {
+			return false;
+		}
+		// 0 days: the entry becomes permanent again. Otherwise push the expiry back.
+		$until = $days > 0 ? time() + $days * DAY_IN_SECONDS : null;
+		$stale = null === $until ? null !== $row['expires_at'] : ( null !== $row['expires_at'] && strtotime( $row['expires_at'] . ' UTC' ) < $until - HOUR_IN_SECONDS );
+		if ( $stale ) {
+			$this->repo->add( 'allow', $cidr, (string) $row['reason'], 'admin_auto', $until, (int) $row['created_by'] );
+			$this->cache->flush();
+		}
 		return true;
 	}
 

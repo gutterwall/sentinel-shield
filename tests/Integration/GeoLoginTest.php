@@ -27,6 +27,8 @@ use SentinelShield\Support\Throttle;
 
 final class GeoLoginTest extends \WP_UnitTestCase {
 
+	use AdminUsers;
+
 	private static string $dir;
 
 	private string $ip = '8.8.8.8';
@@ -178,7 +180,7 @@ final class GeoLoginTest extends \WP_UnitTestCase {
 
 	public function test_scope_administrators_only(): void {
 		self::factory()->user->create( array( 'user_login' => 'member', 'user_pass' => 'pw', 'role' => 'subscriber' ) );
-		self::factory()->user->create( array( 'user_login' => 'boss', 'user_pass' => 'pw', 'role' => 'administrator', 'user_email' => 'boss@example.test' ) );
+		self::create_admin( array( 'user_login' => 'boss', 'user_pass' => 'pw', 'user_email' => 'boss@example.test' ) );
 		$this->guard( array( 'mode' => 'allow', 'countries' => 'US', 'scope' => 'privileged' ) );
 		$this->ip = '203.0.113.9';
 		$this->assertInstanceOf( \WP_User::class, $this->login( 'member', 'pw' ) );
@@ -253,7 +255,7 @@ final class GeoLoginTest extends \WP_UnitTestCase {
 	}
 
 	public function test_application_passwords_are_checked(): void {
-		$user = self::factory()->user->create_and_get( array( 'role' => 'administrator' ) );
+		$user = self::create_admin_user();
 		$this->ip = '203.0.113.9';
 		$this->guard( array( 'mode' => 'allow', 'countries' => 'US' ) );
 		$error = new \WP_Error();
@@ -270,7 +272,7 @@ final class GeoLoginTest extends \WP_UnitTestCase {
 
 	public function test_saving_settings_that_deny_yourself_switches_to_test_mode(): void {
 		$c     = Plugin::instance()->container();
-		$admin = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$admin = self::create_admin();
 		wp_set_current_user( $admin );
 		$c->instance( 'client_ip', '203.0.113.9' );
 		$c->instance( 'client_ip_details', array( 'ip' => '203.0.113.9', 'mode' => 'none', 'fallback' => false ) );

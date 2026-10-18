@@ -17,6 +17,8 @@ use SentinelShield\SettingsSchema;
 
 final class DocsTabTest extends \WP_UnitTestCase {
 
+	use AdminUsers;
+
 	public function tear_down(): void {
 		delete_site_option( AdminRegistry::OPTION );
 		unset( $_GET['tab'] );
@@ -24,7 +26,7 @@ final class DocsTabTest extends \WP_UnitTestCase {
 	}
 
 	private function render(): string {
-		$admin = self::factory()->user->create( array( 'role' => 'administrator', 'user_login' => 'docs_admin' ) );
+		$admin = self::create_admin( array( 'user_login' => 'docs_admin' ) );
 		wp_set_current_user( $admin );
 		Plugin::instance()->container()->get( AdminRegistry::class )->approve( $admin, $admin );
 		$_GET['tab'] = 'docs';

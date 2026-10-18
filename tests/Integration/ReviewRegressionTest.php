@@ -26,6 +26,8 @@ use SentinelShield\Unlock\UnlockService;
 
 final class ReviewRegressionTest extends \WP_UnitTestCase {
 
+	use AdminUsers;
+
 	public function set_up(): void {
 		parent::set_up();
 		global $wpdb;
@@ -109,18 +111,25 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 	 */
 	public function test_unlock_links_are_revoked_with_the_right_to_unlock(): void {
 		$tokens = Plugin::instance()->container()->get( TokenRepository::class );
-		$admin  = self::factory()->user->create_and_get( array( 'role' => 'administrator' ) );
-		$other  = self::factory()->user->create_and_get( array( 'role' => 'administrator' ) );
+		$admin  = self::create_admin_user();
+		$other  = self::create_admin_user();
 		$token  = $tokens->create( $admin->ID, '203.0.113.9', 600 );
 		$kept   = $tokens->create( $other->ID, '203.0.113.9', 600 );
 
-		$admin->set_role( 'editor' );
+		self::demote( $admin->ID );
 		$this->assertNull( $tokens->peek( $token ), 'Demoted: link invalidated.' );
 		$this->assertNotNull( $tokens->peek( $kept ), 'Other accounts keep theirs.' );
 		$this->assertContains( 'unlock_revoked', self::event_types() );
 
 		require_once ABSPATH . 'wp-admin/includes/user.php';
-		wp_delete_user( $other->ID );
+		if ( is_multisite() ) {
+			// A network deletes super admins only after revoking them (which already invalidates links).
+			require_once ABSPATH . 'wp-admin/includes/ms.php';
+			revoke_super_admin( $other->ID );
+			wpmu_delete_user( $other->ID );
+		} else {
+			wp_delete_user( $other->ID );
+		}
 		$this->assertNull( $tokens->peek( $kept ), 'Deleted: link invalidated.' );
 	}
 
@@ -131,7 +140,7 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 	public function test_unlock_link_is_refused_when_its_account_can_no_longer_unlock(): void {
 		$c      = Plugin::instance()->container();
 		$tokens = $c->get( TokenRepository::class );
-		$admin  = self::factory()->user->create_and_get( array( 'role' => 'administrator' ) );
+		$admin  = self::create_admin_user();
 		$token  = $tokens->create( $admin->ID, '203.0.113.9', 600 );
 		$filter = static function ( array $caps, array $cap, array $args ) use ( $admin ): array {
 			if ( isset( $args[1] ) && (int) $args[1] === $admin->ID ) {
@@ -140,6 +149,9 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 			return $caps;
 		};
 		add_filter( 'user_has_cap', $filter, 10, 3 );
+		// On multisite the right to unlock is super admin status; drop it without any hook.
+		$not_super = static fn( $admins ): array => array_values( array_diff( (array) $admins, array( $admin->user_login ) ) );
+		add_filter( 'site_option_site_admins', $not_super );
 
 		$_GET['sentinel_unlock']          = $token;
 		$_POST['sentinel_unlock_confirm'] = '1';
@@ -150,6 +162,7 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 			$this->assertStringContainsString( 'invalid', $e->getMessage() );
 		} finally {
 			remove_filter( 'user_has_cap', $filter, 10 );
+			remove_filter( 'site_option_site_admins', $not_super );
 		}
 		$this->assertNull( $tokens->peek( $token ) );
 		$this->assertContains( 'unlock_refused', self::event_types() );
@@ -167,7 +180,7 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 		$method  = new \ReflectionMethod( UnlockService::class, 'request_locked' );
 		$method->setAccessible( true );
 		$request = static fn( string $ip, string $email ): string => (string) $method->invoke( $service, $ip, $email, 'generic' );
-		$admin   = self::factory()->user->create_and_get( array( 'role' => 'administrator' ) );
+		$admin   = self::create_admin_user();
 		reset_phpmailer_instance();
 
 		$this->assertSame( 'generic', $request( '198.51.100.1', $admin->user_email ) );
@@ -229,7 +242,7 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 	 * own next login impossible.
 	 */
 	public function test_cannot_switch_off_email_codes_that_your_own_login_needs(): void {
-		$admin = self::factory()->user->create_and_get( array( 'role' => 'administrator' ) );
+		$admin = self::create_admin_user();
 		wp_set_current_user( $admin->ID );
 		$actions = new Actions( Plugin::instance()->container() );
 		$method  = new \ReflectionMethod( Actions::class, 'keep_own_twofa_login' );

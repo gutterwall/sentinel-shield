@@ -12,6 +12,7 @@ namespace SentinelShield\Lockdown;
 use SentinelShield\Cron\CronInspector;
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Settings;
+use SentinelShield\Support\FileWalk;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -30,6 +31,7 @@ final class IntegrityScanner {
 
 	public const REPORT_OPTION   = 'sentinel_shield_scan_report';
 	public const BASELINE_OPTION = 'sentinel_shield_scan_baseline';
+	public const UPLOADS_STATE   = 'sentinel_shield_scan_uploads';
 
 	public const SEVERITIES = array( 'critical', 'warning', 'notice', 'ok' );
 
@@ -37,6 +39,7 @@ final class IntegrityScanner {
 	private const MAX_READ      = 2097152;
 	private const MAX_PER_CHECK = 100;
 	private const TIME_BUDGET   = 20.0;
+	private const MIN_PROGRESS  = 500;
 
 	/**
 	 * Findings of the current run.
@@ -60,13 +63,46 @@ final class IntegrityScanner {
 	private float $deadline = 0.0;
 
 	/**
+	 * Files examined per run, with those read only partly or not at all.
+	 *
+	 * @var array{read:int, partial:list<string>, unreadable:list<string>}
+	 */
+	private array $coverage = array(
+		'read'       => 0,
+		'partial'    => array(),
+		'unreadable' => array(),
+	);
+
+	/**
+	 * Progress of the uploads walk, which can span several runs.
+	 *
+	 * @var array<string, mixed>
+	 */
+	private array $uploads = array();
+
+	/**
+	 * Whether findings are being added by the uploads walk.
+	 *
+	 * @var bool
+	 */
+	private bool $in_uploads = false;
+
+	/**
+	 * Files the uploads walk may visit per run (0 = no limit).
+	 *
+	 * @var int
+	 */
+	private int $entry_limit = self::MAX_ENTRIES;
+
+	/**
 	 * Constructor.
 	 *
 	 * @param AdminRegistry   $admins   Administrator registry.
 	 * @param EventRepository $events   Event log.
 	 * @param Settings        $settings Settings.
+	 * @param int|null        $per_run  Uploads files per run (default MAX_ENTRIES).
 	 */
-	public function __construct( private AdminRegistry $admins, private EventRepository $events, private Settings $settings ) {}
+	public function __construct( private AdminRegistry $admins, private EventRepository $events, private Settings $settings, private ?int $per_run = null ) {}
 
 	/**
 	 * The checks, with what SC does at each place.
@@ -94,18 +130,31 @@ final class IntegrityScanner {
 	/**
 	 * Runs every check and stores the report.
 	 *
-	 * @return array{time:int, duration:float, findings:list<array<string, mixed>>, truncated:list<string>, new:list<string>}
+	 * The uploads folder can hold more files than one run should read; its walk
+	 * keeps its position and continues on the next run ("complete" is false
+	 * until it reaches the end), so every file is eventually checked. Findings
+	 * from earlier parts of the walk are carried into each report.
+	 *
+	 * @param bool $unbounded No time or entry limit (WP-CLI).
+	 * @return array{time:int, duration:float, findings:list<array<string, mixed>>, truncated:list<string>, new:list<string>, complete:bool, coverage:array<string, mixed>}
 	 */
-	public function run(): array {
+	public function run( bool $unbounded = false ): array {
 		$switched = is_multisite() && get_current_blog_id() !== get_main_site_id();
 		if ( $switched ) {
 			switch_to_blog( get_main_site_id() );
 		}
 		require_once ABSPATH . 'wp-admin/includes/plugin.php';
-		$start           = microtime( true );
-		$this->deadline  = $start + self::TIME_BUDGET;
-		$this->findings  = array();
-		$this->truncated = array();
+		$start             = microtime( true );
+		$this->deadline    = $unbounded ? INF : $start + self::TIME_BUDGET;
+		$this->entry_limit = $unbounded ? 0 : ( $this->per_run ?? self::MAX_ENTRIES );
+		$this->findings    = array();
+		$this->truncated   = array();
+		$this->uploads     = array();
+		$this->coverage    = array(
+			'read'       => 0,
+			'partial'    => array(),
+			'unreadable' => array(),
+		);
 		foreach ( array_keys( self::checks() ) as $check ) {
 			try {
 				$this->{'check_' . $check}();
@@ -135,8 +184,10 @@ final class IntegrityScanner {
 			'time'      => time(),
 			'duration'  => round( microtime( true ) - $start, 2 ),
 			'findings'  => $this->findings,
-			'truncated' => $this->truncated,
+			'truncated' => array_values( array_unique( $this->truncated ) ),
 			'new'       => $new,
+			'complete'  => ! empty( $this->uploads['done'] ) || array() === $this->uploads,
+			'coverage'  => $this->coverage + array( 'uploads' => $this->uploads ),
 		);
 		update_site_option( self::REPORT_OPTION, $report );
 		return $report;
@@ -179,7 +230,8 @@ final class IntegrityScanner {
 	 * @return array<string, mixed>|null The finding, or null if it is not in the report or not approvable.
 	 */
 	public static function approve( string $id, int $by ): ?array {
-		foreach ( (array) ( self::report()['findings'] ?? array() ) as $finding ) {
+		$all = array_merge( (array) ( self::report()['findings'] ?? array() ), (array) ( FileIntegrity::report()['findings'] ?? array() ) );
+		foreach ( $all as $finding ) {
 			if ( $finding['id'] === $id && '' !== (string) $finding['hash'] ) {
 				$baseline        = self::baseline();
 				$baseline[ $id ] = array(
@@ -520,34 +572,83 @@ final class IntegrityScanner {
 
 		$uploads = (string) wp_get_upload_dir()['basedir'];
 		if ( ! is_dir( $uploads ) ) {
+			delete_site_option( self::UPLOADS_STATE );
 			return;
 		}
-		$count = 0;
-		$iter  = new \RecursiveIteratorIterator( new \RecursiveDirectoryIterator( $uploads, \FilesystemIterator::SKIP_DOTS ), \RecursiveIteratorIterator::LEAVES_ONLY, \RecursiveIteratorIterator::CATCH_GET_CHILD );
-		foreach ( $iter as $file ) {
-			if ( ++$count > self::MAX_ENTRIES || microtime( true ) > $this->deadline ) {
-				$this->truncated[] = 'stray_files';
-				break;
+		$state = get_site_option( self::UPLOADS_STATE );
+		$state = is_array( $state ) ? $state : array(
+			'cursor'  => '',
+			'files'   => 0,
+			'started' => time(),
+			'carried' => array(),
+		);
+		// Findings from earlier parts of this walk, re-graded against current approvals.
+		$baseline = self::baseline();
+		foreach ( (array) $state['carried'] as $finding ) {
+			$approved            = '' !== (string) $finding['hash'] && ( $baseline[ $finding['id'] ]['hash'] ?? null ) === $finding['hash'];
+			$finding['approved'] = $approved;
+			$finding['severity'] = $approved ? 'ok' : $finding['original'];
+			$this->findings[]    = $finding;
+		}
+		$walk             = new FileWalk( $uploads );
+		$limit            = $this->entry_limit;
+		$this->in_uploads = true;
+		try {
+			$done = $walk->run(
+				(string) $state['cursor'],
+				function ( string $path, string $rel ): void {
+					$this->upload_file( $path, basename( $rel ) );
+				},
+				// At least MIN_PROGRESS files per run, so the walk always moves on.
+				fn(): bool => ( $limit > 0 && $walk->files >= $limit ) || ( $walk->files >= self::MIN_PROGRESS && microtime( true ) > $this->deadline )
+			);
+		} finally {
+			$this->in_uploads = false;
+		}
+		$files         = (int) $state['files'] + $walk->files;
+		$this->uploads = array(
+			'done'       => $done,
+			'files'      => $files,
+			'started'    => (int) $state['started'],
+			'cursor'     => $done ? '' : $walk->cursor,
+			'links'      => array_slice( $walk->links, 0, 20 ),
+			'unreadable' => array_slice( $walk->unreadable, 0, 20 ),
+		);
+		if ( $done ) {
+			delete_site_option( self::UPLOADS_STATE );
+			return;
+		}
+		update_site_option(
+			self::UPLOADS_STATE,
+			array(
+				'cursor'  => $walk->cursor,
+				'files'   => $files,
+				'started' => (int) $state['started'],
+				'carried' => array_values( array_filter( $this->findings, static fn( array $f ): bool => ! empty( $f['uploads'] ) ) ),
+			)
+		);
+	}
+
+	/**
+	 * Classifies one file in uploads.
+	 *
+	 * @param string $path Absolute path.
+	 * @param string $name File name.
+	 */
+	private function upload_file( string $path, string $name ): void {
+		if ( preg_match( '/\.(php[0-9]?|phtml|phar|pht)$/i', $name ) ) {
+			if ( 'index.php' === strtolower( $name ) && (int) @filesize( $path ) <= 200 ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Vanished file: treated as empty.
+				return; // "Silence is golden" placeholders.
 			}
-			if ( ! $file instanceof \SplFileInfo || ! $file->isFile() ) {
-				continue;
-			}
-			$name = $file->getFilename();
-			$path = $file->getPathname();
-			if ( preg_match( '/\.(php[0-9]?|phtml|phar|pht)$/i', $name ) ) {
-				if ( 'index.php' === strtolower( $name ) && $file->getSize() <= 200 ) {
-					continue; // "Silence is golden" placeholders.
-				}
-				if ( str_starts_with( $name, '.' ) ) {
-					$this->stray( $path, $name, false );
-				} else {
-					$this->file_finding( 'stray_files', $path, 'warning', __( 'PHP files do not belong in uploads; this is where web shells are usually dropped. A few plugins keep generated PHP here; approve it if you know which one.', 'sentinel-shield' ) );
-				}
-			} elseif ( '.user.ini' === $name || 'php.ini' === $name ) {
-				$this->file_finding( 'stray_files', $path, 'warning', __( 'A PHP settings file inside uploads can switch on an auto-prepend loader for that folder.', 'sentinel-shield' ) );
-			} elseif ( preg_match( '/^[0-9a-f]{8,}\.zip$/i', $name ) ) {
+			if ( str_starts_with( $name, '.' ) ) {
 				$this->stray( $path, $name, false );
+			} else {
+				$this->file_finding( 'stray_files', $path, 'warning', __( 'PHP files do not belong in uploads; this is where web shells are usually dropped. A few plugins keep generated PHP here; approve it if you know which one.', 'sentinel-shield' ) );
 			}
+		} elseif ( '.user.ini' === $name || 'php.ini' === $name ) {
+			$this->file_finding( 'stray_files', $path, 'warning', __( 'A PHP settings file inside uploads can switch on an auto-prepend loader for that folder.', 'sentinel-shield' ) );
+		} elseif ( preg_match( '/^[0-9a-f]{8,}\.zip$/i', $name ) ) {
+			$this->stray( $path, $name, false );
 		}
 	}
 
@@ -811,6 +912,7 @@ final class IntegrityScanner {
 			'title'    => $title,
 			'detail'   => $detail,
 			'hash'     => $hash,
+			'uploads'  => $this->in_uploads,
 		);
 	}
 
@@ -821,18 +923,25 @@ final class IntegrityScanner {
 	 * @param bool   $approved New state.
 	 */
 	private static function mark_in_report( string $id, bool $approved ): void {
-		$report = self::report();
-		if ( null === $report ) {
-			return;
-		}
-		foreach ( $report['findings'] as &$finding ) {
-			if ( $finding['id'] === $id ) {
-				$finding['approved'] = $approved;
-				$finding['severity'] = $approved ? 'ok' : $finding['original'];
+		foreach ( array( self::REPORT_OPTION, FileIntegrity::REPORT_OPTION, FileIntegrity::STATE_OPTION, self::UPLOADS_STATE ) as $option ) {
+			$report = get_site_option( $option );
+			$key    = self::UPLOADS_STATE === $option ? 'carried' : 'findings';
+			if ( ! is_array( $report ) || empty( $report[ $key ] ) ) {
+				continue;
+			}
+			$changed = false;
+			foreach ( $report[ $key ] as &$finding ) {
+				if ( $finding['id'] === $id ) {
+					$finding['approved'] = $approved;
+					$finding['severity'] = $approved ? 'ok' : $finding['original'];
+					$changed             = true;
+				}
+			}
+			unset( $finding );
+			if ( $changed ) {
+				update_site_option( $option, $report );
 			}
 		}
-		unset( $finding );
-		update_site_option( self::REPORT_OPTION, $report );
 	}
 
 	/**
@@ -889,9 +998,37 @@ final class IntegrityScanner {
 	 * @param string $path Path.
 	 */
 	private function read( string $path ): string {
-		if ( ! is_file( $path ) || ! is_readable( $path ) ) {
+		if ( ! is_file( $path ) ) {
 			return '';
 		}
+		if ( ! is_readable( $path ) ) {
+			$this->note( 'unreadable', $path );
+			return '';
+		}
+		++$this->coverage['read'];
+		if ( (int) filesize( $path ) > self::MAX_READ ) {
+			$this->note( 'partial', $path );
+		}
 		return (string) file_get_contents( $path, false, null, 0, self::MAX_READ ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Local file inspection.
+	}
+
+	/**
+	 * Remembers a file that was read only partly or not at all.
+	 *
+	 * @param string $kind partial|unreadable.
+	 * @param string $path Path.
+	 */
+	private function note( string $kind, string $path ): void {
+		$rel = CronInspector::relative( $path );
+		if ( count( $this->coverage[ $kind ] ) < 50 && ! in_array( $rel, $this->coverage[ $kind ], true ) ) {
+			$this->coverage[ $kind ][] = $rel;
+		}
+	}
+
+	/**
+	 * Largest part of a file the scan reads (bytes).
+	 */
+	public static function max_read(): int {
+		return self::MAX_READ;
 	}
 }

@@ -47,6 +47,7 @@ final class EventsPage {
 			'feed_updated'          => __( 'Blocklist updated', 'sentinel-shield' ),
 			'feed_error'            => __( 'Blocklist update failed', 'sentinel-shield' ),
 			'malware_finding'       => __( 'Malware scan finding', 'sentinel-shield' ),
+			'integrity_finding'     => __( 'File integrity finding', 'sentinel-shield' ),
 			'lockdown_outbound'     => __( 'Blockchain request blocked', 'sentinel-shield' ),
 			'lockdown_upload'       => __( 'Upload blocked', 'sentinel-shield' ),
 			'lockdown_tamper'       => __( 'Deactivation attempt blocked', 'sentinel-shield' ),

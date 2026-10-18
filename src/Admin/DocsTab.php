@@ -39,6 +39,7 @@ final class DocsTab {
 		$sections = array(
 			'ss-doc-admins'    => __( 'Administrator approvals (who may be an administrator)', 'sentinel-shield' ),
 			'ss-doc-login'     => __( 'Login security: brute-force protection and two-factor authentication', 'sentinel-shield' ),
+			'ss-doc-scans'     => __( 'Malware scan and file integrity check', 'sentinel-shield' ),
 			'ss-doc-settings'  => __( 'Every setting and what it does', 'sentinel-shield' ),
 			'ss-doc-constants' => __( 'wp-config.php constants', 'sentinel-shield' ),
 			'ss-doc-recovery'  => __( 'Locked out? Ways back in', 'sentinel-shield' ),
@@ -53,6 +54,7 @@ final class DocsTab {
 
 		$this->admins();
 		$this->login();
+		$this->scans();
 		$this->settings();
 		$this->constants();
 		$this->recovery();
@@ -278,6 +280,37 @@ final class DocsTab {
 	}
 
 	/**
+	 * The malware scan and the checksum verification.
+	 */
+	private function scans(): void {
+		echo '<div class="ss-card ss-docs" id="ss-doc-scans"><h2>' . esc_html__( 'Malware scan and file integrity check', 'sentinel-shield' ) . '</h2>';
+		$this->section(
+			__( 'Malware scan', 'sentinel-shield' ),
+			array(
+				__( 'Twice a day the scan looks at every place the SC malware and similar takeovers hide: PHP auto-prepend settings, drop-ins, must-use and hidden plugins, administrator accounts, database triggers, the theme, hidden PHP files and restore bundles, encoded database options, scheduled tasks, login hooks, shared memory and blockchain command channels. It only reads; nothing is changed.', 'sentinel-shield' ),
+				__( 'Coverage is reported with every scan: how many files were read, files over 2 MB of which only the first 2 MB was checked, files and folders that could not be read, and folder links that were not followed. A check that stops listing after 100 findings says so.', 'sentinel-shield' ),
+				__( 'The uploads folder can hold hundreds of thousands of files. Each run checks up to 20,000 of them (or 20 seconds\' worth) and remembers where it stopped; the next run, a couple of minutes later, continues from there until every file has been checked. Findings from the part already checked stay in the report meanwhile. WP-CLI (wp sentinel scan) checks everything in one go.', 'sentinel-shield' ),
+			)
+		);
+		$this->section(
+			__( 'File integrity (WordPress.org checksums)', 'sentinel-shield' ),
+			array(
+				__( 'WordPress.org publishes a hash of every file of every WordPress release and of every version of every plugin it hosts. Once a day, each core file and each file of plugins from WordPress.org is compared with those hashes. Any change shows up, not just known malware tricks: a changed core file is critical, a PHP file in wp-admin or wp-includes that no release contains is critical, an unknown PHP file in the WordPress folder is a warning, and a changed or added PHP file in a plugin is a warning (critical when it also looks like malware). Missing files are listed for review.', 'sentinel-shield' ),
+				__( 'Not everything can be verified: WordPress.org publishes no checksums for themes, premium and custom plugins are not hosted there, and single-file plugins have no folder to check. These are listed as "not verifiable" with the reason, and the malware scan still covers them.', 'sentinel-shield' ),
+				__( 'The check runs in slices of about 15 seconds, a minute apart, and keeps its place in between, so large sites are checked completely. Published checksums are cached for 30 days (they never change for a given version). Your site asks WordPress.org for the checksums of your WordPress and plugin versions, as its update checks already do; nothing about visitors is sent.', 'sentinel-shield' ),
+				__( 'If you edit plugin files on purpose, approve the finding: you are warned again only if the file changes. To fix a changed core file, reinstall WordPress (Dashboard → Updates); reinstalling does not remove extra files, which have to be deleted by hand once you know what they are.', 'sentinel-shield' ),
+			)
+		);
+		$this->section(
+			__( 'Automatic administrator allowlist entries', 'sentinel-shield' ),
+			array(
+				__( 'When an administrator activates the plugin or saves settings, their IP is allowlisted so they cannot lock themselves out. These entries last 30 days by default and renew whenever an administrator uses the dashboard from that IP, so only addresses nobody has used for a month drop off. Home and mobile IPs change and are reassigned to other people; a permanent entry could end up trusting a stranger. Set the number of days on the Lockouts & Unlock tab (0 keeps them forever). Entries you add yourself are never changed.', 'sentinel-shield' ),
+			)
+		);
+		echo '</div>';
+	}
+
+	/**
 	 * Recovery options.
 	 */
 	private function recovery(): void {
@@ -323,7 +356,8 @@ final class DocsTab {
 			'geo-update'                        => __( 'Downloads the DB-IP country database now.', 'sentinel-shield' ),
 			'feeds / feeds-update'              => __( 'Shows blocklist status, or downloads enabled lists now.', 'sentinel-shield' ),
 			'cron'                              => __( 'Lists scheduled tasks with last-run status and origin.', 'sentinel-shield' ),
-			'scan'                              => __( 'Runs the malware scan; exits with code 1 when there are alerts, for monitoring.', 'sentinel-shield' ),
+			'scan'                              => __( 'Runs the whole malware scan at once (no time limit) and lists files it could only partly read; exits with code 1 when there are alerts, for monitoring.', 'sentinel-shield' ),
+			'verify'                            => __( 'Verifies core and plugin files against WordPress.org checksums now; --coverage lists every item with its result. Exits with code 1 when files differ.', 'sentinel-shield' ),
 			'admins'                            => __( 'Lists every administrator account from the database, with hidden and approved flags.', 'sentinel-shield' ),
 			'approve-admin <user>'              => __( 'Approves an administrator (ID, login or email). Also the way back in when locked out.', 'sentinel-shield' ),
 			'revoke-admin <user>'               => __( 'Withdraws an approval.', 'sentinel-shield' ),

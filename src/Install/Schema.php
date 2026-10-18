@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace SentinelShield\Install;
 
+use SentinelShield\Settings;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -20,7 +22,7 @@ defined( 'ABSPATH' ) || exit;
  */
 final class Schema {
 
-	public const VERSION = 3;
+	public const VERSION = 4;
 	public const OPTION  = 'sentinel_shield_db_version';
 
 	/**
@@ -59,7 +61,17 @@ final class Schema {
 	 * @return array<int, callable>
 	 */
 	private static function migrations(): array {
-		return array();
+		return array(
+			// 0.6.0: automatic administrator allowlist entries expire unless used.
+			4 => static function (): void {
+				global $wpdb;
+				$settings = get_site_option( Settings::OPTION, array() );
+				$days     = (int) ( $settings['unlock']['admin_allow_days'] ?? 30 );
+				if ( $days > 0 ) {
+					$wpdb->query( $wpdb->prepare( 'UPDATE %i SET expires_at = %s WHERE source = %s AND expires_at IS NULL', $wpdb->base_prefix . 'sentinel_ip_rules', gmdate( 'Y-m-d H:i:s', time() + $days * DAY_IN_SECONDS ), 'admin_auto' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- One-time migration.
+				}
+			},
+		);
 	}
 
 	/**

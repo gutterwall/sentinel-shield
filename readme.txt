@@ -4,7 +4,7 @@ Tags: security, firewall, two-factor, brute force, login
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.5.1
+Stable tag: 0.6.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -47,9 +47,10 @@ Sentinel Shield is a self-hosted security plugin. Everything runs on your server
 
 Protection against the "SC" WordPress malware (described by Sucuri in September 2026) and similar takeovers, which keep copies of themselves in many places and rebuild each other.
 
-* A read-only malware scan, twice a day and on demand, of every place SC hides: auto_prepend_file loaders in .user.ini / php.ini / .htaccess, the db.php and advanced-cache.php drop-ins, must-use plugins and duplicate plugins, plugins hidden from the Plugins screen, administrators hidden from the Users screen, database triggers, injected theme code, hidden PHP files and ZIP bundles, PHP in uploads, encoded payloads and sc_ options in the database, random scheduled tasks, login-capturing and hiding hooks, shared memory and blockchain traffic. New findings are logged and emailed; known-good items can be approved and are reported again if they change.
+* A read-only malware scan, twice a day and on demand, of every place SC hides: auto_prepend_file loaders in .user.ini / php.ini / .htaccess, the db.php and advanced-cache.php drop-ins, must-use plugins and duplicate plugins, plugins hidden from the Plugins screen, administrators hidden from the Users screen, database triggers, injected theme code, hidden PHP files and ZIP bundles, PHP in uploads, encoded payloads and sc_ options in the database, random scheduled tasks, login-capturing and hiding hooks, shared memory and blockchain traffic. New findings are logged and emailed; known-good items can be approved and are reported again if they change. Every scan reports its coverage (files read, files read only partly, unreadable files), and a large uploads folder is walked across several runs until every file has been checked.
+* File integrity check, daily and on demand: WordPress core and every plugin from WordPress.org are compared with the file hashes WordPress.org publishes for the installed versions. Changed files and files a release does not contain (such as a backdoor in wp-includes) are reported, whatever they look like. Large sites are checked in slices, and each pass lists what could not be verified and why (themes, premium plugins).
 * Opt-in measures: administrator lock (only approved administrators keep admin rights), file editor off, plugin/theme installs off, PHP blocked in uploads, blockchain RPC command channels blocked, protection against being switched off by code, and alerts on new administrators.
-* Malware Lockdown page with the scan, the administrator list (approve and withdraw), "Log out everyone", server configuration checks and the safe cleanup order.
+* Malware Lockdown page with the scan, the file integrity results, the administrator list (approve and withdraw), "Log out everyone", server configuration checks and the safe cleanup order.
 
 **Monitoring and tools**
 
@@ -58,17 +59,17 @@ Protection against the "SC" WordPress malware (described by Sucuri in September 
 * Test mode everywhere: global log-only mode with optional auto-expiry, per-module overrides, a decision simulator, an IP resolution simulator, a lockout tester, a block page preview and a test unlock email.
 * Documentation tab (Settings → Documentation) with this whole reference, generated from the plugin's own settings, plus the current administrator approvals.
 * Multisite: network-wide rules and settings; per-site overrides for the block page.
-* WP-CLI: `wp sentinel status|check|resolve-ip|block|allow|unblock|remove|list|lockout|test-mode|settings-get|settings-set|settings-keys|settings-export|settings-import|cloudflare-update|cron|feeds|feeds-update|login-attempts|2fa|geo|geo-update|scan|admins|approve-admin|revoke-admin|flush-cache|prune|unlock-link|events`.
+* WP-CLI: `wp sentinel status|check|resolve-ip|block|allow|unblock|remove|list|lockout|test-mode|settings-get|settings-set|settings-keys|settings-export|settings-import|cloudflare-update|cron|feeds|feeds-update|login-attempts|2fa|geo|geo-update|scan|verify|admins|approve-admin|revoke-admin|flush-cache|prune|unlock-link|events`.
 
 **Lockout safety**
 
-The admin's IP is auto-allowlisted on activation from wp-admin and on every settings save, a warning appears if your own IP matches a block rule, rules that would block your own IP are refused, and wp-cron.php from the server plus all WP-CLI requests are never blocked. See "I locked myself out" below for the ways back in.
+The admin's IP is auto-allowlisted on activation from wp-admin and on every settings save (for 30 days by default, renewed while an administrator uses the dashboard from it), a warning appears if your own IP matches a block rule, rules that would block your own IP are refused, and wp-cron.php from the server plus all WP-CLI requests are never blocked. See "I locked myself out" below for the ways back in.
 
 **Roadmap:** 404 flood blocking, WAF (auto_prepend_file), file integrity against wordpress.org checksums, audit log and the full dashboard.
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.5.1.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.6.0.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
@@ -160,6 +161,7 @@ Malware Lockdown measures are not affected by test mode: once switched on, they 
 * **Repeat offense window (days)** (`lockout.repeat_window_days`; default: 7; recommended: 7). Range 1–365. Lockouts within this many days escalate to the next step. Older offenses are forgotten.
 * **Unlock link lifetime (minutes)** (`unlock.token_ttl_minutes`; default: 30; recommended: 30). Range 5–1440. Emailed unlock links are single-use and expire after this time.
 * **Temporary allowlist after unlock (hours)** (`unlock.allow_hours`; default: 24; recommended: 24). Range 1–720. After a successful unlock, the IP is allowlisted for this long so you can fix the cause.
+* **Keep automatic administrator allowlist entries for (days)** (`unlock.admin_allow_days`; default: 30; recommended: 30). Range 0–365. When an administrator saves settings, their IP is allowlisted so they cannot lock themselves out. The entry lasts this many days and is renewed whenever an administrator uses the dashboard from that IP, so only IPs nobody has used for that long drop off. Home and mobile IPs change and get reassigned to other people, so a permanent entry could end up trusting a stranger. 0 keeps the entries forever (the behavior before 0.6.0). Entries you add yourself on the IP Rules page are never changed.
 * **Unlock emails per IP per hour** (`unlock.max_requests_per_hour`; default: 3; recommended: 3). Range 1–20. Limits abuse of the unlock form.
 
 = Settings → Login Security =
@@ -204,7 +206,8 @@ Malware Lockdown measures are not affected by test mode: once switched on, they 
 * **Protect Sentinel Shield from being switched off by code** (`lockdown.protect_self`; default: Off; recommended: On). SC deactivates and deletes security plugins. With this on, Sentinel Shield can only be deactivated or deleted by an administrator from the Plugins screen, during an update, or with WP-CLI.
 * **Block blockchain command channels** (`lockdown.block_chain_rpc`; default: Off; recommended: On). Stops the site from contacting public Ethereum and BNB Chain RPC gateways and from sending blockchain JSON-RPC calls (eth_call), which SC uses to fetch its commands. Each attempt is logged with the file that made it. Leave off if a plugin on this site legitimately talks to a blockchain.
 * **Alert on new administrator accounts** (`lockdown.alert_admin_changes`; default: On; recommended: On). Logs and emails the site admin address whenever an account becomes an administrator through WordPress. Accounts written directly into the database are caught by the scan instead.
-* **Email new malware scan findings** (`lockdown.scan_email`; default: On; recommended: On). The scan runs twice a day. New critical findings and warnings are logged; with this on they are also emailed to the site admin address.
+* **Email new malware scan findings** (`lockdown.scan_email`; default: On; recommended: On). The scan runs twice a day. New critical findings and warnings are logged; with this on they are also emailed to the site admin address. The same applies to the file integrity check.
+* **Verify core and plugin files against WordPress.org checksums** (`lockdown.integrity_checks`; default: On; recommended: On). Once a day, every WordPress core file and every file of plugins hosted on WordPress.org is compared with the hash WordPress.org publishes for the installed version, and core folders are checked for files no release contains. Changed or added files are reported on the Malware Lockdown page. Large sites are checked in slices over several minutes. The site asks WordPress.org for the checksums of your WordPress and plugin versions (as update checks already do); nothing about visitors is sent. Themes, premium plugins and single-file plugins cannot be verified this way and are listed as such.
 
 = Settings → Modules =
 
@@ -292,6 +295,14 @@ Your server downloads the country database from db-ip.com about once a month (wi
 
 Not necessarily: drop-ins, must-use plugins and scheduled tasks are often legitimate. Items marked Critical matched known malware traits and need a close look. If you recognize an item, approve it and you will only be warned again if it changes. If the scan finds SC, follow the cleanup order on the Malware Lockdown page: the order matters, because the copies rebuild each other.
 
+= What does the file integrity check send to WordPress.org? =
+
+Only requests for the published checksums of your WordPress version and locale and of each installed plugin and version, the same information WordPress's own update checks send. Nothing about visitors is sent. Checksums are cached for 30 days. Switch the check off with "Verify core and plugin files against WordPress.org checksums" on the Malware Lockdown tab.
+
+= The file integrity check reports a changed plugin file I edited myself =
+
+Approve it on the Malware Lockdown page. You are warned again only if the file changes. Better still, keep custom code in a separate plugin, so updates do not overwrite it.
+
 = Why does every visitor have the same IP? =
 
 Your site is behind a proxy and Trusted Proxy is set to None. Pick the matching preset on the IP Detection tab and use the IP resolution simulator on the Tools page to check it.
@@ -309,6 +320,13 @@ No. DShield and FireHOL Level 1 (which includes DShield data) are CC BY-NC-SA, n
 No. Test mode only records what would have been blocked. Use it to validate settings, then turn it off. Malware Lockdown measures are the exception: they are always enforced once switched on.
 
 == Changelog ==
+
+= 0.6.0 =
+* File integrity check: WordPress core and plugins from WordPress.org are compared daily with the file hashes WordPress.org publishes for the installed versions. Changed core files and files no release contains in wp-admin or wp-includes are critical; changed or added PHP files in plugins are warnings. Runs in slices that keep their place, so large sites are checked completely; every pass reports what was verified and what could not be (themes, premium and single-file plugins) and why. Shown on the Malware Lockdown page, emailed like scan findings, approvable, and available as `wp sentinel verify`.
+* Malware scan coverage: every scan reports how many files it read, which large files it could only read partly, and which files or folders it could not read. The uploads folder is no longer cut off at 20,000 files: the walk keeps its place and continues in the next runs until every file is checked, carrying earlier findings along. `wp sentinel scan` checks everything in one go.
+* Automatic administrator allowlist entries (added on activation and when settings are saved) now last 30 days and renew while an administrator uses the dashboard from that IP, so addresses nobody uses any more stop being trusted. Configurable on the Lockouts & Unlock tab (0 keeps them forever). Existing automatic entries get the same 30 days on upgrade; entries you added yourself are not changed.
+* Security regression CI: coding standards, unit tests on PHP 8.1 to 8.4, the integration tests on WordPress 6.4 and the latest version as single site and multisite, and an end-to-end smoke test of a real site over HTTP. New scripts: `bin/install-wp-tests.sh` and `bin/smoke-test.sh`.
+* Tests now run on multisite too; test helpers create network administrators where administrator-level accounts are meant.
 
 = 0.5.1 =
 Security fixes from a code review:
@@ -342,6 +360,9 @@ Security fixes from a code review:
 * Phase 1: core framework, client IP detection, IP rules, lockout engine, lockout safety, test mode tooling, events, WP-CLI.
 
 == Upgrade Notice ==
+
+= 0.6.0 =
+Adds a daily check of core and plugin files against WordPress.org checksums, scan coverage reporting with a resumable uploads walk, and expiring automatic administrator allowlist entries (30 days, renewed while used; existing automatic entries get 30 days).
 
 = 0.5.1 =
 Security fixes from a code review: trusted proxy fallback, header-based country variables, unlock link revalidation and limits, required two-factor accounts without a method, and concurrent login and code checks. If you require two-factor authentication with email codes off, check the Login Security tab for accounts that can no longer log in.

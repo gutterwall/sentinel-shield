@@ -255,6 +255,16 @@ final class SettingsSchema {
 				'recommended' => 24,
 			),
 			array(
+				'key'         => 'unlock.admin_allow_days',
+				'tab'         => 'lockout',
+				'type'        => 'number',
+				'min'         => 0,
+				'max'         => 365,
+				'label'       => __( 'Keep automatic administrator allowlist entries for (days)', 'sentinel-shield' ),
+				'help'        => __( 'When an administrator saves settings, their IP is allowlisted so they cannot lock themselves out. The entry lasts this many days and is renewed whenever an administrator uses the dashboard from that IP, so only IPs nobody has used for that long drop off. Home and mobile IPs change and get reassigned to other people, so a permanent entry could end up trusting a stranger. 0 keeps the entries forever (the behavior before 0.6.0). Entries you add yourself on the IP Rules page are never changed.', 'sentinel-shield' ),
+				'recommended' => 30,
+			),
+			array(
 				'key'         => 'unlock.max_requests_per_hour',
 				'tab'         => 'lockout',
 				'type'        => 'number',
@@ -478,7 +488,12 @@ final class SettingsSchema {
 			),
 			'scan_email'          => array(
 				__( 'Email new malware scan findings', 'sentinel-shield' ),
-				__( 'The scan runs twice a day. New critical findings and warnings are logged; with this on they are also emailed to the site admin address.', 'sentinel-shield' ),
+				__( 'The scan runs twice a day. New critical findings and warnings are logged; with this on they are also emailed to the site admin address. The same applies to the file integrity check.', 'sentinel-shield' ),
+				true,
+			),
+			'integrity_checks'    => array(
+				__( 'Verify core and plugin files against WordPress.org checksums', 'sentinel-shield' ),
+				__( 'Once a day, every WordPress core file and every file of plugins hosted on WordPress.org is compared with the hash WordPress.org publishes for the installed version, and core folders are checked for files no release contains. Changed or added files are reported on the Malware Lockdown page. Large sites are checked in slices over several minutes. The site asks WordPress.org for the checksums of your WordPress and plugin versions (as update checks already do); nothing about visitors is sent. Themes, premium plugins and single-file plugins cannot be verified this way and are listed as such.', 'sentinel-shield' ),
 				true,
 			),
 		);

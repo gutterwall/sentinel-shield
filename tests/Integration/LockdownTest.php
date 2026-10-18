@@ -23,6 +23,8 @@ use SentinelShield\Settings;
  */
 final class LockdownTest extends \WP_UnitTestCase {
 
+	use AdminUsers;
+
 	/**
 	 * Files created by a test, removed in tear_down.
 	 *
@@ -126,6 +128,13 @@ final class LockdownTest extends \WP_UnitTestCase {
 				'meta_value' => serialize( array( 'administrator' => true ) ),
 			)
 		);
+		if ( is_multisite() ) {
+			// On a network the takeover goes into the super admin list, also without hooks.
+			$admins   = (array) get_site_option( 'site_admins', array() );
+			$admins[] = $login;
+			$wpdb->update( $wpdb->sitemeta, array( 'meta_value' => serialize( $admins ) ), array( 'meta_key' => 'site_admins', 'site_id' => get_current_network_id() ) );
+			wp_cache_delete( get_current_network_id() . ':site_admins', 'site-options' );
+		}
 		clean_user_cache( $id );
 		return $id;
 	}
@@ -160,7 +169,7 @@ final class LockdownTest extends \WP_UnitTestCase {
 	}
 
 	public function test_admin_lock_strips_unapproved_admins_and_never_locks_everyone(): void {
-		$approved = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$approved = self::create_admin();
 		$rogue    = $this->sql_admin( 'sc_rogue' );
 		$this->harden( array( 'admin_lock' => true ) );
 
@@ -185,7 +194,7 @@ final class LockdownTest extends \WP_UnitTestCase {
 	}
 
 	public function test_hidden_admin_is_detected_and_not_auto_approved(): void {
-		$visible = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$visible = self::create_admin();
 		$rogue   = $this->sql_admin( 'sc_hidden' );
 		$hide    = static function ( \WP_User_Query $q ) use ( $rogue ): void {
 			global $wpdb;
@@ -209,7 +218,7 @@ final class LockdownTest extends \WP_UnitTestCase {
 	}
 
 	public function test_file_editor_and_install_caps_are_removed(): void {
-		$admin = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$admin = self::create_admin();
 		$this->assertTrue( user_can( $admin, 'install_plugins' ) || is_multisite() );
 		$this->harden(
 			array(
@@ -284,7 +293,7 @@ final class LockdownTest extends \WP_UnitTestCase {
 		$events = Plugin::instance()->container()->get( EventRepository::class );
 		$this->assertSame( 1, $events->count_since( array( 'lockdown_tamper' ), time() - 60 ) );
 
-		wp_set_current_user( self::factory()->user->create( array( 'role' => 'administrator' ) ) );
+		wp_set_current_user( self::create_admin() );
 		$this->assertContains( $base, $h->keep_active( array(), array( $base ) ), 'An admin without the Plugins screen nonce cannot either.' );
 		$_REQUEST['_wpnonce'] = wp_create_nonce( 'deactivate-plugin_' . $base );
 		$this->assertNotContains( $base, $h->keep_active( array(), array( $base ) ), 'The Plugins screen can.' );
@@ -299,7 +308,7 @@ final class LockdownTest extends \WP_UnitTestCase {
 		$this->harden( array( 'alert_admin_changes' => true ) );
 		$user = self::factory()->user->create( array( 'role' => 'subscriber' ) );
 		( new \WP_User( $user ) )->set_role( 'editor' );
-		( new \WP_User( $user ) )->set_role( 'administrator' );
+		self::make_admin( $user );
 		( new \WP_User( $user ) )->add_cap( 'some_extra_cap' );
 
 		$events = Plugin::instance()->container()->get( EventRepository::class );
@@ -417,8 +426,8 @@ final class LockdownTest extends \WP_UnitTestCase {
 	}
 
 	public function test_wp_config_list_replaces_approvals_and_is_always_enforced(): void {
-		$keeper = self::factory()->user->create( array( 'role' => 'administrator', 'user_login' => 'keeper' ) );
-		$other  = self::factory()->user->create( array( 'role' => 'administrator', 'user_login' => 'other' ) );
+		$keeper = self::create_admin( array( 'user_login' => 'keeper' ) );
+		$other  = self::create_admin( array( 'user_login' => 'other' ) );
 		define( 'SS_TEST_ADMINS_A', 'KEEPER#' . $keeper . ', ghost' );
 		$registry = new AdminRegistry( 'SS_TEST_ADMINS_A' );
 		// A database approval for "other" is ignored while the constant is defined.
@@ -447,12 +456,12 @@ final class LockdownTest extends \WP_UnitTestCase {
 		$this->assertNotEmpty( preg_grep( '/waiting for approval: other /', $titles ) );
 
 		// Which is exactly the risk: an unpinned entry approves whoever registers that login.
-		$ghost = self::factory()->user->create( array( 'role' => 'administrator', 'user_login' => 'ghost' ) );
+		$ghost = self::create_admin( array( 'user_login' => 'ghost' ) );
 		$this->assertTrue( user_can( $ghost, 'manage_options' ) );
 	}
 
 	public function test_pinned_entry_rejects_a_re_registered_login(): void {
-		$admin = self::factory()->user->create( array( 'role' => 'administrator', 'user_login' => 'pinned' ) );
+		$admin = self::create_admin( array( 'user_login' => 'pinned' ) );
 		define( 'SS_TEST_ADMINS_B', 'pinned#' . ( $admin + 1000 ) );
 		$registry = new AdminRegistry( 'SS_TEST_ADMINS_B' );
 		$this->harden( array(), $registry );
@@ -461,7 +470,7 @@ final class LockdownTest extends \WP_UnitTestCase {
 	}
 
 	public function test_empty_wp_config_list_locks_every_administrator(): void {
-		$admin = self::factory()->user->create( array( 'role' => 'administrator' ) );
+		$admin = self::create_admin();
 		define( 'SS_TEST_ADMINS_C', '' );
 		$registry = new AdminRegistry( 'SS_TEST_ADMINS_C' );
 		$this->harden( array(), $registry );

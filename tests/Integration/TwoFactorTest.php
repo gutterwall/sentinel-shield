@@ -25,6 +25,8 @@ final class RedirectedTo extends \RuntimeException {}
 
 final class TwoFactorTest extends \WP_UnitTestCase {
 
+	use AdminUsers;
+
 	private int $now = 1800000000;
 
 	private ?TwoFactorLogin $login = null;
@@ -216,7 +218,7 @@ final class TwoFactorTest extends \WP_UnitTestCase {
 	}
 
 	public function test_required_accounts_without_an_app_get_email_codes(): void {
-		$admin = get_userdata( self::factory()->user->create( array( 'role' => 'administrator', 'user_email' => 'boss@example.test' ) ) );
+		$admin = self::create_admin_user( array( 'user_email' => 'boss@example.test' ) );
 		$user  = get_userdata( self::factory()->user->create( array( 'role' => 'subscriber' ) ) );
 		$step  = $this->login_step( array( 'required' => 'privileged' ) );
 		reset_phpmailer_instance(); // Drops the "new administrator" alert.

@@ -267,7 +267,8 @@ final class BruteForceTest extends \WP_UnitTestCase {
 		$this->assertSame( array(), $this->locks, 'the test site has an admin account' );
 		$this->login( 'Test', 'x' );
 		$this->assertCount( 1, $this->locks );
-		$this->assertStringContainsString( '"Test"', $this->locks[0][2] );
+		// Multisite lowercases usernames in sanitize_user().
+		$this->assertStringContainsStringIgnoringCase( '"Test"', $this->locks[0][2] );
 	}
 
 	public function test_test_mode_logs_without_refusing(): void {

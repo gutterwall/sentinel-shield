@@ -144,3 +144,31 @@ wp sentinel settings-set <key> <value>
 wp sentinel settings-export backup.json
 wp sentinel settings-import backup.json
 ```
+
+## Automated tests and CI
+
+Every push and pull request runs `.github/workflows/ci.yml` (and it runs weekly, so a new WordPress release that breaks something is noticed):
+
+| Job | What it checks |
+|---|---|
+| Coding standards, docs and build | phpcs (WordPress standards, PHP 8.1 compatibility), the readme settings reference, and a release build (version numbers agree; the zip is kept as an artifact) |
+| Unit tests | PHP 8.1, 8.2, 8.3 and 8.4 |
+| Integration | The WordPress test suite on the oldest supported WordPress (6.4) and the latest, each as a single site and as multisite, on PHP 8.1 to 8.4 |
+| Smoke test | A throwaway site with the plugin active, exercised over HTTP: firewall lockout and unblock, identical login errors, the two-factor step, a required account without any method, the malware scan, WordPress.org checksum verification, and every admin page without PHP errors |
+
+Run the same locally:
+
+```bash
+composer install
+vendor/bin/phpcs -q && vendor/bin/phpunit                      # coding standards and unit tests
+
+# Integration tests: installs WordPress and its test library (the database is emptied on every run).
+bin/install-wp-tests.sh wordpress_test root secret 127.0.0.1 latest /tmp/wp-tests
+WP_TESTS_DIR=/tmp/wp-tests/tests-lib vendor/bin/phpunit --testsuite integration
+WP_TESTS_DIR=/tmp/wp-tests/tests-lib WP_MULTISITE=1 vendor/bin/phpunit --testsuite integration
+
+# Smoke test against a throwaway site served from 127.0.0.1 (it changes settings and creates users):
+bin/smoke-test.sh /path/to/throwaway-site http://127.0.0.1:8099
+```
+
+Security fixes come with a regression test (see `tests/Integration/PentestRegressionTest.php` and `ReviewRegressionTest.php`), so a fix cannot quietly come undone.

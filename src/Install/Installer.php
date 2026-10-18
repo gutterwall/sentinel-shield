@@ -63,12 +63,13 @@ final class Installer {
 		// Loopback/proxy addresses stand for every visitor behind a not-yet-configured proxy.
 		$cidr = AdminProtection::is_real_client( $details ) ? Cidr::parse( $ip ) : null;
 		if ( null !== $cidr ) {
+			$days = (int) $container->get( Settings::class )->get( 'unlock.admin_allow_days', 30 );
 			$container->get( BlockRepository::class )->add(
 				'allow',
 				$cidr,
 				__( 'Administrator IP at plugin activation', 'sentinel-shield' ),
 				'admin_auto',
-				null,
+				$days > 0 ? time() + $days * DAY_IN_SECONDS : null,
 				get_current_user_id()
 			);
 			$container->get( RuleCache::class )->flush();
@@ -85,7 +86,7 @@ final class Installer {
 		}
 		// Without the plugin the rules would be unmanaged; reactivating re-adds them on the next settings save.
 		UploadGuard::sync_htaccess( false );
-		foreach ( array_merge( MaintenanceModule::CRON_HOOKS, array( FeedUpdater::CRON_HOOK, LockdownModule::CRON_HOOK, GeoUpdater::CRON_HOOK ) ) as $hook ) {
+		foreach ( array_merge( MaintenanceModule::CRON_HOOKS, LockdownModule::CRON_HOOKS, array( FeedUpdater::CRON_HOOK, GeoUpdater::CRON_HOOK ) ) as $hook ) {
 			wp_clear_scheduled_hook( $hook );
 			wp_clear_scheduled_hook( $hook, array( 'soon' ) );
 		}

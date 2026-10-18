@@ -77,6 +77,7 @@ final class Settings {
 			'unlock'   => array(
 				'token_ttl_minutes'     => 30,
 				'allow_hours'           => 24,
+				'admin_allow_days'      => 30,
 				'max_requests_per_hour' => 3,
 			),
 			// Every public blocklist is opt-in.
@@ -118,6 +119,7 @@ final class Settings {
 				'block_chain_rpc'     => false,
 				'alert_admin_changes' => true,
 				'scan_email'          => true,
+				'integrity_checks'    => true,
 			),
 			'modules'  => array(
 				'ip_gate'      => array(

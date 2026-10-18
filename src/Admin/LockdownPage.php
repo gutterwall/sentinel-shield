@@ -11,6 +11,7 @@ namespace SentinelShield\Admin;
 
 use SentinelShield\Container;
 use SentinelShield\Lockdown\AdminRegistry;
+use SentinelShield\Lockdown\FileIntegrity;
 use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockdown\UploadGuard;
 use SentinelShield\Settings;
@@ -49,6 +50,7 @@ final class LockdownPage {
 
 		$this->measures( $settings );
 		$this->scan( $report );
+		$this->integrity( $settings );
 		$this->admins( $settings );
 		$this->server_rules( $settings );
 		$this->cleanup( $report );
@@ -99,16 +101,166 @@ final class LockdownPage {
 				echo View::pill( number_format_i18n( (int) ( $counts[ $severity ] ?? 0 ) ) . ' ' . $label, ( $counts[ $severity ] ?? 0 ) ? $state : 'ok' ) . ' '; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.
 			}
 			echo '</p>';
-			if ( $report['truncated'] ) {
-				echo '<p class="description">' . esc_html__( 'Some checks stopped early because of the size of the site; the rest of their results are not shown.', 'sentinel-shield' ) . '</p>';
-			}
 		}
 		submit_button( __( 'Run scan now', 'sentinel-shield' ), 'primary', 'submit', false );
 		echo '</form>';
 		if ( null !== $report ) {
+			$this->coverage( $report );
+		}
+		if ( null !== $report ) {
 			$this->findings( (array) $report['findings'] );
 		}
 		echo '</div>';
+	}
+
+	/**
+	 * What the last scan covered: files read, files read only partly or not at
+	 * all, the uploads walk's progress and checks that hit a limit.
+	 *
+	 * @param array<string, mixed> $report Last report.
+	 */
+	private function coverage( array $report ): void {
+		$cov     = (array) ( $report['coverage'] ?? array() );
+		$uploads = (array) ( $cov['uploads'] ?? array() );
+		$items   = array();
+		if ( isset( $cov['read'] ) ) {
+			/* translators: %s: number of files. */
+			$items[] = sprintf( __( '%s files opened and checked for malware code (files are opened when their name, place or role makes them worth reading; the rest are checked by name and location).', 'sentinel-shield' ), number_format_i18n( (int) $cov['read'] ) );
+		}
+		if ( $uploads ) {
+			$items[] = ! empty( $uploads['done'] )
+				/* translators: %s: number of files. */
+				? sprintf( __( 'Uploads folder: all %s files checked.', 'sentinel-shield' ), number_format_i18n( (int) $uploads['files'] ) )
+				/* translators: 1: number of files, 2: date. */
+				: sprintf( __( 'Uploads folder: %1$s files checked so far in a walk started %2$s; the rest is checked in the next runs (a few minutes apart). Findings from the part already checked are shown.', 'sentinel-shield' ), number_format_i18n( (int) $uploads['files'] ), wp_date( 'Y-m-d H:i', (int) $uploads['started'] ) );
+		}
+		if ( ! empty( $cov['partial'] ) ) {
+			/* translators: 1: size, 2: list of files. */
+			$items[] = sprintf( __( 'Read only partly (only the first %1$s are checked): %2$s', 'sentinel-shield' ), size_format( IntegrityScanner::max_read() ), implode( ', ', (array) $cov['partial'] ) );
+		}
+		if ( ! empty( $cov['unreadable'] ) ) {
+			/* translators: %s: list of files. */
+			$items[] = sprintf( __( 'Could not be read (file permissions): %s', 'sentinel-shield' ), implode( ', ', (array) $cov['unreadable'] ) );
+		}
+		if ( ! empty( $uploads['unreadable'] ) ) {
+			/* translators: %s: list of folders. */
+			$items[] = sprintf( __( 'Folders in uploads that could not be opened: %s', 'sentinel-shield' ), implode( ', ', (array) $uploads['unreadable'] ) );
+		}
+		if ( ! empty( $uploads['links'] ) ) {
+			/* translators: %s: list of folders. */
+			$items[] = sprintf( __( 'Folder links in uploads that were not followed: %s', 'sentinel-shield' ), implode( ', ', (array) $uploads['links'] ) );
+		}
+		if ( ! empty( $report['truncated'] ) ) {
+			$labels = IntegrityScanner::checks();
+			/* translators: %s: list of checks. */
+			$items[] = sprintf( __( 'Stopped listing after 100 findings: %s.', 'sentinel-shield' ), implode( ', ', array_map( static fn( string $c ): string => $labels[ $c ][0] ?? $c, (array) $report['truncated'] ) ) );
+		}
+		if ( ! $items ) {
+			return;
+		}
+		echo '<details class="ss-coverage"' . ( empty( $report['complete'] ) || ! empty( $cov['unreadable'] ) ? ' open' : '' ) . '><summary>' . esc_html__( 'Scan coverage', 'sentinel-shield' ) . '</summary><ul class="ul-disc">';
+		foreach ( $items as $item ) {
+			echo '<li>' . esc_html( $item ) . '</li>';
+		}
+		echo '</ul></details>';
+	}
+
+	/**
+	 * Core and plugin files compared with WordPress.org checksums.
+	 *
+	 * @param Settings $settings Settings.
+	 */
+	private function integrity( Settings $settings ): void {
+		$report = FileIntegrity::report();
+		$state  = FileIntegrity::state();
+		echo '<div class="ss-card" id="ss-integrity"><h2>' . esc_html__( 'File integrity (WordPress.org checksums)', 'sentinel-shield' ) . '</h2>';
+		echo '<p>' . esc_html__( 'Compares WordPress core and plugins from WordPress.org with the file hashes WordPress.org publishes for the installed versions. Unlike the malware scan, this does not rely on known tricks: any change to these files shows up. Nothing is changed or deleted.', 'sentinel-shield' ) . '</p>';
+		if ( ! $settings->get( 'lockdown.integrity_checks', true ) ) {
+			echo '<div class="notice notice-info inline"><p>' . esc_html__( 'The daily check is switched off on the Malware Lockdown settings tab. You can still run it by hand.', 'sentinel-shield' ) . '</p></div>';
+		}
+		if ( null !== $state ) {
+			$progress = FileIntegrity::progress( $state );
+			/* translators: 1: items done, 2: total, 3: date. */
+			echo '<div class="notice notice-info inline"><p>' . esc_html( sprintf( __( 'A check is in progress: %1$d of %2$d items done (started %3$s). It continues in the background about once a minute.', 'sentinel-shield' ), $progress['done'], $progress['total'], wp_date( 'Y-m-d H:i', (int) $state['started'] ) ) ) . '</p></div>';
+		}
+		View::form_open( 'lockdown' );
+		echo '<input type="hidden" name="op" value="integrity">';
+		if ( null === $report ) {
+			echo '<p>' . esc_html__( 'No check has completed yet.', 'sentinel-shield' ) . '</p>';
+		} else {
+			$alerts = count( array_filter( (array) $report['findings'], array( IntegrityScanner::class, 'is_alert' ) ) );
+			echo '<p>';
+			/* translators: 1: date, 2: files, 3: seconds, 4: runs. */
+			echo esc_html( sprintf( _n( 'Last completed check: %1$s, %2$s files compared in %3$s s (%4$d run).', 'Last completed check: %1$s, %2$s files compared in %3$s s (%4$d runs).', (int) $report['runs'], 'sentinel-shield' ), wp_date( 'Y-m-d H:i', (int) $report['time'] ), number_format_i18n( (int) $report['hashed'] ), number_format_i18n( (float) $report['duration'], 1 ), (int) $report['runs'] ) ) . ' ';
+			/* translators: %d: count. */
+			echo View::pill( $alerts ? sprintf( _n( '%d needs attention', '%d need attention', $alerts, 'sentinel-shield' ), $alerts ) : __( 'No changes found', 'sentinel-shield' ), $alerts ? 'bad' : 'ok' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.
+			echo '</p>';
+		}
+		submit_button( null === $state ? __( 'Check files now', 'sentinel-shield' ) : __( 'Restart the check', 'sentinel-shield' ), 'secondary', 'submit', false );
+		echo '</form>';
+		if ( null !== $report ) {
+			$this->integrity_table( $report );
+		}
+		echo '</div>';
+	}
+
+	/**
+	 * Coverage per item, with its findings.
+	 *
+	 * @param array<string, mixed> $report Report.
+	 */
+	private function integrity_table( array $report ): void {
+		$states  = array(
+			'critical' => array( __( 'Critical', 'sentinel-shield' ), 'bad' ),
+			'warning'  => array( __( 'Warning', 'sentinel-shield' ), 'warn' ),
+			'notice'   => array( __( 'Review', 'sentinel-shield' ), 'info' ),
+			'ok'       => array( __( 'Approved', 'sentinel-shield' ), 'ok' ),
+		);
+		$status  = array(
+			'verified'     => array( __( 'Matches WordPress.org', 'sentinel-shield' ), 'ok' ),
+			'problems'     => array( __( 'Changed files', 'sentinel-shield' ), 'bad' ),
+			'unverifiable' => array( __( 'Not verifiable', 'sentinel-shield' ), 'info' ),
+			'checking'     => array( __( 'Not finished', 'sentinel-shield' ), 'warn' ),
+		);
+		$by_item = array();
+		foreach ( (array) $report['findings'] as $finding ) {
+			$by_item[ (string) ( $finding['target'] ?? '' ) ][] = $finding;
+		}
+		$types    = array(
+			'core'   => __( 'Core', 'sentinel-shield' ),
+			'plugin' => __( 'Plugin', 'sentinel-shield' ),
+			'single' => __( 'Plugin', 'sentinel-shield' ),
+			'theme'  => __( 'Theme', 'sentinel-shield' ),
+		);
+		$unverify = 0;
+		echo '<div class="ss-scroll"><table class="widefat striped ss-scan"><thead><tr><th>' . esc_html__( 'Item', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Result', 'sentinel-shield' ) . '</th></tr></thead><tbody>';
+		foreach ( (array) $report['coverage'] as $key => $cov ) {
+			$state = $status[ $cov['status'] ] ?? $status['checking'];
+			if ( 'unverifiable' === $cov['status'] ) {
+				++$unverify;
+			}
+			echo '<tr><td style="width:16em"><strong>' . esc_html( (string) $cov['name'] ) . '</strong> ' . esc_html( (string) $cov['version'] ) . '<br><span class="description">' . esc_html( $types[ $cov['type'] ] ?? '' ) . '</span><br>' . View::pill( $state[0], $state[1] ) . '</td><td>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.
+			if ( 'unverifiable' === $cov['status'] ) {
+				echo '<span class="description">' . esc_html( FileIntegrity::reason_text( (string) $cov['reason'] ) ) . '</span>';
+			} else {
+				/* translators: 1: files compared, 2: changed, 3: added. */
+				echo '<span class="description">' . esc_html( sprintf( __( '%1$s files compared; %2$d changed; %3$d not in the release.', 'sentinel-shield' ), number_format_i18n( (int) $cov['files'] ), (int) $cov['modified'], (int) $cov['extra'] ) );
+				if ( ! empty( $cov['omitted'] ) ) {
+					/* translators: %d: count. */
+					echo ' ' . esc_html( sprintf( __( '%d more are not listed.', 'sentinel-shield' ), (int) $cov['omitted'] ) );
+				}
+				echo '</span>';
+			}
+			foreach ( $by_item[ $key ] ?? array() as $finding ) {
+				$this->finding( $finding, $states );
+			}
+			echo '</td></tr>';
+		}
+		echo '</tbody></table></div>';
+		if ( $unverify ) {
+			/* translators: %d: count. */
+			echo '<p class="description">' . esc_html( sprintf( _n( '%d item could not be verified against WordPress.org; the malware scan still covers it.', '%d items could not be verified against WordPress.org; the malware scan still covers them.', $unverify, 'sentinel-shield' ), $unverify ) ) . '</p>';
+		}
 	}
 
 	/**

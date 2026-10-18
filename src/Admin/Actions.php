@@ -26,6 +26,7 @@ use SentinelShield\Geo\GeoResolver;
 use SentinelShield\Geo\GeoUpdater;
 use SentinelShield\Geo\LoginGeoGuard;
 use SentinelShield\Lockdown\AdminRegistry;
+use SentinelShield\Lockdown\FileIntegrity;
 use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockout\Unblocker;
 use SentinelShield\Repository\LoginAttemptRepository;
@@ -130,9 +131,18 @@ final class Actions {
 		if ( ! AdminProtection::is_real_client( (array) $this->c->get( 'client_ip_details' ) ) ) {
 			/* translators: %s: IP address. */
 			View::flash( 'warning', sprintf( __( 'Your detected IP %s is a loopback or proxy address, so it was not allowlisted (that would exempt every visitor). Check Settings → IP Detection.', 'sentinel-shield' ), $ip ) );
-		} elseif ( $protection->ensure_allowlisted( $ip, get_current_user_id() ) ) {
-			/* translators: %s: IP address. */
-			View::flash( 'info', sprintf( __( 'Your IP %s was added to the permanent allowlist so you cannot lock yourself out.', 'sentinel-shield' ), $ip ) );
+		} else {
+			$days = (int) $this->c->get( Settings::class )->get( 'unlock.admin_allow_days', 30 );
+			if ( $protection->ensure_allowlisted( $ip, get_current_user_id(), $days ) ) {
+				View::flash(
+					'info',
+					$days > 0
+						/* translators: 1: IP address, 2: days. */
+						? sprintf( __( 'Your IP %1$s was allowlisted so you cannot lock yourself out. The entry lasts %2$d days and renews while you use the dashboard from this IP.', 'sentinel-shield' ), $ip, $days )
+						/* translators: %s: IP address. */
+						: sprintf( __( 'Your IP %s was added to the permanent allowlist so you cannot lock yourself out.', 'sentinel-shield' ), $ip )
+				);
+			}
 		}
 		$decision = $protection->self_check( $ip );
 		if ( null !== $decision ) {
@@ -196,7 +206,7 @@ final class Actions {
 		switch ( $op ) {
 			case 'scan':
 				$report = $this->c->get( IntegrityScanner::class )->run();
-				LockdownModule::notify( $this->c, $report, false );
+				LockdownModule::after_scan( $this->c, $report, false );
 				$alerts = count( array_filter( $report['findings'], array( IntegrityScanner::class, 'is_alert' ) ) );
 				$this->audit( 'lockdown_scan' );
 				View::flash(
@@ -206,6 +216,29 @@ final class Actions {
 						? sprintf( _n( 'Scan finished: %d item needs attention.', 'Scan finished: %d items need attention.', $alerts, 'sentinel-shield' ), $alerts )
 						: __( 'Scan finished: no critical findings or warnings.', 'sentinel-shield' )
 				);
+				if ( empty( $report['complete'] ) ) {
+					View::flash( 'info', __( 'The uploads folder holds more files than one run checks; the rest are checked in the background over the next minutes, and this page shows the progress.', 'sentinel-shield' ) );
+				}
+				$back .= '#ss-scan';
+				break;
+			case 'integrity':
+				$this->c->get( FileIntegrity::class )->start( true );
+				$result = LockdownModule::integrity_step( $this->c, 10.0, false );
+				$this->audit( 'integrity_check' );
+				if ( $result['done'] ) {
+					$alerts = count( array_filter( (array) ( $result['report']['findings'] ?? array() ), array( IntegrityScanner::class, 'is_alert' ) ) );
+					View::flash(
+						$alerts ? 'warning' : 'success',
+						$alerts
+							/* translators: %d: count. */
+							? sprintf( _n( 'File check finished: %d file needs attention.', 'File check finished: %d files need attention.', $alerts, 'sentinel-shield' ), $alerts )
+							: __( 'File check finished: everything that could be verified matches WordPress.org.', 'sentinel-shield' )
+					);
+				} else {
+					/* translators: 1: targets done, 2: total. */
+					View::flash( 'info', sprintf( __( 'File check started: %1$d of %2$d items done. It continues in the background; reload this page to see the progress.', 'sentinel-shield' ), $result['progress']['done'], $result['progress']['total'] ) );
+				}
+				$back .= '#ss-integrity';
 				break;
 			case 'approve':
 			case 'unapprove':

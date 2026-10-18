@@ -63,6 +63,18 @@ final class Admin {
 		add_action( is_multisite() ? 'network_admin_notices' : 'admin_notices', array( $this, 'notices' ) );
 		add_filter( ( is_multisite() ? 'network_admin_' : '' ) . 'plugin_action_links_' . plugin_basename( SENTINEL_SHIELD_FILE ), array( $this, 'action_links' ) );
 		( new Actions( $this->c ) )->register();
+		add_action( 'admin_init', array( $this, 'renew_allowlist' ) );
+	}
+
+	/**
+	 * Keeps the automatic allowlist entry of an administrator's current IP
+	 * alive while it is in use (at most one write per IP per day).
+	 */
+	public function renew_allowlist(): void {
+		if ( wp_doing_ajax() || ! current_user_can( self::cap() ) || ! AdminProtection::is_real_client( (array) $this->c->get( 'client_ip_details' ) ) ) {
+			return;
+		}
+		$this->c->get( AdminProtection::class )->renew( (string) $this->c->get( 'client_ip' ), (int) $this->c->get( Settings::class )->get( 'unlock.admin_allow_days', 30 ) );
 	}
 
 	/**

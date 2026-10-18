@@ -20,6 +20,7 @@ use SentinelShield\Geo\GeoResolver;
 use SentinelShield\Geo\GeoUpdater;
 use SentinelShield\Geo\LoginGeoGuard;
 use SentinelShield\Lockdown\AdminRegistry;
+use SentinelShield\Lockdown\FileIntegrity;
 use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockout\Unblocker;
 use SentinelShield\Login\BruteForceGuard;
@@ -1074,7 +1075,9 @@ final class Command {
 	 */
 	public function scan( array $args, array $assoc_args ): void {
 		unset( $args );
-		$report = $this->c->get( IntegrityScanner::class )->run();
+		// No time or entry limits here: the whole uploads folder is walked in one go.
+		delete_site_option( IntegrityScanner::UPLOADS_STATE );
+		$report = $this->c->get( IntegrityScanner::class )->run( true );
 		LockdownModule::notify( $this->c, $report, false );
 		$labels = IntegrityScanner::checks();
 		$rows   = array();
@@ -1098,7 +1101,86 @@ final class Command {
 		if ( $alerts ) {
 			WP_CLI::halt( 1 );
 		}
-		WP_CLI::success( sprintf( 'No critical findings or warnings (%d checks, %.1fs).', count( $labels ), $report['duration'] ) );
+		WP_CLI::success( sprintf( 'No critical findings or warnings (%d checks, %d files opened, %.1fs).', count( $labels ), (int) ( $report['coverage']['read'] ?? 0 ), $report['duration'] ) );
+		foreach ( (array) ( $report['coverage']['partial'] ?? array() ) as $file ) {
+			WP_CLI::warning( sprintf( 'Read only partly (first %s): %s', size_format( IntegrityScanner::max_read() ), $file ) );
+		}
+		foreach ( (array) ( $report['coverage']['unreadable'] ?? array() ) as $file ) {
+			WP_CLI::warning( 'Could not read: ' . $file );
+		}
+	}
+
+	/**
+	 * Verifies WordPress core and plugin files against WordPress.org checksums. Read-only.
+	 *
+	 * Runs a complete pass now (no time slices). Exits with status 1 when
+	 * files differ from WordPress.org.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--coverage]
+	 * : List every core, plugin and theme item with its result instead of the findings.
+	 *
+	 * [--all]
+	 * : Also list items to review (missing files) and approved items.
+	 *
+	 * [--format=<format>]
+	 * : table, csv, json or yaml.
+	 * ---
+	 * default: table
+	 * ---
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp sentinel verify
+	 *     wp sentinel verify --coverage
+	 *
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function verify( array $args, array $assoc_args ): void {
+		unset( $args );
+		$report = $this->c->get( FileIntegrity::class )->run_all();
+		LockdownModule::notify( $this->c, $report, false, 'integrity' );
+		$format = (string) ( $assoc_args['format'] ?? 'table' );
+		if ( isset( $assoc_args['coverage'] ) ) {
+			$rows = array();
+			foreach ( (array) $report['coverage'] as $cov ) {
+				$rows[] = array(
+					'type'     => $cov['type'],
+					'name'     => $cov['name'],
+					'version'  => $cov['version'],
+					'status'   => $cov['status'],
+					'files'    => $cov['files'],
+					'modified' => $cov['modified'],
+					'extra'    => $cov['extra'],
+					'missing'  => $cov['missing_total'] ?? 0,
+					'reason'   => '' === (string) $cov['reason'] ? '' : FileIntegrity::reason_text( (string) $cov['reason'] ),
+				);
+			}
+			WP_CLI\Utils\format_items( $format, $rows, array( 'type', 'name', 'version', 'status', 'files', 'modified', 'extra', 'missing', 'reason' ) );
+		} else {
+			$rows = array();
+			foreach ( (array) $report['findings'] as $finding ) {
+				if ( isset( $assoc_args['all'] ) || IntegrityScanner::is_alert( $finding ) ) {
+					$rows[] = array(
+						'severity' => $finding['severity'],
+						'item'     => $finding['target'],
+						'title'    => $finding['title'],
+						'detail'   => $finding['detail'],
+						'id'       => $finding['id'],
+					);
+				}
+			}
+			if ( $rows || 'table' !== $format ) {
+				WP_CLI\Utils\format_items( $format, $rows, array( 'severity', 'item', 'title', 'detail', 'id' ) );
+			}
+		}
+		if ( array_filter( (array) $report['findings'], array( IntegrityScanner::class, 'is_alert' ) ) ) {
+			WP_CLI::halt( 1 );
+		}
+		$counts = array_count_values( array_column( (array) $report['coverage'], 'status' ) );
+		WP_CLI::success( sprintf( '%d files match WordPress.org (%d items verified, %d not verifiable; %.1fs).', $report['hashed'], (int) ( $counts['verified'] ?? 0 ), (int) ( $counts['unverifiable'] ?? 0 ), $report['duration'] ) );
 	}
 
 	/**
