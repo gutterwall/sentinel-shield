@@ -247,9 +247,9 @@ final class AuditExporter {
 	private function pending( int $cursor ): array {
 		global $wpdb;
 		if ( 'all' === $this->settings->get( 'audit.scope', 'security' ) ) {
-			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT id, created_at, ip_text, event, module, reason, uri, user_agent, user_id, is_test, context FROM %i WHERE id > %d ORDER BY id LIMIT %d", $this->events->table(), $cursor, self::BATCH ), ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Live rows.
+			$rows = $wpdb->get_results( $wpdb->prepare( 'SELECT id, created_at, ip_text, event, module, reason, uri, user_agent, user_id, is_test, context FROM %i WHERE id > %d ORDER BY id LIMIT %d', $this->events->table(), $cursor, self::BATCH ), ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Live rows.
 		} else {
-			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT id, created_at, ip_text, event, module, reason, uri, user_agent, user_id, is_test, context FROM %i WHERE id > %d AND event NOT IN (%s, %s) ORDER BY id LIMIT %d", $this->events->table(), $cursor, self::NOISY[0], self::NOISY[1], self::BATCH ), ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Live rows.
+			$rows = $wpdb->get_results( $wpdb->prepare( 'SELECT id, created_at, ip_text, event, module, reason, uri, user_agent, user_id, is_test, context FROM %i WHERE id > %d AND event NOT IN (%s, %s) ORDER BY id LIMIT %d', $this->events->table(), $cursor, self::NOISY[0], self::NOISY[1], self::BATCH ), ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Live rows.
 		}
 		return is_array( $rows ) ? $rows : array();
 	}
