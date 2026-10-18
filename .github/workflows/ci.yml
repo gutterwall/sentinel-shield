@@ -25,7 +25,7 @@ jobs:
     name: Coding standards, docs and build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
@@ -38,7 +38,7 @@ jobs:
         run: php bin/readme-settings.php --check
       - name: Release build (versions agree, zip and checksums)
         run: bin/build.sh --skip-tests
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: sentinel-shield-zip
           path: dist/sentinel-shield-*.zip*
@@ -52,7 +52,7 @@ jobs:
       matrix:
         php: ['8.1', '8.2', '8.3', '8.4']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
@@ -87,7 +87,7 @@ jobs:
       WP_TESTS_DIR: /tmp/wp-tests/tests-lib
       WP_MULTISITE: ${{ matrix.multisite }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
@@ -113,7 +113,7 @@ jobs:
           --health-cmd="mysqladmin ping -proot"
           --health-interval=5s --health-timeout=5s --health-retries=20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
@@ -122,7 +122,8 @@ jobs:
           coverage: none
       - name: Create a throwaway site with the plugin active
         run: |
-          wp core download --path=/tmp/site --version=latest
+          # The official tarball: wp core download can cut paths over 100 characters on some systems.
+          mkdir -p /tmp/site && curl -fsSL https://wordpress.org/latest.tar.gz | tar -xz -C /tmp/site --strip-components=1
           wp config create --path=/tmp/site --dbname=wordpress --dbuser=root --dbpass=root --dbhost=127.0.0.1:3306 \
             --extra-php <<< "define( 'WP_DEBUG', true ); define( 'WP_DEBUG_DISPLAY', true );"
           wp core install --path=/tmp/site --url=http://127.0.0.1:8099 --title=Smoke --admin_user=admin \

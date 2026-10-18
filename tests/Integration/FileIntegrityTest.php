@@ -263,6 +263,30 @@ final class FileIntegrityTest extends \WP_UnitTestCase {
 		unset( $extra_core );
 	}
 
+	public function test_files_saved_under_cut_off_names_are_one_damaged_install_finding(): void {
+		$core    = self::core_md5();
+		$long    = 'wp-includes/ss-long-' . str_repeat( 'x', 70 ) . '/SomeVeryLongClassNameInterface.php';
+		$fake    = 'wp-includes/ss-long-' . str_repeat( 'y', 70 ) . '/AnotherVeryLongClassNameInterface.php';
+		$content = "<?php\ninterface SsLong {}\n";
+		$core[ $long ] = md5( $content );
+		$core[ $fake ] = md5( $content );
+		// The official file under a shortened name, as some unpacking tools leave it.
+		$this->put( ABSPATH . substr( $long, 0, 100 ), $content );
+		// A shortened name with other content is not excused.
+		$this->put( ABSPATH . substr( $fake, 0, 100 ), '<?php eval(base64_decode("ZWNobyAxOw=="));' );
+
+		$report = $this->verifier( $core, array() )->run_all();
+		$titles = self::by_title( $report );
+		$cov    = $report['coverage']['core:wordpress'];
+		$this->assertSame( 'warning', $titles['WordPress: 1 file was saved under a cut-off name']['severity'] );
+		$this->assertStringContainsString( $long, $titles['WordPress: 1 file was saved under a cut-off name']['detail'] );
+		$this->assertArrayNotHasKey( substr( $long, 0, 100 ), $titles, 'not reported as an added file' );
+		$this->assertSame( 1, $cov['truncated_total'] );
+		$this->assertSame( 1, $cov['missing_total'], 'only the file without an intact copy is missing' );
+		$this->assertSame( 1, $cov['extra'] );
+		$this->assertSame( 'critical', $titles[ 'Suspicious code in ' . substr( $fake, 0, 100 ) ]['severity'] );
+	}
+
 	public function test_small_slices_resume_to_the_same_result(): void {
 		$core   = self::core_md5();
 		$core['wp-includes/load.php'] = md5( 'changed' );

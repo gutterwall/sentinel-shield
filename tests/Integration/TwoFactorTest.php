@@ -83,7 +83,10 @@ final class TwoFactorTest extends \WP_UnitTestCase {
 			$c->get( SecretBox::class ),
 			$c->get( EventRepository::class ),
 			static fn(): string => '198.51.100.20',
-			static fn( string $url ): never => throw new RedirectedTo( $url ),
+			// A closure, not an arrow function: PHP 8.1 rejects arrow functions returning never.
+			static function ( string $url ): never {
+				throw new RedirectedTo( $url );
+			},
 			fn(): int => $this->now
 		);
 		$this->login->register();

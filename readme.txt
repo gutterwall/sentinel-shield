@@ -4,7 +4,7 @@ Tags: security, firewall, two-factor, brute force, login
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.6.0
+Stable tag: 0.6.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -69,7 +69,7 @@ The admin's IP is auto-allowlisted on activation from wp-admin and on every sett
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.6.0.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.6.1.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
@@ -299,6 +299,10 @@ Not necessarily: drop-ins, must-use plugins and scheduled tasks are often legiti
 
 Only requests for the published checksums of your WordPress version and locale and of each installed plugin and version, the same information WordPress's own update checks send. Nothing about visitors is sent. Checksums are cached for 30 days. Switch the check off with "Verify core and plugin files against WordPress.org checksums" on the Malware Lockdown tab.
 
+= The file integrity check says files were saved under cut-off names =
+
+WordPress was unpacked by a tool that shortens paths longer than 100 characters (wp core download does this on some systems), so some core files exist only under shortened names and WordPress cannot load them. Reinstall WordPress from Dashboard → Updates → Re-install (or from the official zip from wordpress.org), then delete the shortened copies listed in the finding and run the check again.
+
 = The file integrity check reports a changed plugin file I edited myself =
 
 Approve it on the Malware Lockdown page. You are warned again only if the file changes. Better still, keep custom code in a separate plugin, so updates do not overwrite it.
@@ -320,6 +324,11 @@ No. DShield and FireHOL Level 1 (which includes DShield data) are CC BY-NC-SA, n
 No. Test mode only records what would have been blocked. Use it to validate settings, then turn it off. Malware Lockdown measures are the exception: they are always enforced once switched on.
 
 == Changelog ==
+
+= 0.6.1 =
+* File integrity check: files that are intact copies of official files saved under shortened names (paths over 100 characters cut off when the package was unpacked, as wp core download does on some systems) are now reported as one "damaged installation" finding with the fix, instead of one possible-backdoor warning per file. A shortened name with any other content is still reported as an added file.
+* File integrity check: every reported file is now checked for malware code whatever its name, so code hidden in a file without a .php extension in a core folder is critical.
+* CI fixes found by the first GitHub run: a PHP 8.1 incompatibility in a test helper, a flaky encryption test, and the smoke test now builds its site from the official WordPress tarball and shows the output of a failing scan.
 
 = 0.6.0 =
 * File integrity check: WordPress core and plugins from WordPress.org are compared daily with the file hashes WordPress.org publishes for the installed versions. Changed core files and files no release contains in wp-admin or wp-includes are critical; changed or added PHP files in plugins are warnings. Runs in slices that keep their place, so large sites are checked completely; every pass reports what was verified and what could not be (themes, premium and single-file plugins) and why. Shown on the Malware Lockdown page, emailed like scan findings, approvable, and available as `wp sentinel verify`.
@@ -360,6 +369,9 @@ Security fixes from a code review:
 * Phase 1: core framework, client IP detection, IP rules, lockout engine, lockout safety, test mode tooling, events, WP-CLI.
 
 == Upgrade Notice ==
+
+= 0.6.1 =
+Clearer file integrity results for WordPress installs damaged by unpacking tools that shorten long file names.
 
 = 0.6.0 =
 Adds a daily check of core and plugin files against WordPress.org checksums, scan coverage reporting with a resumable uploads walk, and expiring automatic administrator allowlist entries (30 days, renewed while used; existing automatic entries get 30 days).

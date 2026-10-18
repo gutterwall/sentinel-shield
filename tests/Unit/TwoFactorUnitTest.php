@@ -146,7 +146,10 @@ final class TwoFactorUnitTest extends TestCase {
 		$this->assertNull( $other->open( $sealed ), 'another key cannot open it' );
 		$this->assertNull( $box->open( 'JBSWY3DPEHPK3PXP' ), 'plain text is not accepted' );
 		$this->assertNull( $box->open( 'sb1:' . base64_encode( 'short' ) ) );
-		$tampered = substr( $sealed, 0, -2 ) . ( 'A' === substr( $sealed, -2, 1 ) ? 'B' : 'A' ) . substr( $sealed, -1 );
+		// Flip one ciphertext byte (editing a base64 character can land on unused padding bits).
+		$raw      = base64_decode( substr( $sealed, 4 ) );
+		$raw[30]  = chr( ord( $raw[30] ) ^ 1 );
+		$tampered = 'sb1:' . base64_encode( $raw );
 		$this->assertNull( $box->open( $tampered ) );
 		$this->assertNotSame( $box->hash_key(), $other->hash_key() );
 	}

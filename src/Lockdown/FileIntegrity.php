@@ -356,18 +356,20 @@ final class FileIntegrity {
 		$key = $target['type'] . ':' . $target['slug'];
 		if ( ! isset( $this->state['coverage'][ $key ] ) ) {
 			$this->state['coverage'][ $key ] = array(
-				'type'          => $target['type'],
-				'name'          => $target['name'],
-				'version'       => $target['version'],
-				'status'        => 'checking',
-				'reason'        => '',
-				'files'         => 0,
-				'modified'      => 0,
-				'missing'       => array(),
-				'missing_total' => 0,
-				'extra'         => 0,
-				'listed'        => 0,
-				'omitted'       => 0,
+				'type'            => $target['type'],
+				'name'            => $target['name'],
+				'version'         => $target['version'],
+				'status'          => 'checking',
+				'reason'          => '',
+				'files'           => 0,
+				'modified'        => 0,
+				'missing'         => array(),
+				'missing_total'   => 0,
+				'truncated'       => array(),
+				'truncated_total' => 0,
+				'extra'           => 0,
+				'listed'          => 0,
+				'omitted'         => 0,
 			);
 		}
 		$cov = &$this->state['coverage'][ $key ];
@@ -404,10 +406,13 @@ final class FileIntegrity {
 		if ( ! $this->extra( $target, $files, $cov ) ) {
 			return false;
 		}
+		if ( $cov['truncated_total'] ) {
+			$this->cut_off_finding( $target, $cov );
+		}
 		if ( $cov['missing_total'] ) {
 			$this->missing_finding( $target, $cov );
 		}
-		$cov['status'] = ( $cov['modified'] || $cov['extra'] ) ? 'problems' : 'verified';
+		$cov['status'] = ( $cov['modified'] || $cov['extra'] || $cov['truncated_total'] ) ? 'problems' : 'verified';
 		return true;
 	}
 
@@ -485,6 +490,9 @@ final class FileIntegrity {
 					if ( isset( $files[ $prefix . $rel ] ) ) {
 						return;
 					}
+					if ( $this->cut_off_copy( $target, $prefix . $rel, $path, $files, $cov ) ) {
+						return;
+					}
 					$php = 1 === preg_match( self::PHP_LIKE, $rel );
 					if ( ! $core && ! $php ) {
 						return;
@@ -510,6 +518,65 @@ final class FileIntegrity {
 	}
 
 	/**
+	 * Whether an unexpected file is an intact copy of a missing published file
+	 * saved under a shortened name. Some unpacking tools (including WP-CLI's
+	 * `wp core download` on some systems) cut paths longer than 100 characters,
+	 * so WordPress cannot find the file. That is a broken install, not tampering:
+	 * the content must match the published hash exactly.
+	 *
+	 * @param array<string, string> $target Target.
+	 * @param string                $rel    Path relative to the target folder.
+	 * @param string                $path   Absolute path.
+	 * @param array<string, mixed>  $files  Published files.
+	 * @param array<string, mixed>  $cov    Coverage entry.
+	 */
+	private function cut_off_copy( array $target, string $rel, string $path, array $files, array &$cov ): bool {
+		foreach ( $files as $full => $sum ) {
+			$full = (string) $full;
+			if ( strlen( $full ) <= strlen( $rel ) || ! str_starts_with( $full, $rel ) || is_file( $target['dir'] . '/' . $full ) ) {
+				continue;
+			}
+			if ( ! in_array( (string) @hash_file( (string) $sum['algo'], $path ), (array) $sum['hashes'], true ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Unreadable: not a match.
+				continue;
+			}
+			if ( count( $cov['truncated'] ) < self::LIST_MAX ) {
+				$cov['truncated'][] = $full;
+			}
+			++$cov['truncated_total'];
+			// It was counted as missing; the cut-off finding explains it instead.
+			$at = array_search( $full, $cov['missing'], true );
+			if ( false !== $at ) {
+				array_splice( $cov['missing'], (int) $at, 1 );
+			}
+			$cov['missing_total'] = max( 0, (int) $cov['missing_total'] - 1 );
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * One finding per target for files saved under cut-off names.
+	 *
+	 * @param array<string, string> $target Target.
+	 * @param array<string, mixed>  $cov    Coverage entry.
+	 */
+	private function cut_off_finding( array $target, array $cov ): void {
+		$total = (int) $cov['truncated_total'];
+		$list  = implode( ', ', (array) $cov['truncated'] ) . ( $total > count( (array) $cov['truncated'] ) ? ', …' : '' );
+		$this->add(
+			'core' === $target['type'] ? 'core_files' : 'plugin_files',
+			'warning',
+			/* translators: 1: name, 2: number of files. */
+			sprintf( _n( '%1$s: %2$d file was saved under a cut-off name', '%1$s: %2$d files were saved under cut-off names', $total, 'sentinel-shield' ), $target['name'], $total ),
+			/* translators: %s: list of files. */
+			sprintf( __( 'These files are intact copies of official files, but their names were shortened when the package was unpacked (paths over 100 characters), so WordPress cannot load them and features that need them fail. This is a damaged installation, not tampering. Some unpacking tools do this, including wp core download on some systems. Reinstall from the official zip (for core: Dashboard → Updates → Re-install), then delete the shortened copies. Affected: %s.', 'sentinel-shield' ), $list ),
+			'cut_off:' . $target['type'] . ':' . $target['slug'],
+			md5( $total . '|' . implode( '|', (array) $cov['truncated'] ) ),
+			$target
+		);
+	}
+
+	/**
 	 * Adds a file finding, graded up by malware traits.
 	 *
 	 * @param array<string, string> $target   Target.
@@ -525,7 +592,8 @@ final class FileIntegrity {
 			return;
 		}
 		++$cov['listed'];
-		$reasons = preg_match( self::PHP_LIKE, $path ) ? IntegrityScanner::signatures( (string) @file_get_contents( $path, false, null, 0, 2097152 ) ) : array(); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Local file inspection.
+		// Every reported file is read, whatever its name: code can be included from any file.
+		$reasons = IntegrityScanner::signatures( (string) @file_get_contents( $path, false, null, 0, 2097152 ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Local file inspection.
 		$rel     = CronInspector::relative( $path );
 		$this->add(
 			$check,

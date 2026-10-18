@@ -77,9 +77,9 @@ login_error | grep -q 'two-factor' && ! grep -qi 'set-cookie: wordpress_logged_i
 rm -f "$OUT.h"
 
 echo "Scans"
-"${WP[@]}" sentinel scan >/dev/null && pass "malware scan: clean" || fail "malware scan reported problems"
+"${WP[@]}" sentinel scan > "$OUT" 2>&1 && pass "malware scan: clean" || fail "malware scan reported problems"
 if [ "$OFFLINE" = 0 ]; then
-	"${WP[@]}" sentinel verify >/dev/null && pass "core and plugins match WordPress.org checksums" || fail "checksum verification reported problems"
+	"${WP[@]}" sentinel verify > "$OUT" 2>&1 && pass "core and plugins match WordPress.org checksums" || fail "checksum verification reported problems"
 fi
 
 echo "Admin pages"
