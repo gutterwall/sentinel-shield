@@ -102,6 +102,53 @@ final class TokenRepository {
 	}
 
 	/**
+	 * Tokens created since a time, for one account or all.
+	 *
+	 * @param int      $since   Unix time.
+	 * @param int|null $user_id Account, or null for every account.
+	 */
+	public function count_created( int $since, ?int $user_id = null ): int {
+		$since = gmdate( 'Y-m-d H:i:s', $since );
+		$sql   = null === $user_id
+			? $this->db->prepare( 'SELECT COUNT(*) FROM %i WHERE created_at >= %s', $this->table(), $since )
+			: $this->db->prepare( 'SELECT COUNT(*) FROM %i WHERE created_at >= %s AND user_id = %d', $this->table(), $since, $user_id );
+		return (int) $this->db->get_var( $sql );
+	}
+
+	/**
+	 * When the account's newest token was created (Unix time), or 0.
+	 *
+	 * @param int $user_id Account.
+	 */
+	public function last_created( int $user_id ): int {
+		$at = $this->db->get_var( $this->db->prepare( 'SELECT MAX(created_at) FROM %i WHERE user_id = %d', $this->table(), $user_id ) );
+		return is_string( $at ) && '' !== $at ? (int) strtotime( $at . ' UTC' ) : 0;
+	}
+
+	/**
+	 * Unused, unexpired tokens of an account.
+	 *
+	 * @param int $user_id Account.
+	 */
+	public function count_outstanding( int $user_id ): int {
+		return (int) $this->db->get_var(
+			$this->db->prepare( 'SELECT COUNT(*) FROM %i WHERE user_id = %d AND used_at IS NULL AND expires_at > %s', $this->table(), $user_id, gmdate( 'Y-m-d H:i:s' ) )
+		);
+	}
+
+	/**
+	 * Invalidates every unused token of an account.
+	 *
+	 * @param int $user_id Account.
+	 * @return int Tokens invalidated.
+	 */
+	public function revoke_user( int $user_id ): int {
+		return (int) $this->db->query(
+			$this->db->prepare( 'UPDATE %i SET expires_at = %s WHERE user_id = %d AND used_at IS NULL AND expires_at > %s', $this->table(), gmdate( 'Y-m-d H:i:s', time() - 1 ), $user_id, gmdate( 'Y-m-d H:i:s' ) )
+		);
+	}
+
+	/**
 	 * Deletes expired or used tokens older than a day.
 	 *
 	 * @return int Rows deleted.

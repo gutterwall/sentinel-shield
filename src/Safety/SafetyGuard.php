@@ -129,7 +129,10 @@ final class SafetyGuard {
 		}
 		if ( 'none' !== $mode && ! empty( $details['remote_trusted'] ) && '' === (string) $details['header_value'] ) {
 			/* translators: %s: header name. */
-			$warnings[] = sprintf( __( 'The request came from a trusted proxy but the %s header was empty. Check the header name.', 'sentinel-shield' ), (string) $details['header'] );
+			$warnings[] = sprintf( __( 'The request came from a trusted proxy but the %s header was empty. Check the header name. Until it is fixed, such requests are treated as anonymous: they share the proxy\'s address and get none of its allowlist or server exemptions.', 'sentinel-shield' ), (string) $details['header'] );
+		} elseif ( ! empty( $details['fallback'] ) ) {
+			/* translators: %s: header name. */
+			$warnings[] = sprintf( __( 'The %s header did not name a visitor (it is malformed or lists only trusted proxies), so this request is treated as anonymous: it shares the proxy\'s address and gets none of its allowlist or server exemptions. Check that every proxy in the chain is trusted and appends the client address.', 'sentinel-shield' ), (string) $details['header'] );
 		}
 		if ( self::emergency_disabled() ) {
 			$warnings[] = __( 'SENTINEL_SHIELD_DISABLE is set in wp-config.php: all blocking is disabled.', 'sentinel-shield' );

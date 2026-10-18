@@ -101,6 +101,8 @@ final class LoginSecurityPanel {
 		}
 		echo '<p>' . esc_html__( 'Each user sets up their own methods under Users → Two-Factor Authentication. To reset a user who lost their phone, tick "Reset two-factor authentication" on their profile, or run wp sentinel 2fa <user> --reset.', 'sentinel-shield' ) . ' <a href="' . esc_url( TwoFactorPage::url() ) . '">' . esc_html__( 'Set up your own', 'sentinel-shield' ) . '</a></p>';
 		echo '<h3>' . esc_html__( 'Administrator-level accounts', 'sentinel-shield' ) . '</h3><table class="widefat striped ss-narrow"><thead><tr><th>' . esc_html__( 'Account', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Authenticator app', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Email codes', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Backup codes', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'At login', 'sentinel-shield' ) . '</th></tr></thead><tbody>';
+		$stuck = array();
+		$rows  = '';
 		foreach ( $this->c->get( AdminRegistry::class )->privileged_users() as $row ) {
 			$user = get_userdata( (int) $row['id'] );
 			if ( ! $user instanceof \WP_User ) {
@@ -108,9 +110,20 @@ final class LoginSecurityPanel {
 			}
 			$summary = $users->summary( (int) $user->ID );
 			$asked   = $login->needs_second_step( $user );
-			$app     = $summary['totp'] ? ( $summary['totp_readable'] ? __( 'Yes', 'sentinel-shield' ) : __( 'Unreadable', 'sentinel-shield' ) ) : __( 'No', 'sentinel-shield' );
-			echo '<tr><td>' . esc_html( $user->user_login ) . '</td><td>' . esc_html( $app ) . '</td><td>' . esc_html( $summary['email'] ? __( 'Yes', 'sentinel-shield' ) : __( 'No', 'sentinel-shield' ) ) . '</td><td>' . esc_html( (string) $summary['backup'] ) . '</td><td>' . ( $asked ? View::pill( __( 'Code asked', 'sentinel-shield' ), 'ok' ) : View::pill( __( 'Password only', 'sentinel-shield' ), 'warn' ) ) . '</td></tr>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.
+			if ( $login->locked_out( $user ) ) {
+				$stuck[] = $user->user_login;
+				$pill    = View::pill( __( 'Cannot log in', 'sentinel-shield' ), 'bad' );
+			} else {
+				$pill = $asked ? View::pill( __( 'Code asked', 'sentinel-shield' ), 'ok' ) : View::pill( __( 'Password only', 'sentinel-shield' ), 'warn' );
+			}
+			$app   = $summary['totp'] ? ( $summary['totp_readable'] ? __( 'Yes', 'sentinel-shield' ) : __( 'Unreadable', 'sentinel-shield' ) ) : __( 'No', 'sentinel-shield' );
+			$rows .= '<tr><td>' . esc_html( $user->user_login ) . '</td><td>' . esc_html( $app ) . '</td><td>' . esc_html( $summary['email'] ? __( 'Yes', 'sentinel-shield' ) : __( 'No', 'sentinel-shield' ) ) . '</td><td>' . esc_html( (string) $summary['backup'] ) . '</td><td>' . $pill . '</td></tr>';
 		}
-		echo '</tbody></table></div>';
+		echo $rows . '</tbody></table>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Escaped above; pill() escapes.
+		if ( $stuck ) {
+			/* translators: %s: list of usernames. */
+			echo '<div class="notice notice-error inline"><p>' . esc_html( sprintf( __( 'These accounts must use two-factor authentication but have no way to get a code, so their logins are refused: %s. Allow email codes, or have them set up an authenticator app before requiring it.', 'sentinel-shield' ), implode( ', ', $stuck ) ) ) . '</p></div>';
+		}
+		echo '</div>';
 	}
 }

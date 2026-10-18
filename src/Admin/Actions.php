@@ -41,6 +41,7 @@ use SentinelShield\Repository\EventRepository;
 use SentinelShield\Safety\AdminProtection;
 use SentinelShield\Settings;
 use SentinelShield\SettingsSchema;
+use SentinelShield\TwoFactor\UserTwoFactor;
 use SentinelShield\Unlock\UnlockService;
 
 defined( 'ABSPATH' ) || exit;
@@ -90,6 +91,31 @@ final class Actions {
 	 */
 	private function ip(): string {
 		return (string) $this->c->get( 'client_ip' );
+	}
+
+	/**
+	 * Refuses to switch email codes off while two-factor authentication is
+	 * required for the current user and they have no authenticator app: their
+	 * next login would be impossible.
+	 *
+	 * @param array<string, mixed> $settings Settings about to be saved.
+	 * @return array<string, mixed>
+	 */
+	private function keep_own_twofa_login( array $settings ): array {
+		$required = (string) Settings::get_path( $settings, 'twofa.required', 'none' );
+		$user     = wp_get_current_user();
+		if ( Settings::get_path( $settings, 'twofa.email', true ) || 'none' === $required || ! $user->exists() ) {
+			return $settings;
+		}
+		if ( 'privileged' === $required && ! AdminRegistry::is_privileged( $user ) ) {
+			return $settings;
+		}
+		if ( null !== $this->c->get( UserTwoFactor::class )->totp_secret( (int) $user->ID ) ) {
+			return $settings;
+		}
+		Settings::set_path( $settings, 'twofa.email', true );
+		View::flash( 'error', __( 'Email codes were kept on: two-factor authentication is required for your account and you have no authenticator app, so you could not log in again. Set up an app under Users → Two-Factor Authentication first.', 'sentinel-shield' ) );
+		return $settings;
 	}
 
 	/**
@@ -406,6 +432,7 @@ final class Actions {
 		if ( 'general' === $tab ) {
 			$new = Settings::apply_test_mode_expiry( $new );
 		}
+		$new = $this->keep_own_twofa_login( $new );
 		$settings->save_network( $new );
 		$this->audit( 'settings:' . $tab );
 		foreach ( $errors as $error ) {
@@ -667,6 +694,7 @@ final class Actions {
 		}
 		$raw                = isset( $data['settings'] ) && is_array( $data['settings'] ) ? $data['settings'] : $data;
 		[ $clean, $errors ] = SettingsSchema::sanitize_all( $raw );
+		$clean              = $this->keep_own_twofa_login( $clean );
 		$this->c->get( Settings::class )->save_network( $clean );
 		$this->audit( 'settings_imported' );
 		foreach ( $errors as $error ) {

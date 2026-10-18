@@ -17,6 +17,7 @@ use SentinelShield\Net\IpAddress;
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Repository\LoginAttemptRepository;
 use SentinelShield\Settings;
+use SentinelShield\Support\Mutex;
 use SentinelShield\Support\Throttle;
 use SentinelShield\TwoFactor\TwoFactorLogin;
 
@@ -43,6 +44,7 @@ final class BruteForceGuard {
 	public const ERROR_INVALID = 'sentinel_shield_invalid_login';
 	public const KNOWN_IPS     = '_sentinel_shield_known_ips';
 	public const KNOWN_MAX     = 10;
+	public const LOCK_WAIT     = 3;
 
 	/**
 	 * IPs locked out during this request.
@@ -50,6 +52,13 @@ final class BruteForceGuard {
 	 * @var array<string, true>
 	 */
 	private array $locked = array();
+
+	/**
+	 * Name of the per-IP login lock this request holds, if any.
+	 *
+	 * @var string|null
+	 */
+	private ?string $held = null;
 
 	/**
 	 * Time source.
@@ -91,6 +100,7 @@ final class BruteForceGuard {
 		add_action( 'wp_authenticate_application_password_errors', array( $this, 'application_password' ), 10, 2 );
 		add_action( 'wp_login_failed', array( $this, 'failed' ), 10, 2 );
 		add_action( 'wp_login', array( $this, 'succeeded' ), 10, 2 );
+		add_action( 'shutdown', array( $this, 'release' ) );
 		if ( $this->settings->get( 'login.generic_errors', true ) ) {
 			add_filter( 'authenticate', array( $this, 'generic_error' ), 100 );
 		}
@@ -200,8 +210,22 @@ final class BruteForceGuard {
 	 * @param \WP_Error|null $error    Why it failed.
 	 */
 	public function failed( $username, $error = null ): void {
+		try {
+			$this->record_failure( $username, $error );
+		} finally {
+			$this->release();
+		}
+	}
+
+	/**
+	 * Counts a failure and locks out over the limit.
+	 *
+	 * @param mixed $username Submitted name.
+	 * @param mixed $error    Why it failed.
+	 */
+	private function record_failure( $username, $error ): void {
 		// Refusals by this plugin are not password guesses.
-		if ( $error instanceof \WP_Error && array_intersect( $error->get_error_codes(), array( self::ERROR_CODE, LoginGeoGuard::ERROR_CODE, TwoFactorLogin::ERROR_API ) ) ) {
+		if ( $error instanceof \WP_Error && array_intersect( $error->get_error_codes(), array( self::ERROR_CODE, LoginGeoGuard::ERROR_CODE, TwoFactorLogin::ERROR_API, TwoFactorLogin::ERROR_SETUP ) ) ) {
 			return;
 		}
 		$ip  = (string) ( $this->ip )();
@@ -254,6 +278,7 @@ final class BruteForceGuard {
 	 */
 	public function succeeded( $login, $user = null ): void {
 		unset( $login );
+		$this->release();
 		$ip = IpAddress::normalize( (string) ( $this->ip )() );
 		if ( ! $user instanceof \WP_User || null === $ip || '' === $ip || ( $this->ip_fallback )() ) {
 			return;
@@ -382,7 +407,10 @@ final class BruteForceGuard {
 	 * @param string $username Submitted name.
 	 */
 	private function deny_if_needed( string $username ): ?\WP_Error {
-		$ip    = (string) ( $this->ip )();
+		$ip = (string) ( $this->ip )();
+		if ( ! $this->serialize( $ip ) && ! $this->settings->is_test_mode( 'login_guard' ) ) {
+			return new \WP_Error( self::ERROR_CODE, __( '<strong>Error:</strong> Another login from your IP address is in progress. Please try again.', 'sentinel-shield' ) );
+		}
 		$check = $this->check( $ip, $username, true );
 		if ( $check['allowed'] ) {
 			return null;
@@ -396,6 +424,43 @@ final class BruteForceGuard {
 			return null;
 		}
 		return new \WP_Error( self::ERROR_CODE, __( '<strong>Error:</strong> Too many failed login attempts. Please try again later.', 'sentinel-shield' ) );
+	}
+
+	/**
+	 * Lets one login per IP run at a time, from the limit check until the
+	 * failure is counted (or the request ends), so parallel requests cannot all
+	 * pass the check before any of their failures are recorded. A request that
+	 * has to wait more than a few seconds is refused (not counted as a failure),
+	 * so a flood cannot tie up PHP workers.
+	 *
+	 * @param string $ip Client IP.
+	 * @return bool False when another login from the IP holds the lock.
+	 */
+	private function serialize( string $ip ): bool {
+		$bin = IpAddress::to_binary( $ip );
+		if ( null === $bin || $this->is_protected( (string) IpAddress::from_binary( $bin ), true ) ) {
+			return true;
+		}
+		$name = 'login_ip_' . bin2hex( $bin );
+		if ( Mutex::holds( $name ) ) {
+			return true;
+		}
+		if ( ! Mutex::acquire( $name, self::LOCK_WAIT ) ) {
+			return false;
+		}
+		$this->held = Mutex::holds( $name ) ? $name : null;
+		return true;
+	}
+
+	/**
+	 * Releases the per-IP login lock (after the attempt is counted, on success,
+	 * or when the request ends).
+	 */
+	public function release(): void {
+		if ( null !== $this->held ) {
+			Mutex::release( $this->held );
+			$this->held = null;
+		}
 	}
 
 	/**
@@ -418,8 +483,11 @@ final class BruteForceGuard {
 		}
 		if ( Throttle::once( 'login_limit_' . md5( $ip ), $this->window_minutes() * MINUTE_IN_SECONDS ) ) {
 			$test = $this->settings->is_test_mode( 'login_guard' );
-			/* translators: %s: reason. */
-			$this->log( 'login_limit', $ip, '', sprintf( __( '%s. Logins from this IP are refused until the failures age out (progressive lockouts are off).', 'sentinel-shield' ), $reason ), $test );
+			$why  = $this->gate->is_protected( $ip )
+				? __( 'the address is allowlisted or belongs to this server, so it is never blocked; requests reach it like this when a trusted proxy does not name the visitor', 'sentinel-shield' )
+				: __( 'progressive lockouts are off', 'sentinel-shield' );
+			/* translators: 1: reason, 2: why the IP is not locked out. */
+			$this->log( 'login_limit', $ip, '', sprintf( __( '%1$s. Logins from this IP are refused until the failures age out (%2$s).', 'sentinel-shield' ), $reason, $why ), $test );
 		}
 	}
 

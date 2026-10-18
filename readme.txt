@@ -4,7 +4,7 @@ Tags: security, firewall, two-factor, brute force, login
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.5.0
+Stable tag: 0.5.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -68,7 +68,7 @@ The admin's IP is auto-allowlisted on activation from wp-admin and on every sett
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.5.0.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.5.1.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
@@ -148,7 +148,7 @@ Malware Lockdown measures are not affected by test mode: once switched on, they 
 
 * **Trusted proxy** (`proxy.mode`; default: None: use REMOTE_ADDR only; recommended: None: use REMOTE_ADDR only). Choices: "None: use REMOTE_ADDR only"; "Cloudflare (CF-Connecting-IP, ranges auto-updated weekly)"; "Load balancer / reverse proxy with a header"; "Custom trusted proxy list". Forwarding headers are only read when the request arrives from a trusted proxy IP; otherwise anyone could fake their IP. Pick "None" unless your site sits behind a proxy or CDN. Compare the "Detected IP" above with your real IP before turning off test mode.
 * **Client IP header** (`proxy.header`; default: X-Forwarded-For; recommended: X-Forwarded-For). Used by the load balancer and custom presets, e.g. X-Forwarded-For, X-Real-IP, True-Client-IP or Forwarded. Ignored for Cloudflare and None. Your proxy must always set or overwrite this header; if it passes a visitor-supplied value through, visitors can fake their IP. A header the proxy overwrites (such as X-Real-IP from nginx) is safest.
-* **Trusted proxy IPs / CIDRs** (`proxy.trusted_cidrs`; default: (empty); recommended: your choice). One per line. IPv4, IPv6 and CIDR ranges allowed; # starts a comment. For the load balancer preset, an empty list trusts private network ranges. For Cloudflare, add any proxy that sits between Cloudflare and this server.
+* **Trusted proxy IPs / CIDRs** (`proxy.trusted_cidrs`; default: (empty); recommended: your choice). One per line. IPv4, IPv6 and CIDR ranges allowed; # starts a comment. For the load balancer preset, an empty list trusts private network ranges. For Cloudflare, add any proxy that sits between Cloudflare and this server. A request from a trusted proxy that does not name the visitor (header missing, malformed or listing only proxies) is treated as anonymous and gets none of the proxy's allowlist or server exemptions.
 * **This server's own IPs** (`proxy.server_ips`; default: (empty); recommended: your choice). Requests to wp-cron.php from these IPs are never blocked. Loopback and SERVER_ADDR are always included; add your public IP if loopback requests leave and re-enter through it.
 
 = Settings → Lockouts & Unlock =
@@ -171,7 +171,7 @@ Malware Lockdown measures are not affected by test mode: once switched on, they 
 * **Do not reveal which usernames exist** (`login.generic_errors`; default: On; recommended: On). WordPress normally says "The username is not registered" or "The password you entered for the username ... is incorrect", which tells attackers which accounts exist. With this on, both become "The username, email address or password is incorrect".
 * **Turn off logins over XML-RPC** (`login.disable_xmlrpc`; default: Off; recommended: your choice). XML-RPC (xmlrpc.php) lets programs log in with a username and password and is a favourite brute-force target. With this on, every XML-RPC method that needs a login is refused; pingbacks still work. Leave off if you use the WordPress mobile app with XML-RPC, Jetpack, or a desktop blogging client.
 * **Two-factor authentication** (`twofa.required`; default: Optional for everyone; recommended: Required for administrator-level accounts). Choices: "Optional for everyone"; "Required for administrator-level accounts"; "Required for every account". Every user can set up two-factor authentication under Users → Two-Factor Authentication (an authenticator app, codes by email, and backup codes). When it is required, an account without an authenticator app gets a code by email at every login until it sets one up (if email codes are allowed below), and sees a reminder in the dashboard. Administrator-level means the same accounts as the administrator lock. Make sure this site can send email before requiring it.
-* **Allow codes by email** (`twofa.email`; default: On; recommended: On). Lets users get an 8-digit login code by email (valid 10 minutes) instead of using an app. Weaker than an app, because anyone who controls the mailbox can log in with the password, but much stronger than a password alone. When off, required accounts without an app can log in with their password and are reminded to set one up.
+* **Allow codes by email** (`twofa.email`; default: On; recommended: On). Lets users get an 8-digit login code by email (valid 10 minutes) instead of using an app. Weaker than an app, because anyone who controls the mailbox can log in with the password, but much stronger than a password alone. When off, required accounts without an app cannot log in until one is set up (they are never let in with only a password); the Login Security tab lists them, and it cannot be switched off while your own login needs it.
 * **Offer "Trust this browser" for (days)** (`twofa.remember_days`; default: 0; recommended: your choice). Range 0–90. Shows a "Trust this browser" box on the code screen; a trusted browser is not asked for a code again for this many days (the password is still needed). Users can forget all their trusted browsers on their Two-Factor Authentication page, and resetting an account's two-factor forgets them too. 0 asks for a code at every login.
 
 = Settings → Login Location =
@@ -181,7 +181,7 @@ Malware Lockdown measures are not affected by test mode: once switched on, they 
 * **Applies to** (`geo.scope`; default: Every account; recommended: Administrator-level accounts only). Choices: "Every account"; "Administrator-level accounts only". "Administrator-level accounts only" protects the accounts that matter most (the same accounts as the administrator lock) while customers and members can log in from anywhere. The account is identified by the submitted username or email; logins naming an account that does not exist are checked only with "Every account".
 * **When the country is unknown** (`geo.unknown`; default: Allow the login; recommended: Allow the login). Choices: "Allow the login"; "Deny the login". The country is unknown for private and local addresses, addresses no source knows, and when no country source is set up. Denying is stricter but locks everyone out if the country database is missing.
 * **Download the free DB-IP country database** (`geo.dbip`; default: Off; recommended: your choice). Needed unless your site is behind Cloudflare or your server sets a country variable. A 5 MB download from db-ip.com, checked weekly and updated monthly, stored as a 15 MB file in uploads/sentinel-shield. Licensed CC BY 4.0: an "IP Geolocation by DB-IP" link is added to the denial message. DB-IP sees your server's IP when it downloads; nothing about visitors is sent. Switching this off deletes the file.
-* **Country from server variable** (`geo.server_var`; default: (empty); recommended: your choice). Name of a server variable holding the visitor's two-letter country code, set by your web server or host, e.g. GEOIP_COUNTRY_CODE (mod_geoip), MM_COUNTRY_CODE (MaxMind module). Used before the DB-IP database. Leave empty if unsure. Names starting with HTTP_ are request headers: only use one if your proxy always overwrites it, otherwise visitors can choose their country.
+* **Country from server variable** (`geo.server_var`; default: (empty); recommended: your choice). Name of a server variable holding the visitor's two-letter country code, set by your web server or host, e.g. GEOIP_COUNTRY_CODE (mod_geoip), MM_COUNTRY_CODE (MaxMind module). Used before the DB-IP database. Leave empty if unsure. Names starting with HTTP_ are request headers that visitors can send themselves: they are only used on requests that came through a trusted proxy (IP Detection tab), and that proxy must always set or overwrite the header.
 
 = Settings → Blocklists =
 
@@ -244,7 +244,7 @@ Any one of these works:
 
 * Add `define( 'SENTINEL_SHIELD_DISABLE', true );` to wp-config.php, log in, fix the rule, then remove the line.
 * Run `wp sentinel unblock <your-ip> --allow-hours=24`.
-* Use "Send unlock link" on the block page (403 mode only) with your administrator email address.
+* Use "Send unlock link" on the block page (403 mode only) with your administrator email address. Unlock emails are limited to one per account every 5 minutes (3 per account and 10 per site per hour), so if nothing arrives, wait or use WP-CLI.
 
 = I am locked out after too many failed logins. What now? =
 
@@ -310,6 +310,14 @@ No. Test mode only records what would have been blocked. Use it to validate sett
 
 == Changelog ==
 
+= 0.5.1 =
+Security fixes from a code review:
+* Trusted proxies: a request from a trusted proxy that does not name the visitor (forwarding header missing, empty, malformed or listing only trusted proxies) is now always treated as anonymous, with none of the proxy's allowlist or server exemptions. Before, a missing or empty header or a proxy-only chain kept them. The IP Detection tab warns when this happens.
+* Login location: a country server variable that is really a request header (a name starting with HTTP_) is only used on requests that came through a trusted proxy that named the visitor. Before, any visitor could send it.
+* Unlock links: a link only works while its account still exists and may manage the site, and unused links are invalidated when the account is deleted or demoted. Unlock emails are now also limited per account (one every 5 minutes, 3 an hour, at most 2 unused links) and per site (10 an hour), and all the limits are checked under a database lock, so parallel requests cannot get past them.
+* Two-factor authentication: an account that is required to use it but has no usable method (email codes switched off and no app, or an unreadable app secret with no backup codes) is now refused instead of being let in with its password. The Login Security tab lists such accounts, and you cannot switch email codes off while your own login needs them. Code checks and code emails now run one at a time per account, so parallel requests cannot share the five tries or use a one-time code twice.
+* Brute-force protection: logins from one IP now run one at a time from the limit check until the failure is counted, so parallel requests cannot all pass the check before any failure is recorded. A login that would have to wait more than 3 seconds is refused and not counted.
+
 = 0.5.0 =
 * Login brute-force protection: failed logins (including unknown usernames and wrong two-factor codes) are counted per IP and per account. IPs over the limit are locked out with the progressive lockouts and the login in progress is refused, so XML-RPC multicall cannot get around the limit. Accounts attacked from many IPs accept password logins only from IPs they used before. Refusals do not depend on the password. Also: one message for wrong usernames and passwords, an instant lockout username list, an option to turn off XML-RPC logins, failed-login overview on the new Login Security tab, and WP-CLI `login-attempts`.
 * Two-factor authentication: authenticator apps (QR code drawn on your server), email codes and backup codes, set up by each user under Users → Two-Factor Authentication. Can be required for administrators or everyone; required accounts without an app get email codes and a reminder. Encrypted secrets, single-use codes, five tries per login, optional "Trust this browser", administrator reset from the profile, and WP-CLI `2fa`.
@@ -334,6 +342,9 @@ No. Test mode only records what would have been blocked. Use it to validate sett
 * Phase 1: core framework, client IP detection, IP rules, lockout engine, lockout safety, test mode tooling, events, WP-CLI.
 
 == Upgrade Notice ==
+
+= 0.5.1 =
+Security fixes from a code review: trusted proxy fallback, header-based country variables, unlock link revalidation and limits, required two-factor accounts without a method, and concurrent login and code checks. If you require two-factor authentication with email codes off, check the Login Security tab for accounts that can no longer log in.
 
 = 0.5.0 =
 Adds login brute-force protection (on by default: 5 failed logins in 15 minutes lock an IP out, allowlisted IPs excepted) and two-factor authentication (optional until you require it on Settings → Login Security).

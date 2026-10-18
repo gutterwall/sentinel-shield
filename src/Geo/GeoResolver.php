@@ -20,7 +20,10 @@ defined( 'ABSPATH' ) || exit;
  *    the Cloudflare proxy preset, and only when the request really came through
  *    Cloudflare (otherwise anyone could send the header).
  * 2. A server variable set by the web server or hosting (e.g. GEOIP_COUNTRY_CODE
- *    from mod_geoip or MaxMind's module), current request only.
+ *    from mod_geoip or MaxMind's module), current request only. Names starting
+ *    with HTTP_ are request headers that any visitor can send, so they are only
+ *    used when the request came through a trusted proxy that named the visitor
+ *    (the proxy is expected to set or overwrite the header).
  * 3. The local DB-IP database, for any address.
  * Private and reserved addresses have no country.
  */
@@ -56,7 +59,7 @@ final class GeoResolver {
 			if ( '' !== $cf ) {
 				return self::result( $cf, 'cloudflare' );
 			}
-			$var = $this->server_variable();
+			$var = $this->server_variable( $ip );
 			if ( '' !== $var ) {
 				return self::result( $var, 'server' );
 			}
@@ -84,14 +87,39 @@ final class GeoResolver {
 
 	/**
 	 * The configured server variable's country, or ''.
+	 *
+	 * @param string $ip Client IP being resolved ('' = the current request's).
 	 */
-	public function server_variable(): string {
+	public function server_variable( string $ip = '' ): string {
 		$name = (string) $this->settings->get( 'geo.server_var', '' );
-		if ( '' === $name ) {
+		if ( '' === $name || ( self::is_header( $name ) && ! $this->header_trusted( $ip ) ) ) {
 			return '';
 		}
 		$code = strtoupper( trim( (string) ( $this->server[ $name ] ?? '' ) ) );
 		return CountryList::exists( $code ) ? $code : '';
+	}
+
+	/**
+	 * Whether a server variable name is really a request header.
+	 *
+	 * @param string $name Variable name.
+	 */
+	public static function is_header( string $name ): bool {
+		return str_starts_with( strtoupper( $name ), 'HTTP_' );
+	}
+
+	/**
+	 * Whether request headers on this request were set by a trusted proxy: the
+	 * direct peer is trusted and it named the visitor (not a fallback).
+	 *
+	 * @param string $ip Client IP being resolved ('' = the current request's).
+	 */
+	public function header_trusted( string $ip = '' ): bool {
+		$details = ( $this->details )();
+		if ( empty( $details['remote_trusted'] ) || ! empty( $details['fallback'] ) || 'none' === ( $details['mode'] ?? 'none' ) ) {
+			return false;
+		}
+		return '' === $ip || ( $details['ip'] ?? '' ) === $ip;
 	}
 
 	/**

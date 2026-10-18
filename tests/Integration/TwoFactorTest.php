@@ -250,7 +250,9 @@ final class TwoFactorTest extends \WP_UnitTestCase {
 		$this->assertSame( array( 'email' ), $this->login->methods( $user ) );
 		$this->login_step( array( 'required' => 'all', 'email' => false ) );
 		$this->assertSame( array(), $this->login->methods( $user ) );
-		$this->assertFalse( $this->login->needs_second_step( $user ), 'without email codes, password only until set up' );
+		$this->assertTrue( $this->login->needs_second_step( $user ), 'required accounts are never let in with the password alone' );
+		$this->assertTrue( $this->login->locked_out( $user ) );
+		$this->assertSame( TwoFactorLogin::ERROR_SETUP, $this->login->authenticate( $user )->get_error_code() );
 		$this->assertTrue( $this->login->setup_missing( $user ) );
 	}
 
@@ -311,6 +313,12 @@ final class TwoFactorTest extends \WP_UnitTestCase {
 		$this->assertNull( $this->users->totp_secret( $user->ID ) );
 		$this->assertSame( array(), $step->methods( $user ) );
 		$this->assertTrue( $step->needs_second_step( $user ) );
+		$result = $step->authenticate( $user );
+		$this->assertWPError( $result, 'refused, with no code screen it could never pass' );
+		$this->assertSame( TwoFactorLogin::ERROR_SETUP, $result->get_error_code() );
+
+		// With backup codes left, the code screen is shown.
+		$this->users->new_backup_codes( $user->ID );
 		$this->expectException( RedirectedTo::class );
 		$step->authenticate( $user );
 	}

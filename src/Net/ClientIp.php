@@ -46,10 +46,11 @@ final class ClientIp {
 	/**
 	 * Resolution details for diagnostics.
 	 *
-	 * "fallback" is true when a trusted proxy sent a forwarding header that could not
-	 * be used (e.g. "unknown" or a malformed address), so "ip" is the proxy's own
-	 * address rather than the visitor's. Such requests must not inherit the proxy's
-	 * allowlist status.
+	 * "fallback" is true whenever the direct peer is a trusted proxy but no visitor
+	 * address could be found: the forwarding header is missing, empty, unusable
+	 * ("unknown", malformed) or lists only trusted proxies. "ip" is then a proxy's
+	 * own address, shared by everyone who reaches the site that way, so such
+	 * requests must not inherit the proxy's allowlist or server exemptions.
 	 *
 	 * @return array{ip:string, remote_addr:string, remote_trusted:bool, mode:string, header:string, header_value:string, source:string, fallback:bool}
 	 */
@@ -72,7 +73,11 @@ final class ClientIp {
 		$result['remote_trusted'] = $this->trusted->contains( $remote_bin );
 		$value                    = self::header_value( $this->server, $this->header );
 		$result['header_value']   = $value;
-		if ( ! $result['remote_trusted'] || '' === $value ) {
+		if ( ! $result['remote_trusted'] ) {
+			return $result;
+		}
+		if ( '' === $value ) {
+			$result['fallback'] = true;
 			return $result;
 		}
 		$hops = 'forwarded' === strtolower( $this->header ) ? self::parse_forwarded( $value ) : array_map( 'trim', explode( ',', $value ) );
@@ -93,11 +98,11 @@ final class ClientIp {
 			}
 			$leftmost = $bin;
 		}
-		if ( ! $hops ) {
-			$result['fallback'] = true;
-		}
+		// No hops, or every hop is a trusted proxy: the visitor is unknown. The
+		// leftmost proxy is reported (it is where the request entered), but as a
+		// fallback, so it gets no privileges.
+		$result['fallback'] = true;
 		if ( null !== $leftmost ) {
-			// Every hop is a trusted proxy; the leftmost is the closest thing to a client.
 			$result['ip']     = (string) IpAddress::from_binary( $leftmost );
 			$result['source'] = $this->header;
 		}

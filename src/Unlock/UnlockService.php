@@ -15,6 +15,8 @@ use SentinelShield\Lockout\Unblocker;
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Repository\TokenRepository;
 use SentinelShield\Settings;
+use SentinelShield\Support\Mutex;
+use SentinelShield\Support\Throttle;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -23,8 +25,20 @@ defined( 'ABSPATH' ) || exit;
  * administrator, a 64-hex token (stored hashed) is emailed -> following the link
  * removes the IP's single-IP blocks and temporarily allowlists it.
  * Responses never reveal whether an email address belongs to an account.
+ *
+ * Limits (checked under one database lock, so parallel requests cannot slip
+ * past them): requests per IP per hour (setting), and per account a cooldown
+ * between emails, a cap per hour and on unused links, plus a site-wide cap
+ * per hour. A request over an account or site limit gets the same generic
+ * answer and no email. A link only works while its account may still unlock;
+ * links are invalidated when the account is deleted or loses that right.
  */
 final class UnlockService {
+
+	public const ACCOUNT_COOLDOWN = 300;
+	public const ACCOUNT_PER_HOUR = 3;
+	public const ACCOUNT_OPEN     = 2;
+	public const SITE_PER_HOUR    = 10;
 
 	/**
 	 * Constructor.
@@ -50,6 +64,33 @@ final class UnlockService {
 	 */
 	public function register(): void {
 		add_action( 'init', array( $this, 'on_init' ), 0 );
+		add_action( 'deleted_user', array( $this, 'revoke_if_needed' ) );
+		add_action( 'set_user_role', array( $this, 'revoke_if_needed' ) );
+		add_action( 'remove_user_role', array( $this, 'revoke_if_needed' ) );
+		add_action( 'revoked_super_admin', array( $this, 'revoke_if_needed' ) );
+	}
+
+	/**
+	 * Invalidates an account's unused links when it no longer exists or may no
+	 * longer unlock.
+	 *
+	 * @param int|string $user_id Account.
+	 */
+	public function revoke_if_needed( $user_id ): void {
+		$user = get_userdata( (int) $user_id );
+		if ( $user instanceof \WP_User && self::can_unlock( $user ) ) {
+			return;
+		}
+		if ( $this->tokens->revoke_user( (int) $user_id ) > 0 ) {
+			$this->events->log(
+				'unlock_revoked',
+				array(
+					'module'  => 'unlock',
+					'reason'  => __( 'Unused unlock links invalidated: the account was deleted or can no longer unlock', 'sentinel-shield' ),
+					'user_id' => (int) $user_id,
+				)
+			);
+		}
 	}
 
 	/**
@@ -85,6 +126,24 @@ final class UnlockService {
 		if ( ! empty( $_POST['sentinel_website'] ) ) {
 			return $generic;
 		}
+		$email = isset( $_POST['sentinel_email'] ) ? sanitize_email( wp_unslash( $_POST['sentinel_email'] ) ) : '';
+		// phpcs:enable
+		return (string) Mutex::run(
+			'unlock_request',
+			5,
+			fn(): string => $this->request_locked( $ip, $email, $generic ),
+			__( 'The site is busy. Please try again in a minute.', 'sentinel-shield' )
+		);
+	}
+
+	/**
+	 * The rate-limited part of handle_request(), run under the unlock lock.
+	 *
+	 * @param string $ip      Requesting IP.
+	 * @param string $email   Submitted address.
+	 * @param string $generic Generic answer.
+	 */
+	private function request_locked( string $ip, string $email, string $generic ): string {
 		$rate_key = 'sentinel_shield_unlock_rl_' . md5( $ip );
 		$count    = (int) get_site_transient( $rate_key );
 		if ( $count >= (int) $this->settings->get( 'unlock.max_requests_per_hour', 3 ) ) {
@@ -92,13 +151,54 @@ final class UnlockService {
 		}
 		set_site_transient( $rate_key, $count + 1, HOUR_IN_SECONDS );
 
-		$email = isset( $_POST['sentinel_email'] ) ? sanitize_email( wp_unslash( $_POST['sentinel_email'] ) ) : '';
-		// phpcs:enable
 		$user = '' === $email ? false : get_user_by( 'email', $email );
-		if ( $user instanceof \WP_User && self::can_unlock( $user ) ) {
-			$this->send_link( $user, $ip );
+		if ( ! $user instanceof \WP_User || ! self::can_unlock( $user ) ) {
+			return $generic;
 		}
+		$limit = $this->over_limit( (int) $user->ID );
+		if ( null !== $limit ) {
+			if ( Throttle::once( 'unlock_limited_' . $user->ID . '_' . $limit, 10 * MINUTE_IN_SECONDS ) ) {
+				$this->events->log(
+					'unlock_limited',
+					array(
+						'ip'      => $ip,
+						'module'  => 'unlock',
+						/* translators: %s: which limit. */
+						'reason'  => sprintf( __( 'Unlock email not sent (%s)', 'sentinel-shield' ), $limit ),
+						'user_id' => (int) $user->ID,
+					)
+				);
+			}
+			return $generic;
+		}
+		$this->send_link( $user, $ip );
 		return $generic;
+	}
+
+	/**
+	 * Which account or site limit an unlock email would break, or null.
+	 *
+	 * @param int $user_id Account.
+	 */
+	private function over_limit( int $user_id ): ?string {
+		$now = time();
+		if ( $now - $this->tokens->last_created( $user_id ) < self::ACCOUNT_COOLDOWN ) {
+			/* translators: %d: minutes. */
+			return sprintf( __( 'one per account every %d minutes', 'sentinel-shield' ), self::ACCOUNT_COOLDOWN / MINUTE_IN_SECONDS );
+		}
+		if ( $this->tokens->count_created( $now - HOUR_IN_SECONDS, $user_id ) >= self::ACCOUNT_PER_HOUR ) {
+			/* translators: %d: count. */
+			return sprintf( __( '%d per account per hour', 'sentinel-shield' ), self::ACCOUNT_PER_HOUR );
+		}
+		if ( $this->tokens->count_outstanding( $user_id ) >= self::ACCOUNT_OPEN ) {
+			/* translators: %d: count. */
+			return sprintf( __( 'the account already has %d unused links', 'sentinel-shield' ), self::ACCOUNT_OPEN );
+		}
+		if ( $this->tokens->count_created( $now - HOUR_IN_SECONDS ) >= self::SITE_PER_HOUR ) {
+			/* translators: %d: count. */
+			return sprintf( __( '%d per site per hour', 'sentinel-shield' ), self::SITE_PER_HOUR );
+		}
+		return null;
 	}
 
 	/**
@@ -146,7 +246,24 @@ final class UnlockService {
 		$token   = strtolower( $token );
 		$valid   = 1 === preg_match( '/^[a-f0-9]{64}$/', $token );
 		$confirm = isset( $_POST['sentinel_unlock_confirm'] ); // phpcs:ignore WordPress.Security.NonceVerification.Missing -- The secret link token authenticates the request.
-		$row     = $valid ? ( $confirm ? $this->tokens->consume( $token ) : $this->tokens->peek( $token ) ) : null;
+		$row     = $valid ? $this->tokens->peek( $token ) : null;
+		if ( null !== $row && ! $this->account_may_unlock( (int) $row['user_id'] ) ) {
+			// Deleted or demoted since the link was sent: the link dies with the right to unlock.
+			$this->tokens->revoke_user( (int) $row['user_id'] );
+			$this->events->log(
+				'unlock_refused',
+				array(
+					'ip'      => ( $this->ip )(),
+					'module'  => 'unlock',
+					'reason'  => __( 'Unlock link refused: its account was deleted or can no longer unlock', 'sentinel-shield' ),
+					'user_id' => (int) $row['user_id'],
+				)
+			);
+			$row = null;
+		}
+		if ( null !== $row && $confirm ) {
+			$row = $this->tokens->consume( $token );
+		}
 		if ( null === $row ) {
 			$message  = __( 'This unlock link is invalid, has already been used, or has expired.', 'sentinel-shield' );
 			$deferred = $this->gate->deferred();
@@ -179,6 +296,17 @@ final class UnlockService {
 		}
 		wp_safe_redirect( add_query_arg( 'sentinel_unlocked', '1', wp_login_url() ) );
 		exit;
+	}
+
+	/**
+	 * Whether the account behind a link still exists and may unlock.
+	 *
+	 * @param int $user_id Account.
+	 */
+	private function account_may_unlock( int $user_id ): bool {
+		clean_user_cache( $user_id );
+		$user = get_userdata( $user_id );
+		return $user instanceof \WP_User && self::can_unlock( $user );
 	}
 
 	/**

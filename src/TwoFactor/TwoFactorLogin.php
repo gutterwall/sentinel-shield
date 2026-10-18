@@ -13,6 +13,8 @@ use SentinelShield\Http\Request;
 use SentinelShield\Lockdown\AdminRegistry;
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Settings;
+use SentinelShield\Support\Mutex;
+use SentinelShield\Support\Throttle;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -35,10 +37,12 @@ final class TwoFactorLogin {
 	public const TRUST_COOKIE  = 'sentinel_shield_2fa_trust_';
 	public const ERROR_API     = 'sentinel_shield_2fa_api';
 	public const ERROR_WRONG   = 'sentinel_shield_2fa_failed';
+	public const ERROR_SETUP   = 'sentinel_shield_2fa_setup';
 	public const LOGIN_TIMEOUT = 600;
 	public const MAX_TRIES     = 5;
 	public const EMAIL_MAX     = 5;
 	public const EMAIL_GAP     = 60;
+	public const LOCK_WAIT     = 10;
 
 	/**
 	 * Redirects and stops: fn( string $url ): never.
@@ -137,13 +141,26 @@ final class TwoFactorLogin {
 	}
 
 	/**
-	 * Whether a login by this account needs the second step. An authenticator
-	 * app whose secret cannot be read still counts, so it is never skipped.
+	 * Whether a login by this account needs the second step. Accounts that are
+	 * required to use it always do, and so does an authenticator app whose
+	 * secret cannot be read: when no method is left, the login is refused
+	 * rather than allowed with the password alone.
 	 *
 	 * @param \WP_User $user Account.
 	 */
 	public function needs_second_step( \WP_User $user ): bool {
-		return $this->users->has_totp( (int) $user->ID ) || array() !== $this->methods( $user );
+		return $this->required( $user ) || $this->users->has_totp( (int) $user->ID ) || array() !== $this->methods( $user );
+	}
+
+	/**
+	 * Whether an account needs the second step but has no way to pass it
+	 * (required with email codes off and no app, or an unreadable app secret
+	 * with nothing else). Such logins are refused.
+	 *
+	 * @param \WP_User $user Account.
+	 */
+	public function locked_out( \WP_User $user ): bool {
+		return $this->needs_second_step( $user ) && array() === $this->methods( $user );
 	}
 
 	/**
@@ -169,6 +186,12 @@ final class TwoFactorLogin {
 		unset( $username, $password );
 		if ( ! $user instanceof \WP_User || did_action( 'application_password_did_authenticate' ) || ! $this->needs_second_step( $user ) ) {
 			return $user;
+		}
+		if ( $this->locked_out( $user ) ) {
+			if ( Throttle::once( 'twofa_no_method_' . $user->ID, MINUTE_IN_SECONDS ) ) {
+				$this->log( 'twofa_no_method', $user, __( 'Login refused: two-factor authentication is needed but the account has no usable method', 'sentinel-shield' ) );
+			}
+			return new \WP_Error( self::ERROR_SETUP, __( '<strong>Error:</strong> This account must use two-factor authentication but has no way to receive a code. Ask a site administrator for help.', 'sentinel-shield' ) );
 		}
 		if ( ( defined( 'XMLRPC_REQUEST' ) && XMLRPC_REQUEST ) || ( defined( 'REST_REQUEST' ) && REST_REQUEST ) || wp_is_json_request() ) {
 			return new \WP_Error( self::ERROR_API, __( 'This account uses two-factor authentication. Use an application password for XML-RPC and the REST API.', 'sentinel-shield' ) );
@@ -245,6 +268,23 @@ final class TwoFactorLogin {
 	 * @return true|\WP_Error
 	 */
 	public function send_email_code( \WP_User $user, string $token ): bool|\WP_Error {
+		return Mutex::run(
+			self::lock_name( (int) $user->ID ),
+			self::LOCK_WAIT,
+			fn() => $this->send_email_code_locked( $user, $token ),
+			new \WP_Error( 'sentinel_shield_2fa_email', __( 'The site is busy. Please try again.', 'sentinel-shield' ) )
+		);
+	}
+
+	/**
+	 * Sends the code while holding the account's lock (see send_email_code()).
+	 *
+	 * @param \WP_User $user  Account.
+	 * @param string   $token Pending login token.
+	 * @return true|\WP_Error
+	 */
+	private function send_email_code_locked( \WP_User $user, string $token ): bool|\WP_Error {
+		self::refresh( (int) $user->ID );
 		$pending = $this->pending( (int) $user->ID, $token );
 		if ( null === $pending || ! in_array( 'email', $this->methods( $user ), true ) ) {
 			return new \WP_Error( 'sentinel_shield_2fa_email', __( 'Email codes are not available for this login.', 'sentinel-shield' ) );
@@ -285,10 +325,33 @@ final class TwoFactorLogin {
 	 * @param \WP_User $user  Account.
 	 * @param string   $token Pending login token.
 	 * @param string   $code  Submitted code.
-	 * @return array{result:string, method:string} result is ok, wrong, too_many or expired.
+	 * @return array{result:string, method:string} result is ok, wrong, too_many, expired or busy.
 	 */
 	public function attempt( \WP_User $user, string $token, string $code ): array {
-		$id      = (int) $user->ID;
+		// One check at a time per account, so parallel requests cannot share the
+		// five tries or use the same one-time code twice.
+		return Mutex::run(
+			self::lock_name( (int) $user->ID ),
+			self::LOCK_WAIT,
+			fn(): array => $this->attempt_locked( $user, $token, $code ),
+			array(
+				'result' => 'busy',
+				'method' => '',
+			)
+		);
+	}
+
+	/**
+	 * Checks the code while holding the account's lock (see attempt()).
+	 *
+	 * @param \WP_User $user  Account.
+	 * @param string   $token Pending login token.
+	 * @param string   $code  Submitted code.
+	 * @return array{result:string, method:string}
+	 */
+	private function attempt_locked( \WP_User $user, string $token, string $code ): array {
+		$id = (int) $user->ID;
+		self::refresh( $id );
 		$pending = $this->pending( $id, $token );
 		if ( null === $pending ) {
 			return array(
@@ -410,11 +473,17 @@ final class TwoFactorLogin {
 				if ( 'ok' === $result['result'] ) {
 					$this->complete( $user, $pending, ! empty( $_POST['sentinel_shield_trust'] ) );
 				}
-				if ( 'wrong' !== $result['result'] ) {
+				if ( 'too_many' === $result['result'] || 'expired' === $result['result'] ) {
 					$this->set_cookie( self::COOKIE, '', 1 );
-					$this->page_message( __( 'Too many incorrect codes. Please log in again.', 'sentinel-shield' ) );
+					$this->page_message(
+						'too_many' === $result['result']
+							? __( 'Too many incorrect codes. Please log in again.', 'sentinel-shield' )
+							: __( 'This login has expired or is no longer valid. Please log in again.', 'sentinel-shield' )
+					);
 				}
-				$error = new \WP_Error( self::ERROR_WRONG, __( '<strong>Error:</strong> The code is not correct, or it was already used.', 'sentinel-shield' ) );
+				$error = 'busy' === $result['result']
+					? new \WP_Error( self::ERROR_WRONG, __( '<strong>Error:</strong> The site is busy. Please enter the code again.', 'sentinel-shield' ) )
+					: new \WP_Error( self::ERROR_WRONG, __( '<strong>Error:</strong> The code is not correct, or it was already used.', 'sentinel-shield' ) );
 			}
 		}
 		// phpcs:enable
@@ -607,7 +676,25 @@ final class TwoFactorLogin {
 	}
 
 	/**
-	 * Logs a two-factor event.
+	 * Name of an account's two-factor lock.
+	 *
+	 * @param int $user_id User.
+	 */
+	private static function lock_name( int $user_id ): string {
+		return 'twofa_' . $user_id;
+	}
+
+	/**
+	 * Drops cached user meta so values written by another request are seen.
+	 *
+	 * @param int $user_id User.
+	 */
+	private static function refresh( int $user_id ): void {
+		wp_cache_delete( $user_id, 'user_meta' );
+	}
+
+	/**
+	 * Logs an event about an account.
 	 *
 	 * @param string   $event  Event type.
 	 * @param \WP_User $user   Account.

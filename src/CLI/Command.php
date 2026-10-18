@@ -939,7 +939,7 @@ final class Command {
 				'email'    => $summary['email'] ? 'yes' : 'no',
 				'backup'   => $summary['backup'],
 				'required' => $login->required( $user ) ? 'yes' : 'no',
-				'at_login' => $login->needs_second_step( $user ) ? 'code' : 'password only',
+				'at_login' => $login->locked_out( $user ) ? 'refused (no method)' : ( $login->needs_second_step( $user ) ? 'code' : 'password only' ),
 			);
 		}
 		WP_CLI\Utils\format_items( (string) ( $assoc_args['format'] ?? 'table' ), $rows, array( 'id', 'login', 'app', 'email', 'backup', 'required', 'at_login' ) );

@@ -70,10 +70,18 @@ final class GeoPanel {
 		$this->row( __( 'Cloudflare CF-IPCountry header', 'sentinel-shield' ), '' !== $cf, $cf_text );
 		$var      = (string) $settings->get( 'geo.server_var', '' );
 		$var_code = $resolver->server_variable();
-		$var_text = '' === $var
-			? __( 'Not set.', 'sentinel-shield' )
+		if ( '' === $var ) {
+			$var_text = __( 'Not set.', 'sentinel-shield' );
+		} elseif ( GeoResolver::is_header( $var ) && ! $resolver->header_trusted() ) {
+			/* translators: %s: variable name. */
+			$var_text = sprintf( __( 'Ignored on this request: %s is a request header that any visitor can send, so it is only used on requests that came through a trusted proxy (IP Detection tab) that named the visitor.', 'sentinel-shield' ), $var );
+		} elseif ( '' === $var_code ) {
+			/* translators: %s: variable name. */
+			$var_text = sprintf( __( '%s is not set to a country code on this request.', 'sentinel-shield' ), $var );
+		} else {
 			/* translators: 1: variable name, 2: country. */
-			: ( '' === $var_code ? sprintf( __( '%s is not set to a country code on this request.', 'sentinel-shield' ), $var ) : sprintf( __( '%1$s = %2$s', 'sentinel-shield' ), $var, CountryList::label( $var_code ) ) );
+			$var_text = sprintf( __( '%1$s = %2$s', 'sentinel-shield' ), $var, CountryList::label( $var_code ) );
+		}
 		$this->row( __( 'Server variable', 'sentinel-shield' ), '' !== $var_code, $var_text );
 
 		$state = $this->c->get( GeoUpdater::class )->state();

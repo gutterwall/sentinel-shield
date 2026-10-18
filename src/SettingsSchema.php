@@ -173,7 +173,7 @@ final class SettingsSchema {
 					6 => 16,
 				),
 				'label'       => __( 'Trusted proxy IPs / CIDRs', 'sentinel-shield' ),
-				'help'        => __( 'One per line. IPv4, IPv6 and CIDR ranges allowed; # starts a comment. For the load balancer preset, an empty list trusts private network ranges. For Cloudflare, add any proxy that sits between Cloudflare and this server.', 'sentinel-shield' ),
+				'help'        => __( 'One per line. IPv4, IPv6 and CIDR ranges allowed; # starts a comment. For the load balancer preset, an empty list trusts private network ranges. For Cloudflare, add any proxy that sits between Cloudflare and this server. A request from a trusted proxy that does not name the visitor (header missing, malformed or listing only proxies) is treated as anonymous and gets none of the proxy\'s allowlist or server exemptions.', 'sentinel-shield' ),
 				'recommended' => null,
 			),
 			array(
@@ -338,7 +338,7 @@ final class SettingsSchema {
 			'tab'         => 'login',
 			'type'        => 'checkbox',
 			'label'       => __( 'Allow codes by email', 'sentinel-shield' ),
-			'help'        => __( 'Lets users get an 8-digit login code by email (valid 10 minutes) instead of using an app. Weaker than an app, because anyone who controls the mailbox can log in with the password, but much stronger than a password alone. When off, required accounts without an app can log in with their password and are reminded to set one up.', 'sentinel-shield' ),
+			'help'        => __( 'Lets users get an 8-digit login code by email (valid 10 minutes) instead of using an app. Weaker than an app, because anyone who controls the mailbox can log in with the password, but much stronger than a password alone. When off, required accounts without an app cannot log in until one is set up (they are never let in with only a password); the Login Security tab lists them, and it cannot be switched off while your own login needs it.', 'sentinel-shield' ),
 			'recommended' => true,
 		);
 		$fields[] = array(
@@ -410,7 +410,7 @@ final class SettingsSchema {
 			'tab'         => 'geo',
 			'type'        => 'server_var',
 			'label'       => __( 'Country from server variable', 'sentinel-shield' ),
-			'help'        => __( 'Name of a server variable holding the visitor\'s two-letter country code, set by your web server or host, e.g. GEOIP_COUNTRY_CODE (mod_geoip), MM_COUNTRY_CODE (MaxMind module). Used before the DB-IP database. Leave empty if unsure. Names starting with HTTP_ are request headers: only use one if your proxy always overwrites it, otherwise visitors can choose their country.', 'sentinel-shield' ),
+			'help'        => __( 'Name of a server variable holding the visitor\'s two-letter country code, set by your web server or host, e.g. GEOIP_COUNTRY_CODE (mod_geoip), MM_COUNTRY_CODE (MaxMind module). Used before the DB-IP database. Leave empty if unsure. Names starting with HTTP_ are request headers that visitors can send themselves: they are only used on requests that came through a trusted proxy (IP Detection tab), and that proxy must always set or overwrite the header.', 'sentinel-shield' ),
 			'recommended' => null,
 		);
 

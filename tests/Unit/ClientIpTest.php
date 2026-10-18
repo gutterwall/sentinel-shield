@@ -149,9 +149,46 @@ final class ClientIpTest extends TestCase {
 	public function test_normal_resolution_is_not_fallback(): void {
 		$trusted = IpRangeSet::from_strings( array( '10.0.0.0/8' ) );
 		$ok      = ( new ClientIp( array( 'REMOTE_ADDR' => '10.0.0.5', 'HTTP_X_FORWARDED_FOR' => '198.51.100.7' ), 'custom', 'X-Forwarded-For', $trusted ) )->details();
-		$direct  = ( new ClientIp( array( 'REMOTE_ADDR' => '10.0.0.5' ), 'custom', 'X-Forwarded-For', $trusted ) )->details();
+		$untrusted = ( new ClientIp( array( 'REMOTE_ADDR' => '198.51.100.9' ), 'custom', 'X-Forwarded-For', $trusted ) )->details();
 		$this->assertFalse( $ok['fallback'] );
 		$this->assertSame( '198.51.100.7', $ok['ip'] );
-		$this->assertFalse( $direct['fallback'], 'No header at all (e.g. the proxy itself calling wp-cron) is not a fallback.' );
+		$this->assertFalse( $untrusted['fallback'], 'A direct visitor (untrusted peer) is identified by REMOTE_ADDR.' );
+		$this->assertSame( '198.51.100.9', $untrusted['ip'] );
+	}
+
+	/**
+	 * Review finding 1: a trusted proxy that does not say who the visitor is
+	 * (missing, empty or proxy-only header) leaves the visitor unknown.
+	 *
+	 * @dataProvider unresolved_chains
+	 *
+	 * @param string $header Configured header.
+	 * @param string $value  Header value (null = not sent).
+	 * @param string $ip     Expected reported IP.
+	 */
+	public function test_unresolved_visitor_is_fallback( string $header, ?string $value, string $ip ): void {
+		$server = array( 'REMOTE_ADDR' => '10.0.0.5' );
+		if ( null !== $value ) {
+			$server[ 'HTTP_' . strtoupper( str_replace( '-', '_', $header ) ) ] = $value;
+		}
+		$details = ( new ClientIp( $server, 'custom', $header, IpRangeSet::from_strings( array( '10.0.0.0/8', '192.0.2.0/24' ) ) ) )->details();
+		$this->assertTrue( $details['fallback'] );
+		$this->assertSame( $ip, $details['ip'] );
+	}
+
+	/**
+	 * @return array<string, array{0:string, 1:?string, 2:string}>
+	 */
+	public static function unresolved_chains(): array {
+		return array(
+			'xff missing'        => array( 'X-Forwarded-For', null, '10.0.0.5' ),
+			'xff empty'          => array( 'X-Forwarded-For', '', '10.0.0.5' ),
+			'xff blank'          => array( 'X-Forwarded-For', '   ', '10.0.0.5' ),
+			'xff only proxies'   => array( 'X-Forwarded-For', '192.0.2.4, 10.0.0.9', '192.0.2.4' ),
+			'real ip missing'    => array( 'X-Real-IP', null, '10.0.0.5' ),
+			'real ip is a proxy' => array( 'X-Real-IP', '10.0.0.9', '10.0.0.9' ),
+			'fwd only proxies'   => array( 'Forwarded', 'for=192.0.2.4, for=10.0.0.9', '192.0.2.4' ),
+			'fwd without for'    => array( 'Forwarded', 'proto=https;host=example.com', '10.0.0.5' ),
+		);
 	}
 }
