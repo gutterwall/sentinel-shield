@@ -25,12 +25,13 @@ final class Request {
 	}
 
 	/**
-	 * URI with secret query values (unlock tokens) masked, safe to store in logs.
+	 * URI with secret query values masked (unlock tokens, password reset keys,
+	 * nonces, passwords and access tokens), safe to store in logs and export.
 	 *
 	 * @param string $uri Request URI.
 	 */
 	public static function redact_uri( string $uri ): string {
-		return (string) preg_replace( '/([?&]sentinel_unlock=)[^&#]*/i', '$1[redacted]', $uri );
+		return (string) preg_replace( '/([?&](?:sentinel_unlock|key|rp_key|token|access_token|auth|_wpnonce|nonce|pass|pass1|pass2|pwd|password|code|secret)=)[^&#]*/i', '$1[redacted]', $uri );
 	}
 
 	/**

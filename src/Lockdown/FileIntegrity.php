@@ -239,6 +239,7 @@ final class FileIntegrity {
 		$targets = (array) $this->state['targets'];
 		$total   = count( $targets );
 		while ( $this->state['i'] < $total && ! $this->out_of_time() ) {
+			Mutex::renew( 'integrity_scan' );
 			$target = (array) $targets[ $this->state['i'] ];
 			if ( $this->target( $target ) ) {
 				++$this->state['i'];

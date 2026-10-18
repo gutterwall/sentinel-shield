@@ -21,6 +21,8 @@ use SentinelShield\Repository\EventRepository;
 use SentinelShield\Safety\SafetyGuard;
 use SentinelShield\Settings;
 use SentinelShield\Support\Mutex;
+use SentinelShield\Net\RangeMath;
+use SentinelShield\Support\DataDir;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -44,6 +46,8 @@ final class EarlyGate {
 	public const STATE    = 'sentinel_shield_gate_state';
 	public const LOG_MAX  = 1048576;
 	public const MAX_LIFE = DAY_IN_SECONDS;
+
+	public const EXPIRY_HOOK = 'sentinel_shield_gate_expiry';
 
 	/**
 	 * Whether a rebuild is scheduled for the end of this request.
@@ -80,13 +84,14 @@ final class EarlyGate {
 		add_action( 'sentinel_shield_rules_changed', array( $this, 'mark_dirty' ) );
 		add_action( 'sentinel_shield_feeds_changed', array( $this, 'mark_dirty' ) );
 		add_action( 'sentinel_shield_settings_saved', array( $this, 'settings_saved' ) );
+		add_action( self::EXPIRY_HOOK, array( $this, 'rebuild' ) );
 	}
 
 	/**
 	 * Path of the snapshot.
 	 */
 	public static function path(): string {
-		return GeoUpdater::dir() . '/gate.json';
+		return DataDir::path() . '/gate.json';
 	}
 
 	/**
@@ -102,6 +107,15 @@ final class EarlyGate {
 	public function mode(): string {
 		$mode = (string) $this->settings->get( 'firewall.early_gate', 'off' );
 		return in_array( $mode, array( 'mu_plugin', 'prepend' ), true ) ? $mode : 'off';
+	}
+
+	/**
+	 * Whether WordPress enforces IP blocks at all right now. When it does not
+	 * (protection off, the IP gate module off, or the emergency constant), every
+	 * other layer gets an empty policy too.
+	 */
+	public function enforcing(): bool {
+		return $this->settings->is_enabled() && $this->settings->is_module_enabled( 'ip_gate' ) && ! SafetyGuard::emergency_disabled();
 	}
 
 	/**
@@ -146,9 +160,9 @@ final class EarlyGate {
 	}
 
 	/**
-	 * Writes the snapshot (and server files) now.
+	 * Writes the snapshot (and server files) now, if the private folder is ready.
 	 *
-	 * @return array<string, mixed> The new state: built, valid_until, block and allow counts, error.
+	 * @return array<string, mixed> The new state: built, valid_until, generation, counts, error.
 	 */
 	public function rebuild(): array {
 		if ( ! Mutex::acquire( 'early_gate_build', 0 ) ) {
@@ -157,24 +171,26 @@ final class EarlyGate {
 		try {
 			delete_site_option( self::DIRTY );
 			$data  = $this->compile();
-			$dir   = GeoUpdater::dir();
+			$dir   = DataDir::path();
 			$error = '';
-			if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) {
-				$error = __( 'The uploads folder is not writable.', 'sentinel-shield' );
+			if ( ! DataDir::ready() ) {
+				// Never write the policy, the log or server files where they could be downloaded.
+				$error = DataDir::problem();
+				self::delete_files( false );
 			} else {
-				GeoUpdater::protect_dir( $dir );
-				if ( ! self::write_atomic( self::path(), (string) wp_json_encode( $data['snapshot'] ) ) ) {
+				$snap = $data['snapshot'];
+				FeedSnapshot::write( $data['block_set'], $dir . '/gate-block.bin' );
+				FeedSnapshot::write( $data['allow_set'], $dir . '/gate-allow.bin' );
+				$snap['block_file'] = $dir . '/gate-block.bin';
+				$snap['allow_file'] = $dir . '/gate-allow.bin';
+				if ( ! self::write_atomic( self::path(), (string) wp_json_encode( $snap ) ) ) {
 					$error = __( 'The snapshot could not be written.', 'sentinel-shield' );
 				}
 				if ( $this->settings->get( 'firewall.server_files', false ) ) {
 					self::write_atomic( $dir . '/nginx-deny.conf', self::nginx( $data['blocked'] ) );
 					self::write_atomic( $dir . '/apache-deny.conf', self::apache( $data['blocked'] ) );
 				} else {
-					foreach ( array( 'nginx-deny.conf', 'apache-deny.conf' ) as $file ) {
-						if ( is_file( "$dir/$file" ) ) {
-							wp_delete_file( "$dir/$file" );
-						}
-					}
+					self::empty_server_files();
 				}
 			}
 			$hash  = md5( implode( ',', $data['blocked'] ) );
@@ -185,10 +201,17 @@ final class EarlyGate {
 				'block'       => count( $data['blocked'] ),
 				'allow'       => (int) $data['allow_count'],
 				'feeds'       => '' !== $data['snapshot']['feeds'],
+				'enforcing'   => (bool) $data['snapshot']['enabled'],
 				'hash'        => $hash,
+				'generation'  => (int) ( $old['generation'] ?? 0 ) + ( ( $old['hash'] ?? '' ) !== $hash ? 1 : 0 ),
 				'error'       => $error,
 			);
 			update_site_option( self::STATE, $state );
+			// Rebuild again the moment the next rule expires, so short lockouts end everywhere on time.
+			wp_clear_scheduled_hook( self::EXPIRY_HOOK );
+			if ( $state['valid_until'] < time() + self::MAX_LIFE ) {
+				wp_schedule_single_event( $state['valid_until'] + 1, self::EXPIRY_HOOK );
+			}
 			if ( ( $old['hash'] ?? '' ) !== $hash ) {
 				do_action( 'sentinel_shield_blocklist_changed', $data['blocked'] );
 			}
@@ -199,28 +222,32 @@ final class EarlyGate {
 	}
 
 	/**
-	 * Builds the snapshot data.
+	 * Builds the effective policy: enforced block rules minus the allowlist and
+	 * this server's addresses, so every layer (early firewall, web server,
+	 * Cloudflare) blocks exactly what WordPress itself would. With enforcement
+	 * off, the policy is empty.
 	 *
-	 * @return array{snapshot:array<string, mixed>, blocked:list<string>, allow_count:int}
+	 * @return array{snapshot:array<string, mixed>, blocked:list<string>, block_set:IpRangeSet, allow_set:IpRangeSet, allow_count:int}
 	 */
 	public function compile(): array {
 		$now     = time();
 		$until   = $now + self::MAX_LIFE;
+		$enabled = $this->enforcing();
 		$pairs   = array();
-		$blocked = array();
-		foreach ( $this->repo->active_rules( 'block' ) as $row ) {
-			if ( $this->gate->is_test_for_source( (string) $row['source'] ) ) {
-				continue;
-			}
-			$start = (string) hex2bin( (string) $row['start_hex'] );
-			$end   = (string) hex2bin( (string) $row['end_hex'] );
-			if ( '' === $start || '' === $end ) {
-				continue;
-			}
-			$pairs[]   = array( $start, $end );
-			$blocked[] = (string) $row['label'];
-			if ( ! empty( $row['expires_at'] ) ) {
-				$until = min( $until, (int) strtotime( $row['expires_at'] . ' UTC' ) );
+		if ( $enabled ) {
+			foreach ( $this->repo->active_rules( 'block' ) as $row ) {
+				if ( $this->gate->is_test_for_source( (string) $row['source'] ) ) {
+					continue;
+				}
+				$start = (string) hex2bin( (string) $row['start_hex'] );
+				$end   = (string) hex2bin( (string) $row['end_hex'] );
+				if ( '' === $start || '' === $end ) {
+					continue;
+				}
+				$pairs[] = array( $start, $end );
+				if ( ! empty( $row['expires_at'] ) ) {
+					$until = min( $until, (int) strtotime( $row['expires_at'] . ' UTC' ) );
+				}
 			}
 		}
 		$allow = array();
@@ -230,8 +257,12 @@ final class EarlyGate {
 				$until = min( $until, (int) strtotime( $row['expires_at'] . ' UTC' ) );
 			}
 		}
-		$feeds = '';
-		$slugs = $this->settings->is_module_enabled( 'feeds' ) ? FeedCatalog::enabled_slugs( $this->settings ) : array();
+		$server    = $this->guard->server_ranges();
+		$allow_set = IpRangeSet::from_pairs( $allow );
+		$exempt    = IpRangeSet::from_pairs( array_merge( $allow_set->pairs( 4 ), $allow_set->pairs( 6 ), $server->pairs( 4 ), $server->pairs( 6 ) ) );
+		$block_set = RangeMath::subtract( IpRangeSet::from_pairs( $pairs ), $exempt );
+		$feeds     = '';
+		$slugs     = $enabled && $this->settings->is_module_enabled( 'feeds' ) ? FeedCatalog::enabled_slugs( $this->settings ) : array();
 		if ( $slugs && ! $this->settings->is_test_mode_chain( 'feeds', 'ip_gate' ) ) {
 			sort( $slugs );
 			$lookup = $this->rules->feeds( $slugs );
@@ -239,11 +270,10 @@ final class EarlyGate {
 				$feeds = FeedSnapshot::path( $slugs );
 			}
 		}
-		$proxy   = $this->ips->config();
-		$enabled = $this->settings->is_enabled() && $this->settings->is_module_enabled( 'ip_gate' ) && ! SafetyGuard::emergency_disabled();
+		$proxy = $this->ips->config();
 		return array(
 			'snapshot'    => array(
-				'v'           => 1,
+				'v'           => 2,
 				'built'       => $now,
 				'valid_until' => max( $now + MINUTE_IN_SECONDS, $until ),
 				'enabled'     => $enabled,
@@ -256,13 +286,13 @@ final class EarlyGate {
 					'header'  => $proxy['header'],
 					'trusted' => PackedRangeSet::from_set( IpRangeSet::from_strings( $proxy['cidrs'] ) )->to_storage(),
 				),
-				'server'      => PackedRangeSet::from_set( $this->guard->server_ranges() )->to_storage(),
-				'allow'       => PackedRangeSet::from_set( IpRangeSet::from_pairs( $allow ) )->to_storage(),
-				'block'       => PackedRangeSet::from_set( IpRangeSet::from_pairs( $pairs ) )->to_storage(),
+				'server'      => PackedRangeSet::from_set( $server )->to_storage(),
 				'feeds'       => $feeds,
 				'log_max'     => self::LOG_MAX,
 			),
-			'blocked'     => array_values( array_unique( $blocked ) ),
+			'blocked'     => RangeMath::cidrs( $block_set ),
+			'block_set'   => $block_set,
+			'allow_set'   => $exempt,
 			'allow_count' => count( $allow ),
 		);
 	}
@@ -285,8 +315,8 @@ final class EarlyGate {
 	 * Whether the snapshot is where early-gate.php looks for it by default.
 	 */
 	public static function default_location(): bool {
-		// early-gate.php looks in wp-content/uploads/sentinel-shield (two levels above the plugin folder).
-		return wp_normalize_path( dirname( self::gate_file(), 3 ) . '/uploads/sentinel-shield' ) === wp_normalize_path( GeoUpdater::dir() );
+		// early-gate.php looks for sentinel-shield-data next to the WordPress folder (four levels above itself).
+		return wp_normalize_path( dirname( self::gate_file(), 4 ) . '/' . DataDir::NAME ) === wp_normalize_path( DataDir::path() );
 	}
 
 	/**
@@ -356,14 +386,53 @@ final class EarlyGate {
 
 	/**
 	 * Removes the snapshot and server files.
+	 *
+	 * @param bool $state Also forget the build state.
 	 */
-	public static function delete_files(): void {
-		foreach ( array( 'gate.json', 'nginx-deny.conf', 'apache-deny.conf', 'early-blocks.log' ) as $file ) {
-			$path = GeoUpdater::dir() . '/' . $file;
+	public static function delete_files( bool $state = true ): void {
+		foreach ( array( DataDir::path(), GeoUpdater::dir() ) as $dir ) {
+			// The uploads folder held these files before 0.8.1.
+			foreach ( array( 'gate.json', 'gate-block.bin', 'gate-allow.bin', 'nginx-deny.conf', 'apache-deny.conf', 'early-blocks.log' ) as $file ) {
+				if ( is_file( "$dir/$file" ) ) {
+					wp_delete_file( "$dir/$file" );
+				}
+			}
+		}
+		if ( $state ) {
+			delete_site_option( self::STATE );
+			wp_clear_scheduled_hook( self::EXPIRY_HOOK );
+		}
+	}
+
+	/**
+	 * Replaces existing server blocklist files with empty ones (an include of a
+	 * missing file would stop nginx or Apache from reloading).
+	 */
+	public static function empty_server_files(): void {
+		$dir = DataDir::path();
+		if ( is_file( $dir . '/nginx-deny.conf' ) ) {
+			self::write_atomic( $dir . '/nginx-deny.conf', self::nginx( array() ) );
+		}
+		if ( is_file( $dir . '/apache-deny.conf' ) ) {
+			self::write_atomic( $dir . '/apache-deny.conf', self::apache( array() ) );
+		}
+	}
+
+	/**
+	 * Plugin deactivation: the early firewall stops (its snapshot is removed, so
+	 * an auto_prepend_file line left behind lets everything through) and the
+	 * server files are emptied. Cloudflare is cleared separately.
+	 */
+	public static function deactivate(): void {
+		self::remove_loader();
+		foreach ( array( 'gate.json', 'gate-block.bin', 'gate-allow.bin', 'early-blocks.log' ) as $file ) {
+			$path = DataDir::path() . '/' . $file;
 			if ( is_file( $path ) ) {
 				wp_delete_file( $path );
 			}
 		}
+		self::empty_server_files();
+		wp_clear_scheduled_hook( self::EXPIRY_HOOK );
 		delete_site_option( self::STATE );
 	}
 
@@ -423,7 +492,7 @@ final class EarlyGate {
 	 * @return int Events written.
 	 */
 	public function import_log(): int {
-		$log  = GeoUpdater::dir() . '/early-blocks.log';
+		$log  = DataDir::path() . '/early-blocks.log';
 		$work = $log . '.import';
 		if ( ! is_file( $log ) || ! @rename( $log, $work ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.rename_rename -- Atomic hand-over from the gate.
 			return 0;
@@ -441,7 +510,8 @@ final class EarlyGate {
 			if ( ! isset( $groups[ $key ] ) ) {
 				$groups[ $key ] = $row + array( 'n' => 0 );
 			}
-			++$groups[ $key ]['n'];
+			// Sampled lines (during floods) stand for several blocks.
+			$groups[ $key ]['n'] += max( 1, min( 100, (int) ( $row['s'] ?? 1 ) ) );
 		}
 		if ( false !== $h ) {
 			fclose( $h ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Our own log file.

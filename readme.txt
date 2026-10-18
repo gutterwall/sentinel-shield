@@ -2,81 +2,82 @@
 Contributors: sentinelshield
 Tags: security, firewall, two-factor, brute force, login
 Requires at least: 6.4
-Tested up to: 6.8
+Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.8.0
+Stable tag: 0.8.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Self-hosted firewall, brute-force protection, two-factor authentication, IP blocklists, login location restriction and malware lockdown. No paid cloud service required.
+Self-hosted firewall, brute-force protection, two-factor login with passkeys, IP blocklists, login location rules and malware lockdown.
 
 == Description ==
 
-Sentinel Shield is a self-hosted security plugin. Everything runs on your server; optional external integrations are off by default.
+Sentinel Shield is a self-hosted security plugin. It runs on your server, needs no account, and sends nothing about your visitors anywhere unless you set up an integration that does (see "External services" below). It starts in test mode, so you can check what it would block before it blocks anything.
 
 **Firewall and IP rules**
 
-* Spoof-resistant client IP detection. Uses REMOTE_ADDR by default and reads forwarding headers only from trusted proxies. Presets: None, Cloudflare (ranges auto-updated weekly), load balancer with custom header, custom CIDR list. The settings page shows the detected IP and raw headers.
-* IP allowlist and blocklist for single IPs, CIDR ranges and IPv6, with reason, source, created/expiry time and hit counts. CSV and plain-text import, CSV export.
-* Public blocklist feeds (all opt-in, one checkbox each): Spamhaus DROP, FireHOL Level 1, Emerging Threats compromised hosts, blocklist.de, CINS Army, IPsum, DShield top 20 and Tor exit nodes. Lists combine additively, update on a polite schedule (twice daily to weekly, never more often than the provider allows, conditional requests, random jitter, backoff on errors), never include private/reserved ranges, and never override your allowlist.
-* Progressive lockout engine (for example 15 min → 1 h → 24 h → permanent).
-* Early firewall: blocks listed IPs before WordPress loads (auto_prepend_file) or before other plugins (a must-use plugin set up automatically), from a snapshot WordPress keeps current; anything doubtful is left to the normal firewall.
-* Blocking before PHP: nginx and Apache blocklist files kept up to date, and sync to a Cloudflare IP list for blocking at the edge.
+* Spoof-resistant client IP detection: REMOTE_ADDR by default, forwarding headers only from trusted proxies (presets for Cloudflare, load balancers and custom ranges).
+* Allowlist and blocklist for IPs and CIDR ranges (IPv4 and IPv6) with reasons, expiry and hit counts; progressive lockouts (for example 15 minutes, 1 hour, 24 hours, permanent).
+* Eight optional public blocklists, each off until you enable it, updated politely and never overriding your allowlist. Each list's licence is shown next to it; some are for non-commercial use only.
+* Early firewall: refuses blocked IPs before WordPress loads (auto_prepend_file) or before other plugins (a must-use plugin), from a snapshot kept in a private folder outside the web root.
+* The same policy (block rules minus the allowlist) can be written as nginx and Apache deny files and synced to a Cloudflare IP list, so blocked IPs can be stopped before PHP or at the edge.
 
-**Login brute-force protection**
+**Login protection**
 
-* Failed logins (wrong passwords, unknown usernames, wrong two-factor codes) are counted per IP and per account over a sliding window. An IP over the limit (5 failures in 15 minutes by default) is locked out with the progressive lockouts (15 min → 1 h → 24 h → permanent), and the login in progress is refused, so XML-RPC multicall cannot try hundreds of passwords in one request.
-* Distributed attacks: an account with too many failures from many IPs (20 by default) accepts password logins only from IPs it logged in from before (and allowlisted IPs) until the failures age out. No IP gets locked out for this, so attackers cannot use it to lock out the real user.
-* Refusals do not depend on the password and happen before WordPress checks it, so a refused login costs no password hashing. Logins from one IP are handled one at a time, so simultaneous requests cannot slip past the limit, and a lockout never erases an IP's failures from the accounts it tried. REST API application passwords get the same limits.
-* Optional: one message for wrong usernames and wrong passwords (on by default), instant lockout for usernames like "admin" that nobody uses, and XML-RPC logins turned off.
-* Application password controls: block them for administrator-level accounts or everyone, expire them after N days, retire unused ones, and review administrators' application passwords with when and where they were last used.
-* The Login Security tab lists the IPs and accounts with the most failed logins; test mode logs "would deny login" and "would lock out".
+* Failed logins are counted per IP and per account. IPs over the limit are locked out; accounts attacked from many IPs accept password logins only from IPs they used before, so attackers cannot lock out the real user. Limits apply to wp-login.php, XML-RPC and REST API application passwords, and are checked before the password is hashed.
+* Two-factor authentication: passkeys and security keys (WebAuthn), authenticator apps, email codes and backup codes. Optional, or required for administrators or everyone. Changing a method needs a fresh confirmation with the second factor; wrong confirmations are limited.
+* Login location rules: allow or deny logins by country, using Cloudflare's country header, a server variable or the optional free DB-IP database.
+* Application password controls, a username enumeration guard, and an option to turn off XML-RPC logins.
 
-**Two-factor authentication**
+**Malware lockdown**
 
-* Passkeys and security keys (WebAuthn: phones, Windows Hello, Touch ID, YubiKeys), authenticator apps (TOTP, with a QR code drawn on your own server), codes by email, and one-time backup codes. Adding or removing a method needs a fresh password or passkey confirmation. Each user sets it up under Users → Two-Factor Authentication.
-* Optional for everyone, or required for administrator-level accounts or every account. Required accounts without an app get a code by email until they set one up, plus a dashboard reminder.
-* Works with wp-login.php, the session-expired login popup and other login forms that use WordPress's login (such as WooCommerce). Password logins over XML-RPC and the REST API are refused for two-factor accounts; application passwords keep working.
-* Authenticator secrets are encrypted with keys from wp-config.php; backup and email codes are stored only as keyed hashes. Codes cannot be reused, five wrong codes cancel the login, and each wrong code counts toward the brute-force limits; code screens, emailed codes and wrong codes are also limited per account per hour, so restarting the login resets nothing. Optional "Trust this browser" for a set number of days, with a per-browser list and revocation; a password change or reset, or a new authenticator, revokes every trusted browser.
-* Administrators can reset a user who lost their phone from the user's profile or with `wp sentinel 2fa <user> --reset`.
-
-**Login location (GeoIP) restriction**
-
-* Allow logins only from the countries you list, or block logins from listed countries, for every account or administrator-level accounts only. Covers wp-login.php, XML-RPC and application passwords (REST API).
-* The answer does not depend on the password, so a visitor from a denied country cannot use the login form to test passwords.
-* Country sources: Cloudflare's CF-IPCountry header (only when requests really come through Cloudflare), a country variable set by your server (mod_geoip, MaxMind module) and the free DB-IP country database, downloaded and kept current automatically (no account or key needed).
-* Allowlisted IPs and this server are never denied; you choose what happens when the country is unknown. Saving settings that would deny your own next login switches the feature to test mode instead of locking you out. Test mode logs "would deny login" without denying.
-
-**Malware Lockdown**
-
-Protection against the "SC" WordPress malware (described by Sucuri in September 2026) and similar takeovers, which keep copies of themselves in many places and rebuild each other.
-
-* A read-only malware scan, twice a day and on demand, of every place SC hides: auto_prepend_file loaders in .user.ini / php.ini / .htaccess, the db.php and advanced-cache.php drop-ins, must-use plugins and duplicate plugins, plugins hidden from the Plugins screen, administrators hidden from the Users screen, database triggers, injected theme code, hidden PHP files and ZIP bundles, PHP in uploads, encoded payloads and sc_ options in the database, random scheduled tasks, login-capturing and hiding hooks, shared memory and blockchain traffic. New findings are logged and emailed; known-good items can be approved and are reported again if they change. Every scan reports its coverage (files read, files read only partly, unreadable files), and a large uploads folder is walked across several runs until every file has been checked.
-* File integrity check, daily and on demand: WordPress core and every plugin from WordPress.org are compared with the file hashes WordPress.org publishes for the installed versions. Changed files and files a release does not contain (such as a backdoor in wp-includes) are reported, whatever they look like. Large sites are checked in slices, and each pass lists what could not be verified and why (themes, premium plugins).
-* Opt-in measures: administrator lock (only approved administrators keep admin rights), file editor off, plugin/theme installs off, PHP blocked in uploads, blockchain RPC command channels blocked, protection against being switched off by code, and alerts on new administrators.
-* Malware Lockdown page with the scan, the file integrity results, the administrator list (approve and withdraw), "Log out everyone", server configuration checks and the safe cleanup order.
+* A read-only scan, twice a day, of the places takeover malware such as "SC" hides: prepend loaders, drop-ins, must-use plugins, hidden plugins and administrators, database triggers, PHP in uploads, encoded payloads, suspicious scheduled tasks and hooks.
+* A daily file integrity check of WordPress core and WordPress.org plugins against the checksums WordPress.org publishes.
+* Opt-in measures: an administrator lock (only approved accounts keep admin rights, optionally fixed in wp-config.php), file editor and installs off, PHP blocked in uploads, and alerts on new administrators.
 
 **Monitoring and tools**
 
-* Scheduled Tasks page (WP-Cron monitor): every task with its schedule, next and last run, failures and the PHP error that stopped it, the code it calls and where that code lives. Run now, pause/resume, change schedule and delete. Highlights overdue tasks, tasks with no code and tasks whose code lives in uploads or eval()'d code.
-* Alerts that are checked: every alert email's delivery is recorded and failures show on the health card; a test button tries every channel; an hourly heartbeat to a monitoring service.
-* Remote audit log: security events sent as they happen to a webhook (signed, hash-chained so missing events show, retried when the endpoint is down) and optionally to syslog, so a compromised database cannot erase the evidence. `wp sentinel audit-export` writes the same format.
-* Enforcement health on the dashboard and as `wp sentinel health` (exit code for monitoring): enforcing or test mode, IP detection, concurrency locks, scheduled jobs, blocklist and country database freshness, open scan findings.
-* Security events log, dashboard and admin bar counter.
-* Test mode everywhere: global log-only mode with optional auto-expiry, per-module overrides, a decision simulator, an IP resolution simulator, a lockout tester, a block page preview and a test unlock email.
-* Documentation tab (Settings → Documentation) with this whole reference, generated from the plugin's own settings, plus the current administrator approvals.
-* Multisite: network-wide rules and settings; per-site overrides for the block page.
-* WP-CLI: `wp sentinel status|check|resolve-ip|block|allow|unblock|remove|list|lockout|test-mode|settings-get|settings-set|settings-keys|settings-export|settings-import|cloudflare-update|cron|feeds|feeds-update|login-attempts|2fa|geo|geo-update|health|early-gate|server-export|cloudflare-sync|audit-export|audit-test|scan|verify|admins|approve-admin|revoke-admin|flush-cache|prune|unlock-link|events`.
+* Events log, dashboard, enforcement health card (also `wp sentinel health` for monitoring), and a Scheduled Tasks page that shows every WP-Cron task and lets you pause or run it.
+* Alerts by email with a record of whether the mail system accepted each one, an hourly heartbeat for uptime monitors, and an optional remote audit log (signed, hash-chained webhook and syslog) that survives a wiped database.
+* Test mode per module, decision and IP simulators, and a full WP-CLI command set (`wp sentinel`).
+* Multisite support with network-wide rules.
 
-**Lockout safety**
+**Safety**
 
-The admin's IP is auto-allowlisted on activation from wp-admin and on every settings save (for 30 days by default, renewed while an administrator uses the dashboard from it), a warning appears if your own IP matches a block rule, rules that would block your own IP are refused, and wp-cron.php from the server plus all WP-CLI requests are never blocked. See "I locked myself out" below for the ways back in.
+Your own IP is allowlisted on activation and when you save settings, rules that would block you are refused, WP-CLI and the server's own cron requests are never blocked, and `define( 'SENTINEL_SHIELD_DISABLE', true );` in wp-config.php switches everything off in an emergency. The FAQ lists every way back in.
 
-**Roadmap:** 404 flood blocking, WAF (auto_prepend_file), file integrity against wordpress.org checksums, audit log and the full dashboard.
+**Documentation**
+
+Settings → Documentation in the plugin explains every feature and setting with its current value. The same reference is in the source repository: docs/SETTINGS.md (every setting) and docs/ADMINISTRATORS.md (the administrator lock).
+
+== Scope ==
+
+Sentinel Shield blocks by IP address, account and country, hardens logins and detects tampering. It does not include:
+
+* a vulnerability database: it does not warn about known holes in installed plugins and themes, and has no virtual patches for them;
+* request payload inspection: it does not look for SQL injection, cross-site scripting or similar attacks inside requests, so an exploit sent from an address that is not blocked reaches WordPress;
+* DDoS protection: volumetric attacks have to be stopped upstream by your host or a CDN;
+* backups or malware removal.
+
+Use it alongside updates, off-site backups and, where you need them, services that provide those.
+
+== External services ==
+
+Nothing below is contacted unless stated as a default or you switch it on.
+
+* **WordPress.org** (on by default, file integrity check): requests the published checksums for your WordPress version and locale (api.wordpress.org) and for each installed plugin and version (downloads.wordpress.org), daily, cached 30 days. Switch off on Settings → Malware Lockdown. Terms: https://wordpress.org/about/privacy/
+* **Blocklist providers** (each list off by default): your server downloads each list you enable from its provider (spamhaus.org, iplists.firehol.org, rules.emergingthreats.net, lists.blocklist.de, cinsscore.com, feeds.dshield.org, check.torproject.org) with a generic "SentinelShield" user agent and no site address. The provider sees your server's IP address. Each list's terms are linked on Settings → Blocklists.
+* **DB-IP** (off by default): the country database is downloaded from download.db-ip.com, checked weekly. DB-IP sees your server's IP; lookups happen locally. The data is licensed CC BY 4.0: by switching it on you agree that visitors whose login is refused because of a DB-IP lookup see an "IP Geolocation by DB-IP" credit link. Terms: https://db-ip.com/db/lite.php
+* **Cloudflare** (only with the Cloudflare preset or sync): Cloudflare's address ranges are fetched weekly from api.cloudflare.com/client/v4/ips. Cloudflare list sync (off by default) sends the addresses and ranges of your block policy to your own Cloudflare account with your API token. Terms: https://www.cloudflare.com/website-terms/ and https://www.cloudflare.com/privacypolicy/
+* **Your webhook** (off by default): each event is sent as JSON with the fields id, time, event, module, ip, reason, uri (path and query, with reset keys, nonces, passwords and tokens masked), agent (user agent), user_id, test, context (event details such as the username tried, a country code or a file path), seq, prev and hash, plus the site address.
+* **Syslog** (off by default): one line per event with site (host name), id, event, module, ip and reason, written to the server's system log.
+* **Your heartbeat URL** (off by default): a plain request every hour, without data.
+* **Email**: alerts go to the site admin address, two-factor codes and unlock links to the account's address, through WordPress's mailer.
+* **Your own site**: to confirm the private folder cannot be downloaded, the site may request a test file from itself.
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.8.0.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.8.1.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
@@ -84,185 +85,9 @@ The admin's IP is auto-allowlisted on activation from wp-admin and on every sett
 6. Set up two-factor authentication for your own account under Users → Two-Factor Authentication, then consider requiring it for administrators on Settings → Login Security.
 7. Go to Sentinel Shield → Malware Lockdown, run a scan, check the Administrators list, then switch on the lockdown measures you want on Settings → Malware Lockdown.
 
+The early firewall and the server blocklist files use a private folder, `sentinel-shield-data` next to the WordPress folder. If PHP cannot create it there, or your host serves that folder over the web, set another folder outside the web root with `define( 'SENTINEL_SHIELD_DATA_DIR', '/path/outside/the/web/root' );` in wp-config.php. Settings → Server & CDN shows whether the folder is confirmed private.
+
 Each release zip contains `checksums.sha256` (SHA-256 of every file) and `build.json` (version, git commit and build date). To check an installed copy, run `sha256sum -c checksums.sha256` inside the plugin folder.
-
-Developers: run `composer install` for the test and coding-standards tools, and `bin/build.sh` to build a release zip. The plugin has no runtime Composer dependencies.
-
-== Administrator approvals ==
-
-With the **Administrator lock** on (Settings → Malware Lockdown), only accounts on an approved list keep administrator rights. Any other account with administrator powers is treated as having no capabilities, however it got them. This stops backdoor administrators such as the one SC writes straight into the database and hides from the Users screen.
-
-= Where it is configured =
-
-* Sentinel Shield → Malware Lockdown → Administrators: lists every administrator account read directly from the database, including hidden ones, with Approve and Withdraw approval buttons.
-* WP-CLI: `wp sentinel admins`, `wp sentinel approve-admin <user>`, `wp sentinel revoke-admin <user>` (user ID, login or email).
-* Settings → Documentation shows the current approved list with who approved each account and when.
-* Or fix the list in wp-config.php with `SENTINEL_SHIELD_ADMINS` (below), which replaces the database list entirely.
-
-The list is stored in its own option (`sentinel_shield_admin_approvals`, network-wide on multisite). It is not a settings field, is not included in settings export/import and cannot be changed with `settings-set`, so importing settings never approves accounts. Approving or withdrawing needs full administrator rights (manage_options; manage_network_options on multisite); a locked account cannot approve itself.
-
-= Fixing the list in wp-config.php =
-
-A list in the database could be changed by malware that writes to the database. To fix the list in a file instead, add this to wp-config.php above "That's all, stop editing!":
-
-`define( 'SENTINEL_SHIELD_ADMINS', 'admin#1, jane#7' );`
-
-* Entries are logins separated by commas (an array also works), matched without regard to case.
-* `#ID` pins an entry to one account: `jane#7` approves login jane only while it belongs to user ID 7. Always pin: without it, if the jane account is deleted, anyone who registers a new account called jane becomes an approved administrator. The Administrators list shows the ID to use.
-* While the constant is defined the lock is always enforced, regardless of the "Administrator lock" checkbox, the Malware lockdown module and "Enable protection" (all stored in the database). Only `SENTINEL_SHIELD_DISABLE` switches it off.
-* The database list is ignored but kept; remove the constant to return to it. The Approve/Withdraw buttons and `approve-admin` / `revoke-admin` are disabled.
-* The list is applied exactly as written: if no entry matches an administrator (a typo, or an empty value), every administrator is locked until wp-config.php is fixed. Check the Administrators list right after saving the file.
-* Entries matching no account, or whose login now belongs to another user ID, are shown on the Administrators list, reported by the malware scan and announced in an admin notice.
-* Adding an administrator: create or promote the account, then add its `login#ID`. Removing one: delete its entry (and ideally its administrator role).
-* Limit: the list is only enforced while Sentinel Shield runs. Malware writing to the database directly could still remove Sentinel Shield from the active plugins (you would see it deactivated), and malware that can edit files can edit wp-config.php.
-
-= Which accounts count as administrators =
-
-* Single site: the Administrator role, or any account given one of these capabilities directly whatever its role: manage_options, activate_plugins, install_plugins, edit_plugins, edit_files, update_core. Such accounts are flagged "Admin powers without admin role".
-* Multisite: super administrators. Ordinary site administrators are not affected.
-* Accounts are found with a direct database query and compared with what the Users screen shows; accounts missing from the Users screen are flagged "Hidden from Users screen".
-
-= How it behaves =
-
-* **Turning it on:** if no one is approved yet, every administrator the Users screen shows is approved automatically, plus you. Hidden accounts are never approved automatically. Check the list for accounts you do not recognize first.
-* **Empty list:** while no account is approved the lock does nothing, so switching it on (or withdrawing every approval) can never lock out every administrator.
-* **New administrators:** have no rights until approved. Approved administrators see a "waiting for approval" notice, and the site admin email gets a "New administrator account" message saying who made the change and from which IP (if "Alert on new administrator accounts" is on).
-* **Locked accounts:** can log in and see their profile, but every admin screen and capability is refused, including through the REST API, AJAX and XML-RPC. They see a notice explaining how to get approved. Each locked account is logged once an hour as "Unapproved administrator denied".
-* **Withdrawing:** you cannot withdraw your own approval from the admin. Approvals are bound to user ID and login, so an account whose login is changed must be approved again. Removing someone's administrator role does not remove their approval; withdraw it when someone leaves.
-* Approvals and withdrawals are written to the Events log.
-* **Limit:** without `SENTINEL_SHIELD_ADMINS` the list lives in the database, where malware that specifically targets Sentinel Shield could add itself. Keep the twice-daily scan and the new-administrator alerts on; they report hidden administrators, triggers and new admins independently.
-
-== Settings reference ==
-
-Every setting on Sentinel Shield → Settings, with its key (as used by `wp sentinel settings-get` / `settings-set` and exported settings files), default and recommended value. The same reference, with live values, is on Settings → Documentation.
-
-Malware Lockdown measures are not affected by test mode: once switched on, they are enforced.
-
-<!-- settings-reference:start (generated by bin/readme-settings.php; edit src/SettingsSchema.php instead) -->
-
-= Settings → General & Test Mode =
-
-* **Enable protection** (`general.enabled`; default: On; recommended: On). Master switch. When off, no module runs and nothing is blocked or logged. For emergencies you can also add define( 'SENTINEL_SHIELD_DISABLE', true ); to wp-config.php.
-* **Test mode (log only)** (`general.test_mode`; default: On; recommended: Off). Every block decision is recorded as "would block" in the Events log, but the request is allowed and no lockouts are created. Keep this on until you have confirmed IP detection and reviewed the Events log. Turn it off to enforce.
-* **End test mode automatically after (hours)** (`general.test_mode_hours`; default: 0; recommended: 24). Range 0–720. Counted from when you save. 0 keeps test mode on until you turn it off.
-* **Test mode applies to** (`general.test_mode_scope`; default: All blocks, including manual ones; recommended: All blocks, including manual ones). Choices: "All blocks, including manual ones"; "Automatic blocks only (manual blocks are enforced)". "Automatic blocks only" lets you test lockout thresholds while IPs you blocked by hand stay blocked.
-* **Response to blocked visitors** (`general.block_response`; default: 403 Forbidden page (with unlock form for admins); recommended: 403 Forbidden page (with unlock form for admins); per-site on multisite). Choices: "403 Forbidden page (with unlock form for admins)"; "Silent 404 Not Found". A 404 reveals less to attackers but hides the emailed unlock form. Locked-out admins can still use WP-CLI or the wp-config.php constant.
-* **Block page message** (`general.block_message`; default: (empty); recommended: your choice; per-site on multisite). Shown on the 403 page. Leave empty for the default text. Plain text only.
-* **Keep security events for (days)** (`general.event_retention_days`; default: 30; recommended: 30). Range 1–365. Older events are pruned hourly.
-* **Show admin bar indicator** (`general.admin_bar`; default: On; recommended: On; per-site on multisite). Shows blocked requests today and a test mode warning in the toolbar.
-* **Delete all data on uninstall** (`general.delete_data_on_uninstall`; default: Off; recommended: Off). When the plugin is deleted, drop its tables and options. Leave off if you might reinstall.
-
-= Settings → IP Detection =
-
-* **Trusted proxy** (`proxy.mode`; default: None: use REMOTE_ADDR only; recommended: None: use REMOTE_ADDR only). Choices: "None: use REMOTE_ADDR only"; "Cloudflare (CF-Connecting-IP, ranges auto-updated weekly)"; "Load balancer / reverse proxy with a header"; "Custom trusted proxy list". Forwarding headers are only read when the request arrives from a trusted proxy IP; otherwise anyone could fake their IP. Pick "None" unless your site sits behind a proxy or CDN. Compare the "Detected IP" above with your real IP before turning off test mode.
-* **Client IP header** (`proxy.header`; default: X-Forwarded-For; recommended: X-Forwarded-For). Used by the load balancer and custom presets, e.g. X-Forwarded-For, X-Real-IP, True-Client-IP or Forwarded. Ignored for Cloudflare and None. Your proxy must always set or overwrite this header; if it passes a visitor-supplied value through, visitors can fake their IP. A header the proxy overwrites (such as X-Real-IP from nginx) is safest.
-* **Trusted proxy IPs / CIDRs** (`proxy.trusted_cidrs`; default: (empty); recommended: your choice). One per line. IPv4, IPv6 and CIDR ranges allowed; # starts a comment. For the load balancer preset, an empty list trusts private network ranges. For Cloudflare, add any proxy that sits between Cloudflare and this server. A request from a trusted proxy that does not name the visitor (header missing, malformed or listing only proxies) is treated as anonymous and gets none of the proxy's allowlist or server exemptions.
-* **This server's own IPs** (`proxy.server_ips`; default: (empty); recommended: your choice). Requests to wp-cron.php from these IPs are never blocked. Loopback and SERVER_ADDR are always included; add your public IP if loopback requests leave and re-enter through it.
-
-= Settings → Lockouts & Unlock =
-
-* **First lockout (minutes)** (`lockout.step1_minutes`; default: 15; recommended: 15). Range 0–525600. Duration of an IP's first lockout. 0 means permanent and makes later steps unused.
-* **Second lockout (minutes)** (`lockout.step2_minutes`; default: 60; recommended: 60). Range 0–525600. Used when the IP was locked out once before within the repeat window. 0 = permanent.
-* **Third lockout (minutes)** (`lockout.step3_minutes`; default: 1440; recommended: 1440). Range 0–525600. 0 = permanent.
-* **Fourth and later lockouts (minutes)** (`lockout.step4_minutes`; default: 0; recommended: 0). Range 0–525600. 0 = permanent block until removed by an admin.
-* **Repeat offense window (days)** (`lockout.repeat_window_days`; default: 7; recommended: 7). Range 1–365. Lockouts within this many days escalate to the next step. Older offenses are forgotten.
-* **Unlock link lifetime (minutes)** (`unlock.token_ttl_minutes`; default: 30; recommended: 30). Range 5–1440. Emailed unlock links are single-use and expire after this time.
-* **Temporary allowlist after unlock (hours)** (`unlock.allow_hours`; default: 24; recommended: 24). Range 1–720. After a successful unlock, the IP is allowlisted for this long so you can fix the cause.
-* **Keep automatic administrator allowlist entries for (days)** (`unlock.admin_allow_days`; default: 30; recommended: 30). Range 0–365. When an administrator saves settings, their IP is allowlisted so they cannot lock themselves out. The entry lasts this many days and is renewed whenever an administrator uses the dashboard from that IP, so only IPs nobody has used for that long drop off. Home and mobile IPs change and get reassigned to other people, so a permanent entry could end up trusting a stranger. 0 keeps the entries forever (the behavior before 0.6.0). Automatic entries keep the IP from being blocked but do not exempt it from login limits or login location rules (everyone at a shared address would be exempt too); add an address yourself on the IP Rules page for that. Entries you add yourself are never changed.
-* **Unlock emails per IP per hour** (`unlock.max_requests_per_hour`; default: 3; recommended: 3). Range 1–20. Limits abuse of the unlock form.
-
-= Settings → Login Security =
-
-* **Failed logins per IP before a lockout** (`login.max_failures`; default: 5; recommended: 5). Range 1–100. When one IP fails this many logins within the counting window, it is locked out using the progressive lockout durations on the Lockouts & Unlock tab (15 minutes, then 1 hour, 24 hours and permanent by default), and the login in progress is refused. Wrong passwords, unknown usernames and wrong two-factor codes all count. Allowlisted IPs and this server are never counted. If the Progressive lockouts module is off, logins from the IP are refused until its failures age out.
-* **Counting window (minutes)** (`login.window_minutes`; default: 15; recommended: 15). Range 1–1440. Failed logins older than this are no longer counted against an IP or account.
-* **Failed logins per account before it is protected** (`login.account_max_failures`; default: 20; recommended: 20). Range 0–1000. Stops attacks spread over many IPs. When one account (by username or email) fails this many logins within the counting window, from any number of IPs, password logins to it are refused except from IPs it logged in from successfully before (the last 10, for 90 days) and allowlisted IPs, until the failures age out. No IP is locked out for this, and the refusal looks the same whether or not the password was right. 0 turns this off.
-* **Lock out at once for these usernames** (`login.instant_usernames`; default: (empty); recommended: your choice). Usernames that nobody on this site uses but attackers try first, e.g. "admin, administrator, test, root". Separated by commas, spaces or new lines. A login attempt with one of them locks the IP out after the first failure. A name is ignored while an account with that username or email exists.
-* **Do not reveal which usernames exist** (`login.generic_errors`; default: On; recommended: On). WordPress normally says "The username is not registered" or "The password you entered for the username ... is incorrect", which tells attackers which accounts exist. With this on, both become "The username, email address or password is incorrect".
-* **Turn off logins over XML-RPC** (`login.disable_xmlrpc`; default: Off; recommended: your choice). XML-RPC (xmlrpc.php) lets programs log in with a username and password and is a favourite brute-force target. With this on, every XML-RPC method that needs a login is refused; pingbacks still work. Leave off if you use the WordPress mobile app with XML-RPC, Jetpack, or a desktop blogging client.
-* **Application passwords** (`login.app_passwords`; default: Allowed for every account (WordPress default); recommended: your choice). Choices: "Allowed for every account (WordPress default)"; "Not for administrator-level accounts"; "Not allowed for anyone". Application passwords let programs (the mobile app, integrations, scripts) use the REST API and XML-RPC. They skip two-factor authentication by design, so a forgotten one on an administrator account is a standing way in. Blocking them for administrator-level accounts is a good default when no integration needs one; existing ones then stop working and cannot be created.
-* **Application passwords expire after (days)** (`login.app_password_max_days`; default: 0; recommended: your choice). Range 0–3650. Application passwords older than this stop working; the owner creates a new one. 0 = never expire.
-* **Retire application passwords unused for (days)** (`login.app_password_unused_days`; default: 0; recommended: 180). Range 0–3650. An application password nobody used for this long stops working, so forgotten integrations do not stay open. 0 = keep them.
-* **Two-factor authentication** (`twofa.required`; default: Optional for everyone; recommended: Required for administrator-level accounts). Choices: "Optional for everyone"; "Required for administrator-level accounts"; "Required for every account". Every user can set up two-factor authentication under Users → Two-Factor Authentication (an authenticator app, codes by email, and backup codes). When it is required, an account without an authenticator app gets a code by email at every login until it sets one up (if email codes are allowed below), and sees a reminder in the dashboard. Administrator-level means the same accounts as the administrator lock. Make sure this site can send email before requiring it.
-* **Allow codes by email** (`twofa.email`; default: On; recommended: On). Lets users get an 8-digit login code by email (valid 10 minutes) instead of using an app. Weaker than an app, because anyone who controls the mailbox can log in with the password, but much stronger than a password alone. When off, required accounts without an app cannot log in until one is set up (they are never let in with only a password); the Login Security tab lists them, and it cannot be switched off while your own login needs it.
-* **Offer "Trust this browser" for (days)** (`twofa.remember_days`; default: 0; recommended: your choice). Range 0–90. Shows a "Trust this browser" box on the code screen; a trusted browser is not asked for a code again for this many days (the password is still needed). Users can forget all their trusted browsers on their Two-Factor Authentication page, and resetting an account's two-factor forgets them too. 0 asks for a code at every login.
-
-= Settings → Login Location =
-
-* **Login location restriction** (`geo.mode`; default: Off: no location check; recommended: your choice). Choices: "Off: no location check"; "Allow logins only from the countries listed"; "Block logins from the countries listed". Checks the country of every login on wp-login.php, XML-RPC and application passwords (REST API). "Allow only" is the strongest choice when everyone who logs in is in a few known countries. A denied login gets "Logging in from your location is not allowed", whether or not the password was right. Allowlisted IPs and this server are never denied, existing login sessions are not ended, and WP-CLI is not affected.
-* **Countries** (`geo.countries`; default: (empty); recommended: your choice). Two-letter ISO country codes separated by commas or spaces, e.g. "US, CA, GB". The full list of codes is below. T1 means the Tor network and is only reported by Cloudflare.
-* **Applies to** (`geo.scope`; default: Every account; recommended: Administrator-level accounts only). Choices: "Every account"; "Administrator-level accounts only". "Administrator-level accounts only" protects the accounts that matter most (the same accounts as the administrator lock) while customers and members can log in from anywhere. The account is identified by the submitted username or email; logins naming an account that does not exist are checked only with "Every account".
-* **When the country is unknown** (`geo.unknown`; default: Allow the login; recommended: Allow the login). Choices: "Allow the login"; "Deny the login". The country is unknown for private and local addresses, addresses no source knows, and when no country source is set up. Denying is stricter but locks everyone out if the country database is missing.
-* **Download the free DB-IP country database** (`geo.dbip`; default: Off; recommended: your choice). Needed unless your site is behind Cloudflare or your server sets a country variable. A 5 MB download from db-ip.com, checked weekly and updated monthly, stored as a 15 MB file in uploads/sentinel-shield. Licensed CC BY 4.0: an "IP Geolocation by DB-IP" link is added to the denial message. DB-IP sees your server's IP when it downloads; nothing about visitors is sent. Switching this off deletes the file.
-* **Country from server variable** (`geo.server_var`; default: (empty); recommended: your choice). Name of a server variable holding the visitor's two-letter country code, set by your web server or host, e.g. GEOIP_COUNTRY_CODE (mod_geoip), MM_COUNTRY_CODE (MaxMind module). Used before the DB-IP database. Leave empty if unsure. Names starting with HTTP_ are request headers that visitors can send themselves: they are only used on requests that came through a trusted proxy (IP Detection tab), and that proxy must always set or overwrite the header.
-
-= Settings → Blocklists =
-
-* **Check for list updates** (`feeds.update_hours`; default: Daily; recommended: Daily). Choices: "Twice a day"; "Daily"; "Every 2 days"; "Weekly". How often each enabled list is downloaded. Lists whose provider asks for less frequent downloads are never fetched more often than the provider allows. Unchanged lists are not downloaded again.
-* **Spamhaus DROP** (`feeds.lists.spamhaus_drop`; default: Off; recommended: On). Hijacked and criminal-operated networks (IPv4 and IPv6). Very low false-positive rate. Free under the provider's terms, which forbid using the Spamhaus name in marketing. Terms: Free to use (https://www.spamhaus.org/drop/terms/).
-* **FireHOL Level 1** (`feeds.lists.firehol_level1`; default: Off; recommended: your choice). Aggregate of Spamhaus DROP, DShield, Feodo and bogon lists, aimed at minimal false positives. Includes DShield data (CC BY-NC-SA), so treat it as non-commercial. Private and reserved ranges in it are skipped automatically. Terms: Non-commercial only (https://iplists.firehol.org/?ipset=firehol_level1).
-* **Emerging Threats: compromised hosts** (`feeds.lists.et_compromised`; default: Off; recommended: your choice). Hosts known to be compromised, published by Proofpoint Emerging Threats. Small list. Terms: Check provider terms (https://rules.emergingthreats.net/blockrules/).
-* **blocklist.de (all)** (`feeds.lists.blocklist_de`; default: Off; recommended: your choice). IPs reported for SSH, mail, web and login attacks in the last 48 hours by fail2ban users. Large (20,000+ IPs) and fast-changing; dynamic IPs make occasional false positives more likely. Terms: Check provider terms (https://www.blocklist.de/en/export.html).
-* **CINS Army** (`feeds.lists.cins_army`; default: Off; recommended: your choice). IPs with poor reputation seen by the Sentinel IPS network. About 15,000 IPs. Terms: Check provider terms (https://cinsscore.com/).
-* **IPsum (level 3)** (`feeds.lists.ipsum_3`; default: Off; recommended: your choice). IPs that appear on at least 3 of 30+ public blocklists, rebuilt daily. Public domain (The Unlicense). Large (15,000+ IPs). Terms: Free to use (https://github.com/stamparm/ipsum).
-* **DShield top 20 attacking networks** (`feeds.lists.dshield_top`; default: Off; recommended: your choice). The 20 /24 networks with the most attack reports over the last three days, from SANS ISC. Licensed CC BY-NC-SA: non-commercial use only. Terms: Non-commercial only (https://feeds.dshield.org/block.txt).
-* **Tor exit nodes** (`feeds.lists.tor_exits`; default: Off; recommended: your choice). Not a list of attackers: blocks everyone using the Tor anonymity network, including legitimate privacy-conscious visitors. Enable only if your site has no Tor audience. Terms: Free to use (https://check.torproject.org/).
-
-= Settings → Server & CDN =
-
-* **Early firewall** (`firewall.early_gate`; default: Off; recommended: your choice). Choices: "Off"; "Before other plugins (must-use plugin, set up automatically)"; "Before WordPress (auto_prepend_file, set up in your server configuration)". Blocks IPs on your blocklist (manual rules, lockouts and enabled blocklist feeds) before WordPress or other plugins load, so floods from blocked IPs cost almost nothing. "Before other plugins" installs a small must-use plugin. "Before WordPress" also covers PHP files outside WordPress, and needs one line in php.ini, .user.ini or the web server configuration (shown below). Allowlisted IPs, this server's cron requests and unlock links always pass; anything doubtful is left to the normal firewall, so it never blocks more than WordPress would.
-* **Write nginx and Apache blocklist files** (`firewall.server_files`; default: Off; recommended: your choice). Keeps nginx-deny.conf and apache-deny.conf in uploads/sentinel-shield up to date with your enforced block rules (manual rules and lockouts), so the web server can refuse those IPs before PHP runs, including for images and other static files. Include the file in your server configuration; nginx needs a reload to pick up changes (for example from a cron job).
-* **Sync blocked IPs to a Cloudflare IP list** (`cloudflare.sync`; default: Off; recommended: your choice). Replaces the items of one Cloudflare account IP list with your enforced block rules whenever they change (at most 10,000; single IPv6 addresses become their /64). Add a WAF custom rule in Cloudflare that blocks requests whose IP is in the list, and blocked IPs never reach your server. Needs the account ID, the list ID and an API token with "Account Filter Lists: Edit" (entered below).
-* **Cloudflare account ID** (`cloudflare.account_id`; default: (empty); recommended: your choice). Shown in the Cloudflare dashboard on the account's overview page (32 characters).
-* **Cloudflare IP list ID** (`cloudflare.list_id`; default: (empty); recommended: your choice). Create a list of type IP under Manage Account → Configurations → Lists; its ID is the last part of the list's address in the dashboard (32 characters). Sentinel Shield replaces all items of this list, so use a list of its own.
-
-= Settings → Alerts & Audit Log =
-
-* **Send events to a webhook** (`audit.webhook_url`; default: (empty); recommended: your choice). An https:// address that receives security events as JSON as they happen (a log service, SIEM, or your own script). Each request is signed with HMAC-SHA256 using the secret shown below, and each event is chained to the previous one by a hash, so missing or altered events show. Someone who takes over the site can empty its database; events already sent stay safe. Failed deliveries are retried with increasing delays.
-* **Events to send** (`audit.scope`; default: Security events (everything except routine blocked requests); recommended: Security events (everything except routine blocked requests)). Choices: "Security events (everything except routine blocked requests)"; "All events, including every blocked request". Blocked requests can be thousands an hour during an attack; leave them out unless your receiver expects that volume.
-* **Also write events to the system log** (`audit.syslog`; default: Off; recommended: your choice). Writes each event as a line of JSON to syslog (facility auth, tag sentinel-shield), so the server can forward it (for example rsyslog to a central log server) or fail2ban can act on it.
-* **Heartbeat URL** (`audit.heartbeat_url`; default: (empty); recommended: your choice). Pinged every hour by the maintenance job, for a monitoring service that alerts you when the pings stop (for example healthchecks.io or Uptime Kuma push monitors). Silence means the site is down, Sentinel Shield was switched off, or scheduled jobs stopped: all things an attacker might cause.
-
-= Settings → Malware Lockdown =
-
-* **Disable the plugin and theme file editor** (`lockdown.disable_file_editor`; default: Off; recommended: On). Removes Appearance → Theme File Editor and Plugins → Plugin File Editor for everyone, like DISALLOW_FILE_EDIT. A stolen admin login can then not be used to paste a backdoor into a theme, which is how SC's theme copy is often planted.
-* **Block installing and uploading plugins and themes** (`lockdown.block_installs`; default: Off; recommended: your choice). Nobody can add new plugins or themes from the admin (updates still work). SC installs itself as a fake plugin; turn this off briefly when you need to install something.
-* **Block PHP in uploads** (`lockdown.block_php_uploads`; default: Off; recommended: On). Rejects uploads whose name or content is a script (including double extensions such as shell.php.jpg and .htaccess/.user.ini files) and, on Apache, adds rules to uploads/.htaccess so PHP files there cannot run. On nginx, add the rule shown on the Malware Lockdown page to your server configuration.
-* **Administrator lock** (`lockdown.admin_lock`; default: Off; recommended: On). Only approved administrator accounts keep admin rights; any other account with admin powers (such as one SC writes straight into the database) is treated as having none until approved on the Malware Lockdown page. When first switched on, every administrator shown on the Users screen is approved, hidden ones are not. Recover with: wp sentinel approve-admin <user>. To fix the list in a file instead, define SENTINEL_SHIELD_ADMINS in wp-config.php (see Documentation).
-* **Protect Sentinel Shield from being switched off by code** (`lockdown.protect_self`; default: Off; recommended: On). SC deactivates and deletes security plugins. With this on, Sentinel Shield can only be deactivated or deleted by an administrator from the Plugins screen, during an update, or with WP-CLI.
-* **Block blockchain command channels** (`lockdown.block_chain_rpc`; default: Off; recommended: On). Stops the site from contacting public Ethereum and BNB Chain RPC gateways and from sending blockchain JSON-RPC calls (eth_call), which SC uses to fetch its commands. Each attempt is logged with the file that made it. Leave off if a plugin on this site legitimately talks to a blockchain.
-* **Alert on new administrator accounts** (`lockdown.alert_admin_changes`; default: On; recommended: On). Logs and emails the site admin address whenever an account becomes an administrator through WordPress. Accounts written directly into the database are caught by the scan instead.
-* **Email new malware scan findings** (`lockdown.scan_email`; default: On; recommended: On). The scan runs twice a day. New critical findings and warnings are logged; with this on they are also emailed to the site admin address. The same applies to the file integrity check.
-* **Verify core and plugin files against WordPress.org checksums** (`lockdown.integrity_checks`; default: On; recommended: On). Once a day, every WordPress core file and every file of plugins hosted on WordPress.org is compared with the hash WordPress.org publishes for the installed version, and core folders are checked for files no release contains. Changed or added files are reported on the Malware Lockdown page. Large sites are checked in slices over several minutes. The site asks WordPress.org for the checksums of your WordPress and plugin versions (as update checks already do); nothing about visitors is sent. Themes, premium plugins and single-file plugins cannot be verified this way and are listed as such.
-
-= Settings → Modules =
-
-* **Enable: IP blocklist & allowlist enforcement** (`modules.ip_gate.enabled`; default: On; recommended: On). Checks every request against the IP rules early in the WordPress load.
-* **Test mode: IP blocklist & allowlist enforcement** (`modules.ip_gate.test_mode`; default: Follow global test mode; recommended: Follow global test mode). Choices: "Follow global test mode"; "Always test mode (log only)"; "Always enforce". Override the global test mode for this module only.
-* **Enable: Progressive lockouts** (`modules.lockout.enabled`; default: On; recommended: On). Turns repeat offenses into escalating temporary blocks. Other modules (login protection, 404 blocking, WAF) use it.
-* **Test mode: Progressive lockouts** (`modules.lockout.test_mode`; default: Follow global test mode; recommended: Follow global test mode). Choices: "Follow global test mode"; "Always test mode (log only)"; "Always enforce". Override the global test mode for this module only.
-* **Enable: Emailed unlock links** (`modules.unlock.enabled`; default: On; recommended: On). Lets a locked-out administrator request a one-time unlock link from the block page.
-* **Enable: Blocklist feeds** (`modules.feeds.enabled`; default: On; recommended: On). Blocks IPs listed on the public blocklists chosen on the Blocklists tab and keeps them updated. Your allowlist always wins.
-* **Test mode: Blocklist feeds** (`modules.feeds.test_mode`; default: Follow global test mode; recommended: Follow global test mode). Choices: "Follow global test mode"; "Always test mode (log only)"; "Always enforce". Override the global test mode for this module only.
-* **Enable: Scheduled task monitor** (`modules.cron_monitor.enabled`; default: On; recommended: On). Records when each WP-Cron task last ran, how long it took and whether it failed, for the Scheduled Tasks page.
-* **Enable: Login brute-force protection** (`modules.login_guard.enabled`; default: On; recommended: On). Counts failed logins and locks out IPs or protects accounts as set on the Login Security tab, and hides which usernames exist.
-* **Test mode: Login brute-force protection** (`modules.login_guard.test_mode`; default: Follow global test mode; recommended: Follow global test mode). Choices: "Follow global test mode"; "Always test mode (log only)"; "Always enforce". Override the global test mode for this module only.
-* **Enable: Two-factor authentication** (`modules.two_factor.enabled`; default: On; recommended: On). Asks for an authenticator app, email or backup code after the password, for accounts that set it up or are required to. Switching this off turns two-factor off for everyone. Not affected by test mode.
-* **Enable: Login location restriction** (`modules.geo_login.enabled`; default: On; recommended: On). Allows or blocks logins by country as set on the Login Location tab, and keeps the country database updated.
-* **Test mode: Login location restriction** (`modules.geo_login.test_mode`; default: Follow global test mode; recommended: Follow global test mode). Choices: "Follow global test mode"; "Always test mode (log only)"; "Always enforce". Override the global test mode for this module only.
-* **Enable: Malware lockdown** (`modules.lockdown.enabled`; default: On; recommended: On). Applies the measures chosen on the Malware Lockdown tab and runs the twice-daily malware scan. Lockdown measures are not affected by test mode.
-
-<!-- settings-reference:end -->
-
-= wp-config.php constants =
-
-* `define( 'SENTINEL_SHIELD_DISABLE', true );` Emergency switch: Sentinel Shield loads nothing. Use it to get back in, fix the cause, then remove the line.
-* `define( 'SENTINEL_SHIELD_ADMINS', 'admin#1, jane#7' );` Fixes the approved administrator list in this file and always enforces the administrator lock. See "Fixing the list in wp-config.php" above.
-* `define( 'DISALLOW_FILE_EDIT', true );` WordPress's own file editor switch. Stronger than the lockdown setting because it lives in a file instead of the database.
-* `define( 'DISABLE_WP_CRON', true );` Only with a real server cron job (the line is shown on the Scheduled Tasks page); otherwise blocklist updates and the malware scan stop.
-
-= Filters =
-
-* `sentinel_shield_allowed_chain_hosts` (array of host names): blockchain gateways a legitimate plugin may still reach while "Block blockchain command channels" is on.
 
 == Frequently Asked Questions ==
 
@@ -310,7 +135,7 @@ Country-level IP databases are about 98-99% accurate. Satellite, mobile and VPN 
 
 = What does DB-IP learn about my site? =
 
-Your server downloads the country database from db-ip.com about once a month (with a weekly check whether it changed), so DB-IP sees your server's IP address. Lookups happen on your server; nothing about visitors is sent. The database is licensed CC BY 4.0, so denied logins show an "IP Geolocation by DB-IP" link.
+Your server downloads the country database from db-ip.com about once a month (with a weekly check whether it changed), so DB-IP sees your server's IP address. Lookups happen on your server; nothing about visitors is sent. The free database is licensed CC BY 4.0, which requires a link back to DB-IP where its results are used. Switching the download on is your consent to that: a visitor whose login is refused because of a DB-IP lookup sees "IP Geolocation by DB-IP" under the message. No credit appears anywhere else on the public site. Use Cloudflare's country header or a server variable instead if you do not want it.
 
 = I cannot install a plugin or theme =
 
@@ -342,7 +167,7 @@ No. Entries added automatically when an administrator saves settings only keep t
 
 = How do I set up the early firewall? =
 
-On Settings → Server & CDN choose "Before other plugins" (installed automatically as a must-use plugin) or "Before WordPress" and add the auto_prepend_file line shown there to your PHP configuration. The tab and the health card show whether it is running. If it ever gets in the way, create an empty file named gate.disabled in wp-content/uploads/sentinel-shield.
+On Settings → Server & CDN choose "Before other plugins" (installed automatically as a must-use plugin) or "Before WordPress" and add the auto_prepend_file line shown there to your PHP configuration. The tab and the health card show whether it is running. Its snapshot lives in the private folder (sentinel-shield-data next to the WordPress folder, or SENTINEL_SHIELD_DATA_DIR); the tab shows whether that folder is confirmed private. If the early firewall ever gets in the way, create an empty file named gate.disabled in that folder.
 
 = Do passkeys replace passwords? =
 
@@ -358,11 +183,15 @@ Your site is behind a proxy and Trusted Proxy is set to None. Pick the matching 
 
 = What do blocklist providers learn about my site? =
 
-Your server downloads each enabled list directly from its provider (FireHOL and IPsum via GitHub), so the provider sees your server's IP address and when it checks for updates. Sentinel Shield sends a generic "SentinelShield" user agent without your site address, asks whether the list changed before downloading it again, and sends nothing about your visitors.
+Your server downloads each enabled list directly from its provider (FireHOL Level 1 and IPsum from iplists.firehol.org), so the provider sees your server's IP address and when it checks for updates. Sentinel Shield sends a generic "SentinelShield" user agent without your site address, asks whether the list changed before downloading it again, and sends nothing about your visitors.
 
 = Can I use every list on a commercial site? =
 
-No. DShield and FireHOL Level 1 (which includes DShield data) are CC BY-NC-SA, non-commercial only. Spamhaus DROP is free under its terms, which forbid using the Spamhaus name in marketing. For Emerging Threats, blocklist.de and CINS Army, check the provider's terms (linked on the Blocklists tab).
+No. As checked in October 2026 (terms can change; each list links to its own on the Blocklists tab):
+
+* Non-commercial only: DShield (CC BY-NC-SA) and FireHOL Level 1, which includes DShield data.
+* Free to use: the Spamhaus DROP lists (free of charge under Spamhaus's terms, which forbid using the Spamhaus name in marketing), IPsum (public domain), CINS Army (the provider says "use in any way you see fit") and the Tor exit list (CC0).
+* No licence published: Emerging Threats compromised hosts and blocklist.de are offered as free downloads ("as is, at your own risk") without stated terms; decide yourself whether that is enough for your site.
 
 = Does test mode protect anything? =
 
@@ -370,13 +199,26 @@ No. Test mode only records what would have been blocked. Use it to validate sett
 
 == Changelog ==
 
+= 0.8.1 =
+Stabilization release from a third code review:
+* One policy everywhere: the early firewall, the nginx and Apache files and the Cloudflare list now block exactly what WordPress blocks, the enforced block rules minus the allowlist and this server's addresses (ranges are split around allowed addresses). Before, an allowlisted IP inside a blocked range was refused by the server files and Cloudflare. Each change gets a generation number shown on the Server & CDN tab.
+* Switching off works on every layer: with protection or the IP gate off, every layer gets an empty policy; turning Cloudflare sync off or deactivating the plugin empties the Cloudflare list (with a warning if that fails); deactivation removes the must-use loader and the snapshot and empties the server files.
+* Private folder: the snapshot (which contains allowlisted addresses), the block log and the server files moved out of uploads to a folder outside the web root (sentinel-shield-data, or SENTINEL_SHIELD_DATA_DIR). Nothing is written until the folder is confirmed private; .htaccess rules are not relied on, so nginx sites are covered.
+* Short lockouts end on time everywhere: the policy is rebuilt when the next temporary rule expires, not only hourly.
+* Cloudflare: the list is shown as active only after Cloudflare confirms its bulk operation; uploads happen at most every five minutes and only when the list changed; single IPv6 addresses are left out by default (new IPv6 setting) and never widened over an allowlisted address. Cloudflare's own address ranges now come from its API.
+* Identity confirmation for two-factor changes needs the second factor (passkey, or password plus an app or backup code) and is limited to five tries in 15 minutes; failures count toward the login limits.
+* Fallback lock rows record their owner, so a slow process can no longer release a lock another process took over; long jobs renew their lock.
+* Remote audit log delivery moved from the end of visitors' requests to a background job; the early firewall samples its block log during floods and logs paths without query strings; event URIs mask reset keys, nonces, passwords and tokens.
+* Plugin Check clean; FireHOL and IPsum lists download from iplists.firehol.org; alert status says "accepted by the mail system"; blocklist terms re-checked and labelled; the DB-IP credit link is described as part of switching DB-IP on; a scope statement and an external services section in this readme. The settings reference moved to docs/SETTINGS.md and the Documentation tab.
+* CI: WP-CLI for the smoke test is installed from a pinned, checksum-verified release (a failed tool download had stopped one run before the plugin was tested), and Plugin Check runs against the release zip.
+
 = 0.8.0 =
 * Passkeys and security keys (WebAuthn) as a two-factor method: added on the Two-Factor Authentication page, used with one tap on the login code screen; ES256, EdDSA and RS256 keys, signature counters checked, challenges single-use. Tested end to end in Chrome with a virtual authenticator.
 * Fresh confirmation: adding or removing a two-factor method or creating backup codes needs the password or a passkey within the last 10 minutes of the same login session; administrators confirm their own password to reset another user's two-factor.
 * Early firewall (early-gate.php): blocks listed IPs before WordPress loads (auto_prepend_file) or before other plugins (must-use plugin), from a snapshot WordPress keeps current; steps aside whenever anything is unclear. Emergency switch: a gate.disabled file.
 * Server and edge blocking: nginx and Apache blocklist files kept up to date, Cloudflare IP list sync, and wp sentinel server-export.
 * Remote audit log: security events sent to a webhook as they happen (HMAC-signed, hash-chained, retried with backoff), optional syslog, wp sentinel audit-export.
-* Alert delivery monitoring: every email's delivery is recorded and failures shown on the health card, a test for every channel, and an hourly heartbeat for monitoring services.
+* Alert monitoring: whether the mail system accepted each email is recorded and refusals shown on the health card, a test for every channel, and an hourly heartbeat for monitoring services.
 * Health card: early firewall, Cloudflare sync, alert emails, audit delivery and heartbeat rows.
 
 = 0.7.0 =
@@ -438,11 +280,14 @@ Security fixes from a code review:
 
 == Upgrade Notice ==
 
+= 0.8.1 =
+Fixes allowlist precedence at the web server and Cloudflare, empties external blocklists when protection is off, and moves runtime files to a private folder outside the web root. If the Server & CDN tab reports a folder problem, set SENTINEL_SHIELD_DATA_DIR.
+
 = 0.8.0 =
-Adds passkeys, a fresh password confirmation before changing two-factor methods, an early firewall that runs before WordPress, nginx/Apache/Cloudflare blocking, a signed and hash-chained remote audit log, and checks that alert emails actually go out. New features are off until you switch them on.
+Adds passkeys, a fresh password confirmation before changing two-factor methods, an early firewall that runs before WordPress, nginx/Apache/Cloudflare blocking, a signed and hash-chained remote audit log, and alert email status. New features are off until you switch them on.
 
 = 0.7.0 =
-Counts wrong REST API application passwords, keeps account attack history through lockouts, refuses limited logins before password hashing, revokes trusted browsers on password changes, and adds an enforcement health card. Automatic administrator allowlist entries no longer exempt their IP from login limits; add your office IP yourself if you relied on that. Trusted browsers have to be trusted again once.
+Login limits for REST application passwords and before password hashing, revoked trusted browsers on password changes, and a health card. Automatic admin allowlist entries no longer exempt an IP from login limits. Trusted browsers must be trusted again once.
 
 = 0.6.1 =
 Clearer file integrity results for WordPress installs damaged by unpacking tools that shorten long file names.
@@ -451,7 +296,7 @@ Clearer file integrity results for WordPress installs damaged by unpacking tools
 Adds a daily check of core and plugin files against WordPress.org checksums, scan coverage reporting with a resumable uploads walk, and expiring automatic administrator allowlist entries (30 days, renewed while used; existing automatic entries get 30 days).
 
 = 0.5.1 =
-Security fixes from a code review: trusted proxy fallback, header-based country variables, unlock link revalidation and limits, required two-factor accounts without a method, and concurrent login and code checks. If you require two-factor authentication with email codes off, check the Login Security tab for accounts that can no longer log in.
+Security fixes: trusted proxy fallback, header country variables, unlock link limits, required two-factor without a method, concurrent logins. If you require two-factor with email codes off, check the Login Security tab for accounts that can no longer log in.
 
 = 0.5.0 =
 Adds login brute-force protection (on by default: 5 failed logins in 15 minutes lock an IP out, allowlisted IPs excepted) and two-factor authentication (optional until you require it on Settings → Login Security).

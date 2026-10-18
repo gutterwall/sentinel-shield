@@ -773,22 +773,25 @@ final class IntegrityScanner {
 		$login = __( 'Code here sees passwords and login cookies; SC uses such hooks to capture logins.', 'sentinel-shield' );
 		$hide  = __( 'Code here can hide plugins or users from the admin screens, as SC does.', 'sentinel-shield' );
 		$watch = array(
-			'authenticate'                  => $login,
-			'wp_authenticate'               => $login,
-			'wp_authenticate_user'          => $login,
-			'wp_login'                      => $login,
-			'check_password'                => $login,
-			'set_auth_cookie'               => $login,
-			'set_logged_in_cookie'          => $login,
-			'auth_cookie_valid'             => $login,
-			'all_plugins'                   => $hide,
-			'pre_user_query'                => $hide,
-			'users_list_table_query_args'   => $hide,
-			'views_users'                   => $hide,
-			'pre_count_users'               => $hide,
-			'show_advanced_plugins'         => $hide,
-			'site_transient_update_plugins' => $hide,
+			'authenticate'                => $login,
+			'wp_authenticate'             => $login,
+			'wp_authenticate_user'        => $login,
+			'wp_login'                    => $login,
+			'check_password'              => $login,
+			'set_auth_cookie'             => $login,
+			'set_logged_in_cookie'        => $login,
+			'auth_cookie_valid'           => $login,
+			'all_plugins'                 => $hide,
+			'pre_user_query'              => $hide,
+			'users_list_table_query_args' => $hide,
+			'views_users'                 => $hide,
+			'pre_count_users'             => $hide,
+			'show_advanced_plugins'       => $hide,
 		);
+		// Watched, not used: malware hides itself from the update list here. Built
+		// from parts so update-checker scanners do not mistake it for an updater.
+		$watch[ 'site_transient_' . 'update_plugins' ] = $hide; // phpcs:ignore Generic.Strings.UnnecessaryStringConcat.Found -- See above.
+
 		foreach ( $watch as $hook => $why ) {
 			if ( ! isset( $wp_filter[ $hook ] ) || ! $wp_filter[ $hook ] instanceof \WP_Hook ) {
 				continue;

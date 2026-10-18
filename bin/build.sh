@@ -58,7 +58,7 @@ if TAGGED=$(git rev-parse -q --verify "refs/tags/v$VERSION^{commit}"); then
 fi
 
 # 3. Generated docs, coding standards, tests.
-php bin/readme-settings.php --check || fail "readme.txt settings reference is out of date"
+php bin/settings-docs.php --check || fail "docs/SETTINGS.md is out of date (php bin/settings-docs.php --write)"
 if [ "$SKIP_TESTS" = 0 ]; then
 	[ -x vendor/bin/phpunit ] || fail "run composer install first (or use --skip-tests)"
 	vendor/bin/phpcs -q || fail "coding standards"

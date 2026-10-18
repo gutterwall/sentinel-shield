@@ -150,16 +150,16 @@ final class AuditExporter {
 	}
 
 	/**
-	 * End of a request that logged events: send them now (at most every ten
-	 * seconds per site), otherwise leave them to the scheduled run.
+	 * End of a request that logged events: schedules delivery in the
+	 * background (WP-Cron) instead of making a visitor's request wait on the
+	 * endpoint. The event table is the durable queue; nothing is lost if a run
+	 * fails, it is retried with increasing delays.
 	 */
 	public function on_shutdown(): void {
 		$state = self::state();
-		if ( (int) ( $state['next_try'] ?? 0 ) <= time() && Throttle::once( 'audit_push', 10 ) ) {
-			$this->run( 3.0 );
-		}
+		$when  = max( time(), (int) ( $state['next_try'] ?? 0 ) );
 		if ( ! wp_next_scheduled( self::CRON ) ) {
-			wp_schedule_single_event( max( time() + MINUTE_IN_SECONDS, (int) ( $state['next_try'] ?? 0 ) ), self::CRON );
+			wp_schedule_single_event( $when, self::CRON );
 		}
 	}
 
@@ -176,6 +176,7 @@ final class AuditExporter {
 		try {
 			$until = microtime( true ) + (float) $budget;
 			do {
+				Mutex::renew( 'audit_export' );
 				$state = self::state();
 				$rows  = $this->pending( (int) ( $state['cursor'] ?? $this->start_cursor() ) );
 				if ( ! $rows ) {
@@ -245,11 +246,11 @@ final class AuditExporter {
 	 */
 	private function pending( int $cursor ): array {
 		global $wpdb;
-		$cols = 'id, created_at, ip_text, event, module, reason, uri, user_agent, user_id, is_test, context';
-		$sql  = 'all' === $this->settings->get( 'audit.scope', 'security' )
-			? $wpdb->prepare( "SELECT {$cols} FROM %i WHERE id > %d ORDER BY id LIMIT %d", $this->events->table(), $cursor, self::BATCH ) // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Constant column list.
-			: $wpdb->prepare( "SELECT {$cols} FROM %i WHERE id > %d AND event NOT IN (%s, %s) ORDER BY id LIMIT %d", $this->events->table(), $cursor, self::NOISY[0], self::NOISY[1], self::BATCH ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Constant column list.
-		$rows = $wpdb->get_results( $sql, ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared, WordPress.DB.DirectDatabaseQuery -- Prepared above; live rows.
+		if ( 'all' === $this->settings->get( 'audit.scope', 'security' ) ) {
+			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT id, created_at, ip_text, event, module, reason, uri, user_agent, user_id, is_test, context FROM %i WHERE id > %d ORDER BY id LIMIT %d", $this->events->table(), $cursor, self::BATCH ), ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Live rows.
+		} else {
+			$rows = $wpdb->get_results( $wpdb->prepare( "SELECT id, created_at, ip_text, event, module, reason, uri, user_agent, user_id, is_test, context FROM %i WHERE id > %d AND event NOT IN (%s, %s) ORDER BY id LIMIT %d", $this->events->table(), $cursor, self::NOISY[0], self::NOISY[1], self::BATCH ), ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Live rows.
+		}
 		return is_array( $rows ) ? $rows : array();
 	}
 

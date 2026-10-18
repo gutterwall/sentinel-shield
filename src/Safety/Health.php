@@ -22,6 +22,7 @@ use SentinelShield\Modules\MaintenanceModule;
 use SentinelShield\Settings;
 use SentinelShield\Support\Mutex;
 use SentinelShield\Audit\AuditExporter;
+use SentinelShield\Support\DataDir;
 use SentinelShield\Support\Mailer;
 
 defined( 'ABSPATH' ) || exit;
@@ -169,6 +170,9 @@ final class Health {
 
 		// Early firewall and edge blocking.
 		$gate = $this->c->get( EarlyGate::class );
+		if ( $gate->wanted() && ! DataDir::ready() ) {
+			$add( 'private', __( 'Private folder', 'sentinel-shield' ), 'bad', DataDir::problem() . ' ' . __( 'The early firewall, server files and block log are not written until this is fixed.', 'sentinel-shield' ) );
+		}
 		if ( 'off' !== $gate->mode() ) {
 			$snap  = (array) get_site_option( EarlyGate::STATE, array() );
 			$issue = '';
@@ -186,15 +190,17 @@ final class Health {
 			$add( 'early', __( 'Early firewall', 'sentinel-shield' ), '' === $issue ? 'ok' : 'warn', '' === $issue ? __( 'Running with a current snapshot.', 'sentinel-shield' ) : $issue );
 		}
 		if ( $settings->get( 'cloudflare.sync', false ) ) {
-			$cf = CloudflareSync::state();
+			$cf     = CloudflareSync::state();
+			$status = (string) ( $cf['status'] ?? '' );
+			$fine   = 'active' === $status || ( 'applying' === $status && (int) ( $cf['time'] ?? 0 ) > time() - 10 * MINUTE_IN_SECONDS );
 			$add(
 				'cloudflare',
 				__( 'Cloudflare IP list', 'sentinel-shield' ),
-				! empty( $cf['ok'] ) ? 'ok' : 'warn',
-				! empty( $cf['ok'] )
+				$fine ? 'ok' : 'warn',
+				$fine
 					/* translators: 1: date, 2: count. */
-					? sprintf( __( 'Synced %1$s (%2$d items).', 'sentinel-shield' ), wp_date( 'Y-m-d H:i', (int) $cf['time'] ), (int) $cf['count'] )
-					: ( empty( $cf ) ? __( 'Not synced yet.', 'sentinel-shield' ) : (string) $cf['error'] )
+					? sprintf( __( 'Applied %1$s (%2$d items).', 'sentinel-shield' ), wp_date( 'Y-m-d H:i', (int) $cf['time'] ), (int) $cf['count'] )
+					: ( empty( $cf ) ? __( 'Not synced yet.', 'sentinel-shield' ) : ( '' !== (string) ( $cf['error'] ?? '' ) ? (string) $cf['error'] : __( 'Cloudflare has not confirmed the last update.', 'sentinel-shield' ) ) )
 			);
 		}
 
@@ -206,8 +212,8 @@ final class Health {
 			$failing ? 'bad' : 'ok',
 			$failing
 				/* translators: 1: kinds of email, 2: error. */
-				? sprintf( __( 'The last attempt failed for: %1$s (%2$s). Alerts and codes may not reach anyone; see Settings → Alerts & Audit Log.', 'sentinel-shield' ), implode( ', ', $failing ), (string) ( Mailer::health()[ $failing[0] ]['error'] ?? '' ) )
-				: __( 'No recent delivery failures.', 'sentinel-shield' )
+				? sprintf( __( 'The mail system refused the last message for: %1$s (%2$s). Alerts and codes may not reach anyone; see Settings → Alerts & Audit Log.', 'sentinel-shield' ), implode( ', ', $failing ), (string) ( Mailer::health()[ $failing[0] ]['error'] ?? '' ) )
+				: __( 'Recent messages were accepted by the mail system (arrival in the inbox cannot be checked).', 'sentinel-shield' )
 		);
 		$audit = AuditExporter::state();
 		if ( '' !== (string) $settings->get( 'audit.webhook_url', '' ) ) {

@@ -17,8 +17,7 @@ defined( 'ABSPATH' ) || exit;
 final class CloudflareRanges {
 
 	public const OPTION = 'sentinel_shield_cloudflare_ranges';
-	public const URL_V4 = 'https://www.cloudflare.com/ips-v4';
-	public const URL_V6 = 'https://www.cloudflare.com/ips-v6';
+	public const URL    = 'https://api.cloudflare.com/client/v4/ips';
 
 	/**
 	 * Snapshot shipped with the plugin, used until the first refresh succeeds.
@@ -70,44 +69,42 @@ final class CloudflareRanges {
 	}
 
 	/**
-	 * Downloads both lists. Keeps the previous list unless the new one looks sane.
+	 * Downloads the list from Cloudflare's public API (no account needed). Keeps
+	 * the previous list unless the new one looks sane.
 	 *
 	 * @return bool|\WP_Error
 	 */
 	public function refresh(): bool|\WP_Error {
+		$response = wp_safe_remote_get(
+			self::URL,
+			array(
+				'timeout'     => 10,
+				'redirection' => 2,
+			)
+		);
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+		$data = json_decode( (string) wp_remote_retrieve_body( $response ), true );
+		if ( 200 !== (int) wp_remote_retrieve_response_code( $response ) || ! is_array( $data ) || empty( $data['success'] ) || ! isset( $data['result'] ) || ! is_array( $data['result'] ) ) {
+			/* translators: %s: URL. */
+			return new \WP_Error( 'sentinel_shield_cf_http', sprintf( __( 'Unexpected response from %s.', 'sentinel-shield' ), self::URL ) );
+		}
 		$ranges = array();
 		$counts = array(
-			'v4' => 0,
-			'v6' => 0,
+			'ipv4_cidrs' => 0,
+			'ipv6_cidrs' => 0,
 		);
-		foreach ( array(
-			'v4' => self::URL_V4,
-			'v6' => self::URL_V6,
-		) as $kind => $url ) {
-			$response = wp_safe_remote_get(
-				$url,
-				array(
-					'timeout'     => 10,
-					'redirection' => 2,
-				)
-			);
-			if ( is_wp_error( $response ) ) {
-				return $response;
-			}
-			if ( 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
-				/* translators: %s: URL. */
-				return new \WP_Error( 'sentinel_shield_cf_http', sprintf( __( 'Unexpected response from %s.', 'sentinel-shield' ), $url ) );
-			}
-			$lines = preg_split( '/\R/', (string) wp_remote_retrieve_body( $response ) );
-			foreach ( false === $lines ? array() : $lines as $line ) {
-				$line = trim( $line );
-				if ( '' !== $line && null !== Cidr::parse( $line ) ) {
-					$ranges[] = $line;
-					++$counts[ $kind ];
+		foreach ( array_keys( $counts ) as $key ) {
+			foreach ( (array) ( $data['result'][ $key ] ?? array() ) as $range ) {
+				$range = trim( (string) $range );
+				if ( '' !== $range && null !== Cidr::parse( $range ) ) {
+					$ranges[] = $range;
+					++$counts[ $key ];
 				}
 			}
 		}
-		if ( $counts['v4'] < 5 || $counts['v6'] < 2 ) {
+		if ( $counts['ipv4_cidrs'] < 5 || $counts['ipv6_cidrs'] < 2 ) {
 			return new \WP_Error( 'sentinel_shield_cf_invalid', __( 'The downloaded Cloudflare list looked incomplete, so the previous list was kept.', 'sentinel-shield' ) );
 		}
 		update_site_option(

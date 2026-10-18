@@ -13,6 +13,7 @@ use SentinelShield\Admin\Actions;
 use SentinelShield\Geo\CountryDatabase;
 use SentinelShield\Geo\GeoResolver;
 use SentinelShield\Login\BruteForceGuard;
+use SentinelShield\Net\CloudflareRanges;
 use SentinelShield\Plugin;
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Repository\LoginAttemptRepository;
@@ -326,6 +327,65 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 	}
 
 	/**
+	 * Review 3 finding 5: a worker whose lease ran out cannot release the lock
+	 * row another worker has taken over since.
+	 */
+	public function test_fallback_lock_release_checks_the_owner(): void {
+		global $wpdb;
+		$no_named = static fn( string $q ): string => str_contains( $q, 'GET_LOCK' ) ? 'SELECT NULL' : $q;
+		add_filter( 'query', $no_named );
+		$row   = '_' . self::lock_name( 'owner_test' );
+		$table = $wpdb->base_prefix . 'options';
+		try {
+			$this->assertTrue( Mutex::acquire( 'owner_test', 0 ) );
+			$this->assertTrue( Mutex::renew( 'owner_test' ), 'the holder can extend its lease' );
+			// Our lease ran out and another worker took the row over.
+			$wpdb->update( $table, array( 'option_value' => ( time() + 60 ) . '|other-worker' ), array( 'option_name' => $row ) );
+			$this->assertFalse( Mutex::renew( 'owner_test' ), 'a lost lease cannot be renewed' );
+			Mutex::release( 'owner_test' );
+			$this->assertSame( ( time() + 60 ) . '|other-worker', $wpdb->get_var( $wpdb->prepare( 'SELECT option_value FROM %i WHERE option_name = %s', $table, $row ) ), 'the other worker\'s lock survives' );
+			$wpdb->delete( $table, array( 'option_name' => $row ) );
+		} finally {
+			remove_filter( 'query', $no_named );
+		}
+	}
+
+	/**
+	 * Review 3 finding 6: confirming identity on the two-factor page has an
+	 * attempt limit and, with an app set up, needs its code too.
+	 */
+	public function test_identity_confirmation_is_limited_and_needs_the_second_factor(): void {
+		$user = self::factory()->user->create_and_get( array( 'user_pass' => 'right-pass' ) );
+		wp_set_current_user( $user->ID );
+		$page    = new \SentinelShield\Admin\TwoFactorPage( Plugin::instance()->container() );
+		$confirm = new \ReflectionMethod( $page, 'confirm_identity' );
+		$confirm->setAccessible( true );
+		$try = static function ( array $post ) use ( $confirm, $page, $user ): bool {
+			$_POST = $post;
+			try {
+				return (bool) $confirm->invoke( $page, get_userdata( $user->ID ) );
+			} finally {
+				$_POST = array();
+			}
+		};
+		$this->assertTrue( $try( array( 'password' => 'right-pass' ) ), 'no second factor: the password is enough' );
+
+		$users  = Plugin::instance()->container()->get( UserTwoFactor::class );
+		$secret = $users->pending_secret( $user->ID );
+		$users->enable_totp( $user->ID, \SentinelShield\TwoFactor\Totp::code( $secret, intdiv( time(), 30 ) - 2 ), time() - 60 );
+		$this->assertFalse( $try( array( 'password' => 'right-pass' ) ), 'with an app, the password alone is not enough' );
+		$this->assertTrue( $try( array( 'password' => 'right-pass', 'code' => \SentinelShield\TwoFactor\Totp::code( $secret, intdiv( time(), 30 ) ) ) ) );
+
+		for ( $i = 0; $i < 5; $i++ ) {
+			$this->assertFalse( $try( array( 'password' => 'wrong' ) ) );
+		}
+		$this->assertFalse( $try( array( 'password' => 'right-pass', 'code' => \SentinelShield\TwoFactor\Totp::code( $secret, intdiv( time(), 30 ) + 1 ) ) ), 'locked after five failures, even with the right answers' );
+		update_user_meta( $user->ID, UserTwoFactor::META . 'reauth_fails', array( time() - 1000 ) );
+		$this->assertTrue( $try( array( 'password' => 'right-pass', 'code' => \SentinelShield\TwoFactor\Totp::code( $secret, intdiv( time(), 30 ) + 1 ) ) ), 'open again after 15 minutes' );
+		wp_set_current_user( 0 );
+	}
+
+	/**
 	 * Concurrency in the brute-force limits: while another login from the same
 	 * IP is in progress, a parallel one is refused (not counted) instead of
 	 * slipping past the limit check.
@@ -358,5 +418,33 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 		$guard->failed( 'someone', new \WP_Error( 'incorrect_password' ) );
 		$this->assertFalse( Mutex::holds( $name ) );
 		$this->assertSame( 1, $c->get( LoginAttemptRepository::class )->count_since( 0 ) );
+	}
+
+	public function test_cloudflare_ranges_come_from_the_public_api(): void {
+		$body   = '';
+		$fake   = static function ( $pre, $args, $url ) use ( &$body ) {
+			return CloudflareRanges::URL === $url ? array(
+				'response' => array( 'code' => 200 ),
+				'body'     => $body,
+			) : $pre;
+		};
+		$ranges = new CloudflareRanges();
+		delete_site_option( CloudflareRanges::OPTION );
+		add_filter( 'pre_http_request', $fake, 10, 3 );
+		try {
+			$body = (string) wp_json_encode( array( 'success' => true, 'result' => array( 'ipv4_cidrs' => array( '198.51.100.0/24' ), 'ipv6_cidrs' => array( '2001:db8::/32' ) ) ) );
+			$this->assertWPError( $ranges->refresh(), 'a list that looks incomplete is refused' );
+			$this->assertSame( CloudflareRanges::BUNDLED, $ranges->all() );
+			$v4   = array( '192.0.2.0/24', '198.51.100.0/24', '203.0.113.0/24', '100.64.0.0/24', '100.64.1.0/24' );
+			$body = (string) wp_json_encode( array( 'success' => true, 'result' => array( 'ipv4_cidrs' => array_merge( $v4, array( 'junk' ) ), 'ipv6_cidrs' => array( '2001:db8::/32', '2001:db9::/32' ) ) ) );
+			$this->assertTrue( $ranges->refresh() );
+			$this->assertSame( array_merge( $v4, array( '2001:db8::/32', '2001:db9::/32' ) ), $ranges->all() );
+			$body = '{"success":false}';
+			$this->assertWPError( $ranges->refresh() );
+			$this->assertCount( 7, $ranges->all(), 'the last good list is kept' );
+		} finally {
+			remove_filter( 'pre_http_request', $fake, 10 );
+			delete_site_option( CloudflareRanges::OPTION );
+		}
 	}
 }

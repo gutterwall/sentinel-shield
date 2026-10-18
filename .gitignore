@@ -2,3 +2,4 @@
 /node_modules/
 /dist/
 .phpunit.result.cache
+__pycache__/

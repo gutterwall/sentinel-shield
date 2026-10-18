@@ -12,8 +12,9 @@ namespace SentinelShield\Support;
 defined( 'ABSPATH' ) || exit;
 
 /**
- * Loads the text domain on init, or immediately when the block page is rendered
- * before init (the early firewall exits before init ever fires).
+ * Leaves language packs to WordPress's just-in-time loading, loads a translation
+ * shipped in the plugin's languages folder, and loads immediately when the block
+ * page is rendered before init (the firewall exits before init ever fires).
  */
 final class I18n {
 
@@ -25,7 +26,13 @@ final class I18n {
 			return;
 		}
 		if ( did_action( 'after_setup_theme' ) || doing_action( 'after_setup_theme' ) ) {
-			load_plugin_textdomain( 'sentinel-shield', false, dirname( plugin_basename( SENTINEL_SHIELD_FILE ) ) . '/languages' );
+			// WordPress loads language packs (wp-content/languages/plugins) just in
+			// time; only a translation shipped in the plugin's own folder needs help.
+			$locale = determine_locale();
+			$file   = dirname( SENTINEL_SHIELD_FILE ) . '/languages/sentinel-shield-' . $locale . '.mo';
+			if ( ! is_readable( WP_LANG_DIR . '/plugins/sentinel-shield-' . $locale . '.mo' ) && is_readable( $file ) ) {
+				load_textdomain( 'sentinel-shield', $file, $locale );
+			}
 			return;
 		}
 		self::load_early();

@@ -27,4 +27,14 @@ final class RequestTest extends TestCase {
 		$this->assertSame( '/wp-login.php?sentinel_unlocked=1', Request::redact_uri( '/wp-login.php?sentinel_unlocked=1' ) );
 		$this->assertSame( '/?s=sentinel_unlock=x', Request::redact_uri( '/?s=sentinel_unlock=x' ) );
 	}
+
+	public function test_redacts_reset_keys_nonces_and_tokens(): void {
+		$this->assertSame(
+			'/wp-login.php?action=rp&key=[redacted]&login=jane',
+			Request::redact_uri( '/wp-login.php?action=rp&key=AbC123xyz&login=jane' )
+		);
+		$this->assertSame( '/wp-admin/post.php?post=5&_wpnonce=[redacted]&action=trash', Request::redact_uri( '/wp-admin/post.php?post=5&_wpnonce=1a2b3c&action=trash' ) );
+		$this->assertSame( '/?access_token=[redacted]&page=2', Request::redact_uri( '/?access_token=eyJhbGci&page=2' ) );
+		$this->assertSame( '/?monkey=1&keyword=x', Request::redact_uri( '/?monkey=1&keyword=x' ), 'only whole parameter names' );
+	}
 }

@@ -42,6 +42,7 @@ final class DocsTab {
 			'ss-doc-scans'     => __( 'Malware scan, file integrity, health and performance', 'sentinel-shield' ),
 			'ss-doc-edge'      => __( 'Early firewall, server and Cloudflare blocking', 'sentinel-shield' ),
 			'ss-doc-audit'     => __( 'Alerts and the remote audit log', 'sentinel-shield' ),
+			'ss-doc-privacy'   => __( 'What leaves this site, and what Sentinel Shield does not do', 'sentinel-shield' ),
 			'ss-doc-settings'  => __( 'Every setting and what it does', 'sentinel-shield' ),
 			'ss-doc-constants' => __( 'wp-config.php constants', 'sentinel-shield' ),
 			'ss-doc-recovery'  => __( 'Locked out? Ways back in', 'sentinel-shield' ),
@@ -52,13 +53,14 @@ final class DocsTab {
 		}
 		echo '</ol>';
 		/* translators: %s: version number. */
-		echo '<p class="description">' . esc_html( sprintf( __( 'Sentinel Shield %s. The same reference is in readme.txt in the plugin folder.', 'sentinel-shield' ), SENTINEL_SHIELD_VERSION ) ) . '</p></div>';
+		echo '<p class="description">' . esc_html( sprintf( __( 'Sentinel Shield %s. The settings reference is also in docs/SETTINGS.md in the source repository.', 'sentinel-shield' ), SENTINEL_SHIELD_VERSION ) ) . '</p></div>';
 
 		$this->admins();
 		$this->login();
 		$this->scans();
 		$this->edge();
 		$this->audit();
+		$this->privacy();
 		$this->settings();
 		$this->constants();
 		$this->recovery();
@@ -206,6 +208,31 @@ final class DocsTab {
 	}
 
 	/**
+	 * What leaves the site, and the plugin's scope.
+	 */
+	private function privacy(): void {
+		echo '<div class="ss-card ss-docs" id="ss-doc-privacy"><h2>' . esc_html__( 'What leaves this site, and what Sentinel Shield does not do', 'sentinel-shield' ) . '</h2>';
+		$this->section(
+			__( 'Connections to other services', 'sentinel-shield' ),
+			array(
+				__( 'Sentinel Shield sends nothing about your visitors to any service unless you set up the remote audit log or Cloudflare sync. Everything else is a download your server makes; the provider sees your server\'s IP address and when it checks.', 'sentinel-shield' ),
+				__( 'On by default: the file integrity check asks WordPress.org (api.wordpress.org, downloads.wordpress.org) for the published checksums of your WordPress version and locale and of each installed plugin and version, the same information WordPress\'s own update checks send. Switch it off on the Malware Lockdown tab.', 'sentinel-shield' ),
+				__( 'Only when you choose them: each blocklist you enable is downloaded from its provider with a generic "SentinelShield" user agent and no site address; the DB-IP country database comes from db-ip.com; Cloudflare\'s address ranges come from api.cloudflare.com when the Cloudflare IP preset is selected.', 'sentinel-shield' ),
+				__( 'Cloudflare sync sends the blocked addresses and ranges of the current policy (no visitor data beyond those addresses) to your own Cloudflare account, with your API token.', 'sentinel-shield' ),
+				__( 'The remote audit log sends each event to your webhook as JSON with these fields: id, time, event, module, ip, reason, uri (the requested path and query string, with reset keys, nonces, passwords and tokens masked), agent (the browser\'s user agent), user_id, test, context (event details, such as the username that was tried, a country code or a file path), plus seq, prev and hash for the chain; each delivery also carries the site address. Syslog lines hold only site (host name), id, event, module, ip and reason; where your system log goes from there is up to your server.', 'sentinel-shield' ),
+				__( 'The heartbeat is a plain request to the URL you enter, with no data. Emails (alerts to the site admin address, two-factor codes and unlock links to the account\'s address) go through WordPress\'s mailer and whatever mail service it uses. To confirm the private folder cannot be downloaded, the site may request a test file from itself.', 'sentinel-shield' ),
+			)
+		);
+		$this->section(
+			__( 'What it does not do', 'sentinel-shield' ),
+			array(
+				__( 'Sentinel Shield blocks by IP address, account and country, hardens logins, and detects tampering. It has no vulnerability database: it does not tell you which installed plugins or themes have known security holes, and it has no virtual patches for them. It does not inspect request contents for attacks such as SQL injection or cross-site scripting, so an exploit sent from an address that is not on a blocklist reaches WordPress. It cannot absorb a volumetric DDoS attack, which has to be stopped upstream (your host or a CDN). It does not make backups or remove malware for you. Use it alongside updates, backups kept off the server and, where needed, those services.', 'sentinel-shield' ),
+			)
+		);
+		echo '</div>';
+	}
+
+	/**
 	 * Settings reference generated from the schema.
 	 */
 	private function settings(): void {
@@ -244,6 +271,7 @@ final class DocsTab {
 		$rows = array(
 			"define( 'SENTINEL_SHIELD_DISABLE', true );" => __( 'Emergency switch: Sentinel Shield loads nothing (no blocking, no lockdown measures). Use it to get back in, fix the cause, then remove the line.', 'sentinel-shield' ),
 			"define( 'SENTINEL_SHIELD_ADMINS', 'admin#1, jane#7' );" => __( 'Fixes the approved administrator list in this file and always enforces the administrator lock. Pin each login to its user ID with #ID. See "Administrator approvals" above.', 'sentinel-shield' ),
+			"define( 'SENTINEL_SHIELD_DATA_DIR', '/srv/private/sentinel-shield' );" => __( 'The private folder for the early firewall snapshot, its block log and the server blocklist files. It must be outside the web root and writable by PHP. Default: a sentinel-shield-data folder next to the WordPress folder.', 'sentinel-shield' ),
 			"define( 'DISALLOW_FILE_EDIT', true );"      => __( 'WordPress\'s own switch for the plugin and theme file editor. Stronger than the lockdown setting because it lives in a file instead of the database.', 'sentinel-shield' ),
 			"define( 'DISABLE_WP_CRON', true );"         => __( 'Stops page loads from running scheduled tasks. Only use it with a real server cron job (the line is shown on the Scheduled Tasks page), otherwise blocklist updates and the malware scan stop.', 'sentinel-shield' ),
 		);
@@ -276,7 +304,7 @@ final class DocsTab {
 				__( 'After a correct password, accounts with two-factor authentication are asked for a code before they are logged in. No login cookie exists until the code is right. The code screen lasts 10 minutes and allows five tries; each wrong code counts as a failed login for the brute-force limits.', 'sentinel-shield' ),
 				__( 'Limits are per account, not per login, so starting the login again resets nothing: at most 10 code screens, 6 emailed codes (one a minute) and 15 wrong codes an hour per account. Up to three code screens can be open at once, so someone else starting a login does not cancel yours, and a correct code closes them all.', 'sentinel-shield' ),
 				__( 'Passkeys and security keys are the strongest method: a phone, the computer\'s Windows Hello or Touch ID, or a security key such as a YubiKey confirms the login with a fingerprint, face or PIN. A passkey only works on this site, so it cannot be phished. Each user can add several (name them so they can tell them apart). Passkeys need an https:// site (or localhost).', 'sentinel-shield' ),
-				__( 'Fresh confirmation: adding or removing any method (passkey, app, email codes) or creating new backup codes needs the user to confirm their password, or use a passkey, within the last 10 minutes in the same login session. Someone who steals a login cookie therefore cannot plant their own authenticator. Administrators resetting another user\'s two-factor confirm their own password.', 'sentinel-shield' ),
+				__( 'Fresh confirmation: adding or removing any method (passkey, app, email codes) or creating new backup codes needs the user to confirm their identity within the last 10 minutes in the same login session: with a passkey, or with their password plus a code from their authenticator app or a backup code once they have one. Five wrong confirmations in 15 minutes block further tries for a while, and each one counts as a failed login for the brute-force limits. Someone who steals a login cookie therefore cannot plant their own authenticator, or guess the password from inside the session. Administrators resetting another user\'s two-factor confirm their own password.', 'sentinel-shield' ),
 				__( 'Methods, set up by each user under Users → Two-Factor Authentication: an authenticator app (any app that supports time-based codes; the QR code is drawn by this site, so the secret never leaves it), codes by email (8 digits, valid 10 minutes, if this site allows them), and ten one-time backup codes for a lost phone. Authenticator secrets are encrypted with keys from wp-config.php; backup and email codes are stored only as keyed hashes.', 'sentinel-shield' ),
 				__( 'Requiring it: "Required for administrator-level accounts" (recommended) or "for every account". An account that is required to use it but has no authenticator app gets a code by email at each login and a reminder in the dashboard until it sets one up. If email codes are off, such accounts cannot log in at all until an app is set up for them; the Login Security tab lists them, and you cannot switch email codes off while your own login needs them. A required account is never let in with only its password. Check that this site can send email before requiring it.', 'sentinel-shield' ),
 				__( 'XML-RPC and the REST API cannot show a code screen, so password logins there are refused for two-factor accounts. Application passwords (Users → Profile) keep working: they are separate, revocable secrets that only a logged-in user can create.', 'sentinel-shield' ),
@@ -334,10 +362,23 @@ final class DocsTab {
 	private function edge(): void {
 		echo '<div class="ss-card ss-docs" id="ss-doc-edge"><h2>' . esc_html__( 'Early firewall, server and Cloudflare blocking', 'sentinel-shield' ) . '</h2>';
 		$this->section(
+			__( 'One policy for every layer', 'sentinel-shield' ),
+			array(
+				__( 'WordPress, the early firewall, the server blocklist files and the Cloudflare list all apply the same policy: the enforced block rules minus the allowlist and this server\'s own addresses. An allowlisted address is therefore never blocked by any layer, even when it falls inside a blocked range (the range is split around it). While protection, the IP gate module or SENTINEL_SHIELD_DISABLE switches enforcement off, the policy is empty everywhere. Each change gets a new generation number, shown on the Server & CDN tab, so you can see whether every layer has caught up.', 'sentinel-shield' ),
+				__( 'The policy is rebuilt once at the end of any request that changed rules, and again the moment the next temporary rule expires, so short lockouts end everywhere on time (Cloudflare within its update interval, the web server at its next reload).', 'sentinel-shield' ),
+			)
+		);
+		$this->section(
+			__( 'The private folder', 'sentinel-shield' ),
+			array(
+				__( 'The snapshot (which contains your allowlisted addresses), the early firewall\'s block log and the server blocklist files are written to a private folder outside the web root: sentinel-shield-data next to the WordPress folder, or the folder set with SENTINEL_SHIELD_DATA_DIR. Rules in .htaccess only work on Apache, so they are not relied on. The folder counts as private only when it is outside the web server\'s document root, or when a test file placed in it cannot be downloaded. Until that is confirmed, none of these files are written, and the Server & CDN tab and the health card say why.', 'sentinel-shield' ),
+			)
+		);
+		$this->section(
 			__( 'Early firewall', 'sentinel-shield' ),
 			array(
 				__( 'The normal firewall runs when Sentinel Shield loads, after WordPress itself and any plugins loaded before it. The early firewall (early-gate.php) runs first: as a must-use plugin before other plugins, or through auto_prepend_file before WordPress and before any other PHP file on the site. A blocked IP then costs almost nothing, even during a flood.', 'sentinel-shield' ),
-				__( 'It does not load WordPress. It reads a snapshot (uploads/sentinel-shield/gate.json) that WordPress writes after every rule or settings change and hourly: your proxy setup, this server\'s addresses, the allowlist, the enforced block rules (test mode is respected) and the compiled blocklist feeds. The snapshot expires with the next rule expiry (at most a day); a stale, missing or damaged snapshot makes the early firewall step aside, so it never blocks more than WordPress would. Allowlisted IPs, this server\'s cron requests and unlock links always pass, and its blocks appear in the event log (module early_gate) within the hour.', 'sentinel-shield' ),
+				__( 'It does not load WordPress. It reads the snapshot (gate.json and two compact binary range files) from the private folder: your proxy setup, the allowlist, the effective block policy and the compiled blocklist feeds, all looked up with a binary search. The snapshot expires with the next rule expiry (at most a day); a stale, missing or damaged snapshot makes the early firewall step aside, so it never blocks more than WordPress would. Requests through a proxy it cannot verify, this server\'s cron requests and unlock links are left to WordPress. Its blocks appear in the event log (module early_gate) within the hour; during a flood, only one block in ten is logged once the log passes 100 KB.', 'sentinel-shield' ),
 				__( 'For auto_prepend_file, add the line shown on the Server & CDN tab to php.ini, .user.ini, an Apache php_value line or nginx\'s PHP_VALUE, then restart PHP. Only one file can be prepended; if another security plugin uses it (Wordfence does), use the must-use plugin option. The malware scan recognizes this plugin\'s own gate and loader and does not report them, unless they were changed.', 'sentinel-shield' ),
 				__( 'Emergency switch-off without WordPress: create an empty file named gate.disabled next to gate.json (or delete gate.json).', 'sentinel-shield' ),
 			)
@@ -345,8 +386,9 @@ final class DocsTab {
 		$this->section(
 			__( 'Blocking at the web server or at Cloudflare', 'sentinel-shield' ),
 			array(
-				__( 'PHP only runs for PHP requests; images, scripts and other static files are served without it. To refuse blocked IPs for everything, let the web server or the CDN do it. "Write nginx and Apache blocklist files" keeps nginx-deny.conf and apache-deny.conf in uploads/sentinel-shield current with your enforced block rules (manual rules and lockouts; blocklist feeds are left out because they can be very large): include the file in the server configuration; nginx needs a reload to pick up changes.', 'sentinel-shield' ),
-				__( 'With Cloudflare, Sentinel Shield can replace the items of one Cloudflare account IP list with the same rules whenever they change (at most 10,000; single IPv6 addresses become their /64). Create an IP list, an API token with "Account Filter Lists: Edit", and a WAF custom rule (ip.src in $your_list) with the action Block. The token is stored encrypted and never exported. Blocked IPs then never reach your server at all.', 'sentinel-shield' ),
+				__( 'PHP only runs for PHP requests; images, scripts and other static files are served without it. To refuse blocked IPs for everything, let the web server or the CDN do it. "Write nginx and Apache blocklist files" keeps nginx-deny.conf and apache-deny.conf in the private folder current with the policy (manual rules and lockouts; blocklist feeds are left out because they can be very large): include the file in the server configuration. The web server only applies changes after a reload, so reload regularly or leave short lockouts to WordPress and the early firewall.', 'sentinel-shield' ),
+				__( 'With Cloudflare, Sentinel Shield replaces the items of one Cloudflare account IP list with the policy (at most 10,000 entries) and then asks Cloudflare until its bulk operation has completed; the list only shows as active after that. Uploads happen at most every five minutes and only when the list changed; an emptied policy is sent at once. Cloudflare lists take IPv6 ranges up to /64 only: single IPv6 addresses are left out by default (WordPress still blocks them), or widened to their /64 with the IPv6 setting, never over an allowlisted address. Create an IP list, an API token with "Account Filter Lists: Edit", and a WAF custom rule (ip.src in $your_list) with the action Block. The token is stored encrypted and never exported.', 'sentinel-shield' ),
+				__( 'Switching off: when protection is off, the server files and the Cloudflare list get the empty policy. Turning Cloudflare sync off, or deactivating the plugin, empties the Cloudflare list (if that fails, the Server & CDN tab says the rules are still active at Cloudflare). Deactivating also removes the must-use loader and the snapshot and empties the server files, which are kept so the server configuration that includes them keeps working. Uninstalling deletes the private folder\'s files.', 'sentinel-shield' ),
 			)
 		);
 		echo '</div>';
@@ -360,14 +402,14 @@ final class DocsTab {
 		$this->section(
 			__( 'Alert delivery', 'sentinel-shield' ),
 			array(
-				__( 'Every email Sentinel Shield sends (security alerts, two-factor codes, unlock links) records whether WordPress\'s mailer accepted it, with the mailer\'s error message when not. A failing alert email shows as a problem on the Enforcement health card, and Settings → Alerts & Audit Log lists the last success and failure per kind. "Send a test alert" tries every channel at once.', 'sentinel-shield' ),
+				__( 'Every email Sentinel Shield sends (security alerts, two-factor codes, unlock links) records whether it was accepted by the mail system (WordPress\'s mailer and the mail server it hands off to), with the error message when not. Whether it then reaches the inbox cannot be checked from the site. A failing alert email shows as a problem on the Enforcement health card, and Settings → Alerts & Audit Log lists the last success and failure per kind. "Send a test alert" tries every channel at once.', 'sentinel-shield' ),
 				__( 'A heartbeat URL is pinged every hour; a monitoring service such as healthchecks.io alerts you when the pings stop, which is what happens when the site is down, Sentinel Shield was switched off, or scheduled jobs stopped.', 'sentinel-shield' ),
 			)
 		);
 		$this->section(
 			__( 'Remote audit log', 'sentinel-shield' ),
 			array(
-				__( 'Whoever takes over a site can empty its database, and with it the event log. With a webhook set, security events (or all events) are POSTed as JSON to your endpoint as they happen: when the request that logged them ends, and from a retry queue with growing delays when the endpoint is down, so nothing is lost. Events can also go to the server\'s syslog (facility auth, tag sentinel-shield).', 'sentinel-shield' ),
+				__( 'Whoever takes over a site can empty its database, and with it the event log. With a webhook set, security events (or all events) are POSTed as JSON to your endpoint by a background job that starts within seconds of the event (never inside a visitor\'s request), with growing delays between retries while the endpoint is down, so nothing is lost. Events can also go to the server\'s syslog (facility auth, tag sentinel-shield), written immediately.', 'sentinel-shield' ),
 				__( 'Each delivery is signed: the header X-Sentinel-Shield-Signature carries t=<time>,v1=HMAC-SHA256(secret, "<time>.<body>"). Each event carries seq (a running number), prev and hash, where hash is SHA-256 of prev, a newline and the event\'s JSON without seq, prev and hash. A gap in seq, or a prev that is not the previous hash, means events are missing or were changed. wp sentinel audit-export prints the stored events in the same format, for SIEM imports or an offline copy.', 'sentinel-shield' ),
 			)
 		);

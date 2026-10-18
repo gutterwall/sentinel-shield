@@ -45,8 +45,16 @@ final class DocsTabTest extends \WP_UnitTestCase {
 		$this->assertStringNotContainsString( 'Save settings', $html );
 	}
 
-	public function test_readme_reference_is_current(): void {
-		exec( escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( dirname( __DIR__, 2 ) . '/bin/readme-settings.php' ) . ' --check 2>&1', $out, $code );
+	public function test_settings_reference_is_current(): void {
+		exec( escapeshellarg( PHP_BINARY ) . ' ' . escapeshellarg( dirname( __DIR__, 2 ) . '/bin/settings-docs.php' ) . ' --check 2>&1', $out, $code );
 		$this->assertSame( 0, $code, implode( "\n", $out ) );
+	}
+
+	public function test_privacy_and_scope_are_documented(): void {
+		$html = $this->render();
+		$this->assertStringContainsString( 'id="ss-doc-privacy"', $html );
+		foreach ( array( 'user_id', 'context', 'syslog', 'no vulnerability database', 'SENTINEL_SHIELD_DATA_DIR' ) as $text ) {
+			$this->assertStringContainsString( $text, $html );
+		}
 	}
 }

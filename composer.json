@@ -28,7 +28,7 @@
         "lint:fix": "phpcbf",
         "test": "phpunit",
         "test:integration": "phpunit --testsuite integration",
-        "docs": "php bin/readme-settings.php --write",
+        "docs": "php bin/settings-docs.php --write",
         "build": "bin/build.sh"
     },
     "config": {

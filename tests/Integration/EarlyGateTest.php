@@ -14,7 +14,9 @@ namespace SentinelShield\Tests\Integration;
 use SentinelShield\Firewall\CloudflareSync;
 use SentinelShield\Firewall\EarlyGate;
 use SentinelShield\Firewall\RuleCache;
-use SentinelShield\Geo\GeoUpdater;
+use SentinelShield\Support\DataDir;
+use SentinelShield\Net\RangeMath;
+use SentinelShield\Net\IpRangeSet;
 use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Net\Cidr;
 use SentinelShield\Plugin;
@@ -35,8 +37,20 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 
 	private int $port = 0;
 
+	private string $data = '';
+
+	/**
+	 * Points the private folder at a temporary directory.
+	 */
+	public function private_dir(): string {
+		return $this->data;
+	}
+
 	public function set_up(): void {
 		parent::set_up();
+		$this->data = sys_get_temp_dir() . '/ss-data-' . wp_generate_password( 6, false );
+		add_filter( 'sentinel_shield_data_dir', array( $this, 'private_dir' ) );
+		DataDir::recheck();
 		global $wpdb;
 		$c = Plugin::instance()->container();
 		$wpdb->query( $wpdb->prepare( 'DELETE FROM %i', $c->get( BlockRepository::class )->table() ) );
@@ -56,11 +70,10 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 		}
 		EarlyGate::delete_files();
 		EarlyGate::remove_loader();
-		foreach ( array( 'gate.disabled', 'early-blocks.log' ) as $file ) {
-			if ( is_file( GeoUpdater::dir() . '/' . $file ) ) {
-				unlink( GeoUpdater::dir() . '/' . $file );
-			}
-		}
+		array_map( 'unlink', (array) glob( $this->data . '/*' ) );
+		@rmdir( $this->data ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		remove_filter( 'sentinel_shield_data_dir', array( $this, 'private_dir' ) );
+		delete_site_option( DataDir::OPTION );
 		delete_site_option( Settings::OPTION );
 		delete_site_option( CloudflareSync::TOKEN );
 		delete_site_option( CloudflareSync::STATE );
@@ -154,16 +167,25 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 		$repo->add( 'allow', Cidr::parse( '203.0.113.7' ), 'office', 'manual' );
 
 		$data = $this->gate()->compile();
-		$this->assertEqualsCanonicalizing( array( '203.0.113.0/24', '198.51.100.5' ), $data['blocked'] );
+		$set  = IpRangeSet::from_strings( $data['blocked'] );
+		$this->assertTrue( $set->contains( (string) inet_pton( '203.0.113.6' ) ) );
+		$this->assertFalse( $set->contains( (string) inet_pton( '203.0.113.7' ) ), 'the allowlisted address is cut out of the exported policy' );
+		$this->assertTrue( $set->contains( (string) inet_pton( '198.51.100.5' ) ) );
+		$this->assertContains( '203.0.113.128/25', $data['blocked'] );
 		$this->assertLessThanOrEqual( time() + 600, $data['snapshot']['valid_until'], 'expires with the lockout' );
 		$this->assertTrue( $data['snapshot']['enabled'] );
 
 		// Test mode for automatic rules only: lockouts are left out, manual rules stay.
 		$data = $this->gate( array( 'general' => array( 'test_mode' => true, 'test_mode_scope' => 'automatic' ) ) )->compile();
-		$this->assertSame( array( '203.0.113.0/24' ), $data['blocked'] );
+		$this->assertFalse( IpRangeSet::from_strings( $data['blocked'] )->contains( (string) inet_pton( '198.51.100.5' ) ) );
+		$this->assertTrue( IpRangeSet::from_strings( $data['blocked'] )->contains( (string) inet_pton( '203.0.113.1' ) ) );
 
+		// Protection off, or the IP gate off: every layer gets an empty policy.
 		$data = $this->gate( array( 'general' => array( 'enabled' => false ) ) )->compile();
 		$this->assertFalse( $data['snapshot']['enabled'] );
+		$this->assertSame( array(), $data['blocked'] );
+		$data = $this->gate( array( 'modules' => array( 'ip_gate' => array( 'enabled' => false ) ) ) )->compile();
+		$this->assertSame( array(), $data['blocked'] );
 	}
 
 	public function test_the_gate_blocks_before_anything_else_runs(): void {
@@ -197,9 +219,9 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 		$this->assertSame( 'early_gate', $events[0]['module'] );
 
 		// Emergency file: everything passes.
-		touch( GeoUpdater::dir() . '/gate.disabled' );
+		touch( DataDir::path() . '/gate.disabled' );
 		$this->assertSame( 200, $this->fetch( '203.0.113.50' )[0] );
-		unlink( GeoUpdater::dir() . '/gate.disabled' );
+		unlink( DataDir::path() . '/gate.disabled' );
 
 		// A stale snapshot is not used.
 		$json                = json_decode( (string) file_get_contents( EarlyGate::path() ), true );
@@ -232,13 +254,15 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 		$this->assertSame( 200, $this->fetch( '2001:db8:beef::1' )[0] );
 	}
 
-	public function test_requests_without_a_visitor_address_get_no_allowlist_privilege(): void {
+	public function test_proxy_fallback_requests_are_left_to_wordpress(): void {
 		$repo = Plugin::instance()->container()->get( BlockRepository::class );
 		$repo->add( 'allow', Cidr::parse( '127.0.0.1' ), 'proxy', 'manual' );
 		$repo->add( 'block', Cidr::parse( '127.0.0.0/8' ), 'test', 'manual' );
 		$this->gate()->rebuild();
 		$this->start_server();
-		$this->assertSame( 403, $this->fetch( null )[0], 'the proxy did not name a visitor: its allowlist entry does not apply' );
+		// The exported policy never blocks allowlisted or server addresses, so the early
+		// gate leaves this case to WordPress (which ignores the allowlist for it).
+		$this->assertSame( 200, $this->fetch( null )[0], 'the early gate never blocks more than WordPress' );
 		$this->assertSame( 'CRON', $this->fetch( null, '/wp-cron.php' )[1], 'cron from this server always passes' );
 	}
 
@@ -248,7 +272,7 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 		$this->assertSame( '', $gate->sync_loader() );
 		$this->assertTrue( EarlyGate::is_own_loader( EarlyGate::loader_path() ) );
 		$gate->rebuild();
-		$dir = GeoUpdater::dir();
+		$dir = DataDir::path();
 		$this->assertStringContainsString( 'deny 203.0.113.0/24;', (string) file_get_contents( $dir . '/nginx-deny.conf' ) );
 		$this->assertStringContainsString( 'Require not ip 203.0.113.0/24', (string) file_get_contents( $dir . '/apache-deny.conf' ) );
 
@@ -287,12 +311,116 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 		}
 	}
 
-	public function test_cloudflare_items_and_sync(): void {
-		$this->assertSame(
-			array( '203.0.113.5', '10.0.0.0/8', '2001:db8::/64', '2001:db8:1::/48' ),
-			CloudflareSync::items( array( '203.0.113.5/32', '10.0.0.0/8', '1.0.0.0/7', '2001:db8::1/128', '2001:db8::/112', '2001:db8:1::/48', 'junk' ) )
-		);
+	public function test_exports_match_what_wordpress_blocks(): void {
+		$repo = Plugin::instance()->container()->get( BlockRepository::class );
+		$repo->add( 'block', Cidr::parse( '203.0.113.0/24' ), 'manual', 'manual' );
+		$repo->add( 'allow', Cidr::parse( '203.0.113.7' ), 'admin', 'admin_auto' );
+		$repo->add( 'block', Cidr::parse( '2001:db8::/48' ), 'manual', 'manual' );
+		$repo->add( 'allow', Cidr::parse( '2001:db8::10/124' ), 'office', 'manual' );
+		$repo->add( 'block', Cidr::parse( '127.0.0.0/8' ), 'oops', 'manual' );
+		$gate = $this->gate( array( 'firewall' => array( 'server_files' => true ) ) );
+		$gate->rebuild();
+		$nginx = (string) file_get_contents( DataDir::path() . '/nginx-deny.conf' );
+		$denied = IpRangeSet::from_strings( array_map( static fn( string $l ): string => substr( $l, 5, -1 ), array_values( array_filter( explode( "\n", $nginx ), static fn( string $l ): bool => str_starts_with( $l, 'deny ' ) ) ) ) );
+		$wp     = Plugin::instance()->container()->get( \SentinelShield\Firewall\Gate::class );
+		Plugin::instance()->container()->get( RuleCache::class )->flush();
+		foreach ( array( '203.0.113.6', '203.0.113.7', '203.0.113.8', '2001:db8::f', '2001:db8::10', '2001:db8::1f', '2001:db8::20', '127.0.0.1' ) as $ip ) {
+			$this->assertSame( $wp->evaluate( $ip, '/', false, true )->is_block() && ! str_starts_with( $ip, '127.' ), $denied->contains( (string) inet_pton( $ip ) ), "nginx and WordPress agree on $ip" );
+		}
+		$this->assertStringNotContainsString( '127.0.0', $nginx, 'this server is never blocked at the server' );
+		$apache = (string) file_get_contents( DataDir::path() . '/apache-deny.conf' );
+		$this->assertStringNotContainsString( 'Require not ip 203.0.113.0/24', $apache );
+		$this->assertStringContainsString( "Require not ip 203.0.113.6\n", $apache );
+		$this->assertStringNotContainsString( 'Require not ip 203.0.113.7', $apache );
+	}
 
+	public function test_nothing_sensitive_is_written_to_an_unconfirmed_folder(): void {
+		Plugin::instance()->container()->get( BlockRepository::class )->add( 'block', Cidr::parse( '203.0.113.0/24' ), 'manual', 'manual' );
+		$public = ABSPATH . 'ss-public-' . wp_generate_password( 6, false );
+		$filter = static fn(): string => $public;
+		add_filter( 'sentinel_shield_data_dir', $filter, 20 );
+		$_SERVER['DOCUMENT_ROOT'] = ABSPATH;
+		// The web server serves the probe file: the folder is public.
+		$serve = static function ( $pre, array $args, string $url ) use ( $public ) {
+			$file = $public . '/' . basename( (string) wp_parse_url( $url, PHP_URL_PATH ) );
+			return is_file( $file ) ? array( 'response' => array( 'code' => 200 ), 'body' => (string) file_get_contents( $file ) ) : array( 'response' => array( 'code' => 404 ), 'body' => '' );
+		};
+		$offline = static fn() => new \WP_Error( 'http_request_failed', 'unreachable' );
+		try {
+			add_filter( 'pre_http_request', $serve, 10, 3 );
+			$this->assertFalse( DataDir::recheck(), 'downloadable over HTTP' );
+			remove_filter( 'pre_http_request', $serve, 10 );
+			$state = $this->gate( array( 'firewall' => array( 'server_files' => true ) ) )->rebuild();
+			$this->assertStringContainsString( 'downloaded over the web', $state['error'] );
+			$this->assertFileDoesNotExist( $public . '/gate.json' );
+			$this->assertFileDoesNotExist( $public . '/nginx-deny.conf' );
+
+			add_filter( 'pre_http_request', $offline );
+			$this->assertNull( DataDir::recheck(), 'the site cannot reach itself: not confirmed' );
+			remove_filter( 'pre_http_request', $offline );
+			$state = $this->gate( array( 'firewall' => array( 'server_files' => true ) ) )->rebuild();
+			$this->assertStringContainsString( 'Could not confirm', $state['error'] );
+			$this->assertFileDoesNotExist( $public . '/gate.json' );
+		} finally {
+			remove_filter( 'pre_http_request', $serve, 10 );
+			remove_filter( 'pre_http_request', $offline );
+			unset( $_SERVER['DOCUMENT_ROOT'] );
+			remove_filter( 'sentinel_shield_data_dir', $filter, 20 );
+			@rmdir( $public ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			DataDir::recheck();
+		}
+	}
+
+	public function test_deactivation_stops_every_layer(): void {
+		Plugin::instance()->container()->get( BlockRepository::class )->add( 'block', Cidr::parse( '203.0.113.0/24' ), 'manual', 'manual' );
+		$gate = $this->gate( array( 'firewall' => array( 'early_gate' => 'mu_plugin', 'server_files' => true ) ) );
+		$gate->sync_loader();
+		$gate->rebuild();
+		$this->assertFileExists( EarlyGate::path() );
+		EarlyGate::deactivate();
+		$this->assertFileDoesNotExist( EarlyGate::path(), 'a prepend line left behind finds no snapshot and lets everything through' );
+		$this->assertFileDoesNotExist( EarlyGate::loader_path() );
+		$this->assertStringNotContainsString( 'deny ', (string) file_get_contents( DataDir::path() . '/nginx-deny.conf' ), 'emptied, not deleted' );
+	}
+
+	/**
+	 * Fake Cloudflare API: records calls; answers PUT with an operation ID and
+	 * the bulk operation status with $this->cf_status.
+	 *
+	 * @var list<array{0:string, 1:array<string, mixed>}>
+	 */
+	private array $cf_calls = array();
+
+	private string $cf_status = 'completed';
+
+	private bool $cf_fail = false;
+
+	public function fake_cloudflare( $pre, array $args, string $url ) {
+		$this->cf_calls[] = array( $url, $args );
+		if ( $this->cf_fail ) {
+			return array(
+				'response' => array( 'code' => 400 ),
+				'body'     => (string) wp_json_encode( array( 'success' => false, 'errors' => array( array( 'message' => 'bad item' ) ) ) ),
+			);
+		}
+		$result = str_contains( $url, '/bulk_operations/' ) ? array( 'status' => $this->cf_status ) : ( 'PUT' === $args['method'] ? array( 'operation_id' => 'op123' ) : array( 'kind' => 'ip', 'name' => 'blocked', 'num_items' => 2 ) );
+		return array(
+			'response' => array( 'code' => 200 ),
+			'body'     => (string) wp_json_encode( array( 'success' => true, 'result' => $result ) ),
+		);
+	}
+
+	public function test_cloudflare_sync_follows_the_policy_and_its_completion(): void {
+		$items = CloudflareSync::items( array( '203.0.113.5', '10.0.0.0/8', '1.0.0.0/7', '2001:db8::1', '2001:db8:1::/48', 'junk' ) );
+		$this->assertSame( array( '203.0.113.5', '10.0.0.0/8', '2001:db8:1::/48' ), $items['items'] );
+		$this->assertSame( 2, $items['skipped'], 'a /7 and a single IPv6 address are left out by default' );
+		$wide = CloudflareSync::items( array( '2001:db8::1', '2001:db8:5::1' ), 'expand', IpRangeSet::from_strings( array( '2001:db8:5::99' ) ) );
+		$this->assertSame( array( '2001:db8::/64' ), $wide['items'] );
+		$this->assertSame( array( 1, 1 ), array( $wide['expanded'], $wide['skipped'] ), 'never widened over an allowlisted address' );
+
+		$repo = Plugin::instance()->container()->get( BlockRepository::class );
+		$repo->add( 'block', Cidr::parse( '203.0.113.0/30' ), 'manual', 'manual' );
+		$repo->add( 'allow', Cidr::parse( '203.0.113.2' ), 'office', 'manual' );
 		$this->gate(
 			array(
 				'cloudflare' => array(
@@ -305,37 +433,57 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 		$sync = Plugin::instance()->container()->get( CloudflareSync::class );
 		$this->assertFalse( $sync->enabled(), 'no token yet' );
 		$sync->set_token( 'secret-token' );
-		$this->assertTrue( $sync->enabled() );
 		$this->assertStringNotContainsString( 'secret-token', (string) get_site_option( CloudflareSync::TOKEN ), 'stored encrypted' );
-
-		$calls = array();
-		$fake  = static function ( $pre, array $args, string $url ) use ( &$calls ) {
-			$calls[] = array( $url, $args );
-			$ok      = ! str_contains( (string) ( $args['body'] ?? '' ), '198.51.100.99' );
-			return array(
-				'response' => array( 'code' => $ok ? 200 : 400 ),
-				'body'     => (string) wp_json_encode( $ok ? array( 'success' => true, 'result' => array( 'kind' => 'ip', 'name' => 'blocked', 'num_items' => 2 ) ) : array( 'success' => false, 'errors' => array( array( 'message' => 'bad item' ) ) ) ),
-			);
-		};
-		add_filter( 'pre_http_request', $fake, 10, 3 );
+		add_filter( 'pre_http_request', array( $this, 'fake_cloudflare' ), 10, 3 );
 		try {
-			$state = $sync->sync( array( '203.0.113.5/32', '10.0.0.0/8' ) );
-			$this->assertTrue( $state['ok'] );
-			$this->assertSame( 2, $state['count'] );
-			$this->assertSame( 'https://api.cloudflare.com/client/v4/accounts/' . str_repeat( 'a', 32 ) . '/rules/lists/' . str_repeat( 'b', 32 ) . '/items', $calls[0][0] );
-			$this->assertSame( 'PUT', $calls[0][1]['method'] );
-			$this->assertSame( 'Bearer secret-token', $calls[0][1]['headers']['Authorization'] );
-			$this->assertSame( array( '203.0.113.5', '10.0.0.0/8' ), array_column( json_decode( $calls[0][1]['body'], true ), 'ip' ) );
+			$state = $sync->sync();
+			$this->assertSame( 'applying', $state['status'], 'accepted is not yet applied' );
+			$this->assertSame( 'https://api.cloudflare.com/client/v4/accounts/' . str_repeat( 'a', 32 ) . '/rules/lists/' . str_repeat( 'b', 32 ) . '/items', $this->cf_calls[0][0] );
+			$this->assertSame( 'Bearer secret-token', $this->cf_calls[0][1]['headers']['Authorization'] );
+			$this->assertSame( array( '203.0.113.0/31', '203.0.113.3' ), array_column( json_decode( $this->cf_calls[0][1]['body'], true ), 'ip' ), 'the allowlisted address is not sent' );
 
-			$state = $sync->sync( array( '198.51.100.99/32' ) );
-			$this->assertFalse( $state['ok'] );
-			$this->assertStringContainsString( 'bad item', $state['error'] );
+			$this->cf_status = 'running';
+			$this->assertSame( 'applying', $sync->check_operation()['status'] );
+			$this->assertStringContainsString( '/bulk_operations/op123', end( $this->cf_calls )[0] );
+			$this->cf_status = 'completed';
+			$this->assertSame( 'active', $sync->check_operation()['status'] );
+
+			// Scheduled syncs: an unchanged list is not uploaded again, and a
+			// changed one waits for the minimum interval; Sync now always uploads.
+			$calls = count( $this->cf_calls );
+			$sync->sync();
+			$this->assertCount( $calls, $this->cf_calls, 'unchanged list not re-uploaded' );
+			$repo->add( 'block', Cidr::parse( '198.51.100.7' ), 'manual', 'manual' );
+			wp_clear_scheduled_hook( CloudflareSync::CRON );
+			$sync->sync();
+			$this->assertCount( $calls, $this->cf_calls, 'changed, but uploaded less than five minutes ago' );
+			$this->assertGreaterThan( time() + 200, (int) wp_next_scheduled( CloudflareSync::CRON ), 'retried after the interval' );
+			$this->assertSame( 'applying', $sync->sync( true )['status'] );
+			$this->assertCount( $calls + 1, $this->cf_calls );
+			$this->assertContains( '198.51.100.7', array_column( json_decode( end( $this->cf_calls )[1]['body'], true ), 'ip' ) );
+			$this->cf_status = 'completed';
+			$sync->check_operation();
+			wp_clear_scheduled_hook( CloudflareSync::CRON );
+
+			// Protection switched off: the list is emptied at once, interval or not.
+			$this->gate( array( 'general' => array( 'enabled' => false ), 'cloudflare' => array( 'sync' => true, 'account_id' => str_repeat( 'a', 32 ), 'list_id' => str_repeat( 'b', 32 ) ) ) );
+			$sync->sync();
+			$this->assertSame( array(), json_decode( end( $this->cf_calls )[1]['body'], true ) );
+
+			// Sync switched off: emptied too; and a failure says the rules are still active.
+			$this->gate( array( 'cloudflare' => array( 'sync' => true, 'account_id' => str_repeat( 'a', 32 ), 'list_id' => str_repeat( 'b', 32 ) ) ) );
+			$sync->sync( true );
+			$this->cf_fail = true;
+			$this->assertFalse( $sync->clear_remote( 'test' ) );
+			$this->assertStringContainsString( 'still active at Cloudflare', CloudflareSync::state()['error'] );
+			$this->cf_fail = false;
+			$this->assertTrue( $sync->clear_remote( 'test' ) );
+			$this->assertSame( 'cleared', CloudflareSync::state()['status'] );
 
 			$test = $sync->test();
 			$this->assertTrue( $test['ok'] );
-			$this->assertStringContainsString( 'blocked', $test['message'] );
 		} finally {
-			remove_filter( 'pre_http_request', $fake, 10 );
+			remove_filter( 'pre_http_request', array( $this, 'fake_cloudflare' ), 10 );
 		}
 	}
 }

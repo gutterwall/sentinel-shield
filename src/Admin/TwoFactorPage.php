@@ -34,6 +34,9 @@ final class TwoFactorPage {
 	/**
 	 * Operations that add or remove a way to log in: they need a fresh confirmation.
 	 */
+	private const REAUTH_MAX    = 5;
+	private const REAUTH_WINDOW = 900;
+
 	private const SENSITIVE = array( 'totp_enable', 'totp_remove', 'email_on', 'email_off', 'backup_new', 'passkey_add', 'passkey_remove' );
 
 	public const SLUG   = 'sentinel-shield-2fa';
@@ -284,9 +287,10 @@ final class TwoFactorPage {
 				$this->log( 'twofa_enabled', $user, __( 'New backup codes created', 'sentinel-shield' ) );
 				break;
 			case 'reauth':
+				$blocked = count( $this->reauth_failures( $id ) ) >= self::REAUTH_MAX;
 				if ( $this->confirm_identity( $user ) ) {
 					View::flash( 'success', __( 'Confirmed. You can change your two-factor settings for the next 10 minutes.', 'sentinel-shield' ) );
-				} else {
+				} elseif ( ! $blocked ) {
 					View::flash( 'error', __( 'That did not match. Try again.', 'sentinel-shield' ) );
 					$this->log( 'twofa_failed', $user, __( 'Failed to confirm identity on the two-factor settings page', 'sentinel-shield' ) );
 				}
@@ -496,16 +500,21 @@ final class TwoFactorPage {
 	 */
 	private function confirm_identity( \WP_User $user ): bool {
 		// phpcs:disable WordPress.Security.NonceVerification.Missing -- handle() checked the nonce.
-		$id = (int) $user->ID;
+		$id    = (int) $user->ID;
+		$fails = $this->reauth_failures( $id );
+		if ( count( $fails ) >= self::REAUTH_MAX ) {
+			View::flash( 'error', __( 'Too many failed confirmations. Wait 15 minutes and try again.', 'sentinel-shield' ) );
+			return false;
+		}
 		$ok = false;
-		if ( ! empty( $_POST['password'] ) ) {
-			$ok = wp_check_password( (string) wp_unslash( $_POST['password'] ), $user->user_pass, $id ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Compared, never stored.
-		} elseif ( ! empty( $_POST['passkey'] ) ) {
-			$challenge = (string) get_user_meta( $id, UserTwoFactor::META . 'reauth_challenge', true );
+		if ( ! empty( $_POST['passkey'] ) ) {
+			// A passkey checks possession and the user (fingerprint, face or PIN) at once.
+			$stored = get_user_meta( $id, UserTwoFactor::META . 'reauth_challenge', true );
 			delete_user_meta( $id, UserTwoFactor::META . 'reauth_challenge' );
-			$data = json_decode( (string) wp_unslash( $_POST['passkey'] ), true ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- JSON checked by WebAuthn verification.
-			$keys = $this->users()->passkeys( $id );
-			$cred = is_array( $data ) ? (string) ( $data['id'] ?? '' ) : '';
+			$challenge = is_array( $stored ) && (int) ( $stored['expires'] ?? 0 ) >= time() ? (string) $stored['challenge'] : '';
+			$data      = json_decode( (string) wp_unslash( $_POST['passkey'] ), true ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- JSON checked by WebAuthn verification.
+			$keys      = $this->users()->passkeys( $id );
+			$cred      = is_array( $data ) ? (string) ( $data['id'] ?? '' ) : '';
 			if ( '' !== $challenge && isset( $keys[ $cred ] ) ) {
 				try {
 					$count = WebAuthn::for_site()->verify_assertion( $keys[ $cred ], WebAuthn::unb64u( (string) ( $data['client'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['auth'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['signature'] ?? '' ) ), $challenge );
@@ -515,12 +524,45 @@ final class TwoFactorPage {
 					$ok = false;
 				}
 			}
+		} elseif ( ! empty( $_POST['password'] ) ) {
+			$ok = wp_check_password( (string) wp_unslash( $_POST['password'] ), $user->user_pass, $id ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Compared, never stored.
+			// Accounts with an app or backup codes also confirm the second factor.
+			if ( $ok && $this->needs_code( $id ) ) {
+				$code = isset( $_POST['code'] ) ? sanitize_text_field( wp_unslash( $_POST['code'] ) ) : '';
+				$ok   = $this->users()->verify_totp( $id, (string) preg_replace( '/\s+/', '', $code ), time() ) || $this->users()->use_backup_code( $id, $code );
+			}
 		}
 		// phpcs:enable
 		if ( $ok ) {
+			delete_user_meta( $id, UserTwoFactor::META . 'reauth_fails' );
 			$this->users()->confirm( $id, (string) wp_get_session_token(), time() );
+			return true;
 		}
-		return $ok;
+		$fails[] = time();
+		update_user_meta( $id, UserTwoFactor::META . 'reauth_fails', $fails );
+		// A wrong confirmation counts like a wrong login (IP and account limits).
+		do_action( 'wp_login_failed', $user->user_login, new \WP_Error( 'sentinel_shield_reauth_failed', __( 'Wrong confirmation on the two-factor settings page.', 'sentinel-shield' ) ) ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core hook.
+		return false;
+	}
+
+	/**
+	 * Failed confirmations of the last 15 minutes.
+	 *
+	 * @param int $user_id User.
+	 * @return list<int>
+	 */
+	private function reauth_failures( int $user_id ): array {
+		$fails = get_user_meta( $user_id, UserTwoFactor::META . 'reauth_fails', true );
+		return array_values( array_filter( is_array( $fails ) ? array_map( 'intval', $fails ) : array(), static fn( int $t ): bool => $t > time() - self::REAUTH_WINDOW ) );
+	}
+
+	/**
+	 * Whether confirming with a password also needs a code (app or backup).
+	 *
+	 * @param int $user_id User.
+	 */
+	private function needs_code( int $user_id ): bool {
+		return null !== $this->users()->totp_secret( $user_id ) || $this->users()->backup_remaining( $user_id ) > 0;
 	}
 
 	/**
@@ -533,12 +575,22 @@ final class TwoFactorPage {
 		echo '<div class="ss-card" id="ss-reauth"><h2>' . esc_html__( 'Confirm it is you', 'sentinel-shield' ) . '</h2><p>' . esc_html__( 'To add or remove a way to log in, confirm your password (or use a passkey) first. The confirmation lasts 10 minutes in this browser session.', 'sentinel-shield' ) . '</p>';
 		$this->form_open( 'reauth' );
 		echo '<label>' . esc_html__( 'Current password:', 'sentinel-shield' ) . ' <input type="password" name="password" autocomplete="current-password" required></label> ';
+		if ( $this->needs_code( $id ) ) {
+			echo '<label>' . esc_html__( 'Code from your app (or a backup code):', 'sentinel-shield' ) . ' <input type="text" name="code" class="ss-code-input" autocomplete="one-time-code" required></label> ';
+		}
 		submit_button( __( 'Confirm', 'sentinel-shield' ), 'primary', 'submit', false );
 		echo '</form>';
 		$keys = $this->users()->passkeys( $id );
 		if ( $keys ) {
 			$challenge = WebAuthn::challenge();
-			update_user_meta( $id, UserTwoFactor::META . 'reauth_challenge', $challenge );
+			update_user_meta(
+				$id,
+				UserTwoFactor::META . 'reauth_challenge',
+				array(
+					'challenge' => $challenge,
+					'expires'   => time() + 5 * MINUTE_IN_SECONDS,
+				)
+			);
 			$options = WebAuthn::for_site()->request_options( $challenge, array_map( 'strval', array_keys( $keys ) ) );
 			$this->form_open( 'reauth' );
 			echo '<input type="hidden" name="passkey" value=""> <button type="button" class="button" data-ss-passkey="get" data-field="passkey" data-options="' . esc_attr( (string) wp_json_encode( $options ) ) . '">' . esc_html__( 'Use a passkey instead', 'sentinel-shield' ) . '</button> <span class="ss-passkey-error description"></span></form>';

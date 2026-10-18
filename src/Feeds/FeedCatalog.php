@@ -64,7 +64,7 @@ final class FeedCatalog {
 			),
 			'firehol_level1' => array(
 				'name'        => self::NAMES['firehol_level1'],
-				'urls'        => array( 'https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset' ),
+				'urls'        => array( 'https://iplists.firehol.org/files/firehol_level1.netset' ),
 				'format'      => 'lines',
 				'min_entries' => 1000,
 				'min_hours'   => 12,
@@ -80,7 +80,7 @@ final class FeedCatalog {
 				'min_hours'   => 12,
 				'terms'       => self::TERMS_CHECK,
 				'terms_url'   => 'https://rules.emergingthreats.net/blockrules/',
-				'about'       => __( 'Hosts known to be compromised, published by Proofpoint Emerging Threats. Small list.', 'sentinel-shield' ),
+				'about'       => __( 'Hosts known to be compromised, published by Proofpoint Emerging Threats. Small list. Offered as a free public download, but no licence is published for the list itself (the ET Open rules it accompanies are BSD-licensed); decide yourself whether that is enough for a commercial site.', 'sentinel-shield' ),
 			),
 			'blocklist_de'   => array(
 				'name'        => self::NAMES['blocklist_de'],
@@ -90,7 +90,7 @@ final class FeedCatalog {
 				'min_hours'   => 12,
 				'terms'       => self::TERMS_CHECK,
 				'terms_url'   => 'https://www.blocklist.de/en/export.html',
-				'about'       => __( 'IPs reported for SSH, mail, web and login attacks in the last 48 hours by fail2ban users. Large (20,000+ IPs) and fast-changing; dynamic IPs make occasional false positives more likely.', 'sentinel-shield' ),
+				'about'       => __( 'IPs reported for SSH, mail, web and login attacks in the last 48 hours by fail2ban users. Large (20,000+ IPs) and fast-changing; dynamic IPs make occasional false positives more likely. Offered free "as they are, at your own risk"; no licence is published, and very heavy downloading may be restricted.', 'sentinel-shield' ),
 			),
 			'cins_army'      => array(
 				'name'        => self::NAMES['cins_army'],
@@ -98,19 +98,19 @@ final class FeedCatalog {
 				'format'      => 'lines',
 				'min_entries' => 1000,
 				'min_hours'   => 12,
-				'terms'       => self::TERMS_CHECK,
+				'terms'       => self::TERMS_FREE,
 				'terms_url'   => 'https://cinsscore.com/',
-				'about'       => __( 'IPs with poor reputation seen by the Sentinel IPS network. About 15,000 IPs.', 'sentinel-shield' ),
+				'about'       => __( 'IPs with poor reputation seen by the Sentinel IPS network. About 15,000 IPs. The provider says the list may be used "in any way you see fit".', 'sentinel-shield' ),
 			),
 			'ipsum_3'        => array(
 				'name'        => self::NAMES['ipsum_3'],
-				'urls'        => array( 'https://raw.githubusercontent.com/stamparm/ipsum/master/levels/3.txt' ),
+				'urls'        => array( 'https://iplists.firehol.org/files/ipsum_3.ipset' ),
 				'format'      => 'lines',
 				'min_entries' => 1000,
 				'min_hours'   => 24,
 				'terms'       => self::TERMS_FREE,
 				'terms_url'   => 'https://github.com/stamparm/ipsum',
-				'about'       => __( 'IPs that appear on at least 3 of 30+ public blocklists, rebuilt daily. Public domain (The Unlicense). Large (15,000+ IPs).', 'sentinel-shield' ),
+				'about'       => __( 'IPs that appear on at least 3 of 30+ public blocklists, rebuilt daily. Public domain (The Unlicense). Large (15,000+ IPs). Downloaded from FireHOL\'s identical copy at iplists.firehol.org.', 'sentinel-shield' ),
 			),
 			'dshield_top'    => array(
 				'name'        => self::NAMES['dshield_top'],
@@ -130,7 +130,7 @@ final class FeedCatalog {
 				'min_hours'   => 12,
 				'terms'       => self::TERMS_FREE,
 				'terms_url'   => 'https://check.torproject.org/',
-				'about'       => __( 'Not a list of attackers: blocks everyone using the Tor anonymity network, including legitimate privacy-conscious visitors. Enable only if your site has no Tor audience.', 'sentinel-shield' ),
+				'about'       => __( 'Not a list of attackers: blocks everyone using the Tor anonymity network, including legitimate privacy-conscious visitors. Enable only if your site has no Tor audience. Tor Project data is released under CC0 (no rights reserved).', 'sentinel-shield' ),
 			),
 		);
 	}
@@ -170,7 +170,7 @@ final class FeedCatalog {
 		return match ( $terms ) {
 			self::TERMS_FREE          => __( 'Free to use', 'sentinel-shield' ),
 			self::TERMS_NONCOMMERCIAL => __( 'Non-commercial only', 'sentinel-shield' ),
-			default                   => __( 'Check provider terms', 'sentinel-shield' ),
+			default                   => __( 'No licence published', 'sentinel-shield' ),
 		};
 	}
 }

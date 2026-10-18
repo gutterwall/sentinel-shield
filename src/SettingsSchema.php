@@ -446,8 +446,8 @@ final class SettingsSchema {
 			'key'         => 'geo.dbip',
 			'tab'         => 'geo',
 			'type'        => 'checkbox',
-			'label'       => __( 'Download the free DB-IP country database', 'sentinel-shield' ),
-			'help'        => __( 'Needed unless your site is behind Cloudflare or your server sets a country variable. A 5 MB download from db-ip.com, checked weekly and updated monthly, stored as a 15 MB file in uploads/sentinel-shield. Licensed CC BY 4.0: an "IP Geolocation by DB-IP" link is added to the denial message. DB-IP sees your server\'s IP when it downloads; nothing about visitors is sent. Switching this off deletes the file.', 'sentinel-shield' ),
+			'label'       => __( 'Download the free DB-IP country database (shows a credit link to db-ip.com on denied logins)', 'sentinel-shield' ),
+			'help'        => __( 'Needed unless your site is behind Cloudflare or your server sets a country variable. A 5 MB download from db-ip.com, checked weekly and updated monthly, stored as a 15 MB file in uploads/sentinel-shield. The database is licensed CC BY 4.0, which requires crediting DB-IP: by switching this on you agree that a visitor whose login is refused because of a DB-IP lookup sees "IP Geolocation by DB-IP" linking to db-ip.com under the refusal message. That is the only public place the credit appears; it is also shown in the admin. DB-IP sees your server\'s IP when it downloads; nothing about visitors is sent. Switching this off deletes the file and the credit.', 'sentinel-shield' ),
 			'recommended' => null,
 		);
 		$fields[] = array(
@@ -547,8 +547,20 @@ final class SettingsSchema {
 			'tab'         => 'server',
 			'type'        => 'checkbox',
 			'label'       => __( 'Sync blocked IPs to a Cloudflare IP list', 'sentinel-shield' ),
-			'help'        => __( 'Replaces the items of one Cloudflare account IP list with your enforced block rules whenever they change (at most 10,000; single IPv6 addresses become their /64). Add a WAF custom rule in Cloudflare that blocks requests whose IP is in the list, and blocked IPs never reach your server. Needs the account ID, the list ID and an API token with "Account Filter Lists: Edit" (entered below).', 'sentinel-shield' ),
+			'help'        => __( 'Replaces the items of one Cloudflare account IP list with your effective block policy whenever it changes: enforced block rules minus your allowlist, exactly what WordPress blocks (at most 10,000). Switching this off, switching protection off, or deactivating the plugin empties the list. Add a WAF custom rule in Cloudflare that blocks requests whose IP is in the list, and blocked IPs never reach your server. Needs the account ID, the list ID and an API token with "Account Filter Lists: Edit" (entered below).', 'sentinel-shield' ),
 			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'cloudflare.ipv6',
+			'tab'         => 'server',
+			'type'        => 'select',
+			'options'     => array(
+				'skip'   => __( 'Leave single IPv6 addresses out (they stay blocked by WordPress)', 'sentinel-shield' ),
+				'expand' => __( 'Widen single IPv6 addresses to their /64', 'sentinel-shield' ),
+			),
+			'label'       => __( 'Single IPv6 addresses at Cloudflare', 'sentinel-shield' ),
+			'help'        => __( 'Cloudflare lists accept IPv6 ranges only up to /64. Widening blocks the whole /64 (usually one customer\'s network, but it can include other people); a /64 that contains an allowlisted address is never widened. The Server & CDN tab shows how many entries were left out or widened.', 'sentinel-shield' ),
+			'recommended' => 'skip',
 		);
 		$fields[] = array(
 			'key'         => 'cloudflare.account_id',

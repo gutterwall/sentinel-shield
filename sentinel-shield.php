@@ -1,9 +1,9 @@
 <?php
 /**
  * Plugin Name:       Sentinel Shield
- * Plugin URI:        https://github.com/sentinel-shield/sentinel-shield
+ * Plugin URI:        https://github.com/gutterwall/sentinel-shield
  * Description:       Self-hosted firewall, brute-force protection, IP blocklists and hardening for WordPress. No paid cloud service required.
- * Version:           0.8.0
+ * Version:           0.8.1
  * Requires at least: 6.4
  * Requires PHP:      8.1
  * Author:            Sentinel Shield Contributors
@@ -21,7 +21,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'SENTINEL_SHIELD_VERSION', '0.8.0' );
+define( 'SENTINEL_SHIELD_VERSION', '0.8.1' );
 define( 'SENTINEL_SHIELD_FILE', __FILE__ );
 define( 'SENTINEL_SHIELD_DIR', __DIR__ );
 

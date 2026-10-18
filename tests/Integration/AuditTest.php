@@ -35,6 +35,7 @@ final class AuditTest extends \WP_UnitTestCase {
 		$c = Plugin::instance()->container();
 		// The plugin's own exporter would send real requests.
 		remove_action( 'sentinel_shield_event_logged', array( $c->get( AuditExporter::class ), 'on_event' ) );
+		remove_action( AuditExporter::CRON, array( $c->get( AuditExporter::class ), 'run' ) );
 		global $wpdb;
 		$wpdb->query( $wpdb->prepare( 'DELETE FROM %i', $c->get( EventRepository::class )->table() ) );
 		foreach ( array( AuditExporter::STATE, AuditExporter::SECRET, Mailer::HEALTH ) as $option ) {
@@ -50,10 +51,12 @@ final class AuditTest extends \WP_UnitTestCase {
 
 	public function tear_down(): void {
 		if ( null !== $this->exporter ) {
+			remove_action( AuditExporter::CRON, array( $this->exporter, 'run' ) );
 			remove_action( 'sentinel_shield_event_logged', array( $this->exporter, 'on_event' ) );
 			remove_action( 'shutdown', array( $this->exporter, 'on_shutdown' ) );
 		}
 		add_action( 'sentinel_shield_event_logged', array( Plugin::instance()->container()->get( AuditExporter::class ), 'on_event' ), 10, 3 );
+		add_action( AuditExporter::CRON, array( Plugin::instance()->container()->get( AuditExporter::class ), 'run' ) );
 		wp_clear_scheduled_hook( AuditExporter::CRON );
 		delete_site_option( Settings::OPTION );
 		Plugin::instance()->container()->get( Settings::class )->refresh();
@@ -137,6 +140,9 @@ final class AuditTest extends \WP_UnitTestCase {
 		self::log( 'blocked' );
 		self::log( 'config_change' );
 		$export->on_shutdown();
+		$this->assertSame( array(), $this->sent, 'nothing is sent during the visitor\'s request' );
+		$this->assertNotFalse( wp_next_scheduled( AuditExporter::CRON ), 'delivery is scheduled in the background' );
+		do_action( AuditExporter::CRON );
 
 		$this->assertCount( 1, $this->sent );
 		$this->assertSame( 'https://logs.example.test/in', $this->sent[0][0] );

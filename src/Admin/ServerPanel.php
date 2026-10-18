@@ -12,7 +12,7 @@ namespace SentinelShield\Admin;
 use SentinelShield\Container;
 use SentinelShield\Firewall\CloudflareSync;
 use SentinelShield\Firewall\EarlyGate;
-use SentinelShield\Geo\GeoUpdater;
+use SentinelShield\Support\DataDir;
 use SentinelShield\Settings;
 
 defined( 'ABSPATH' ) || exit;
@@ -37,6 +37,19 @@ final class ServerPanel {
 		$gate     = $this->c->get( EarlyGate::class );
 		$state    = (array) get_site_option( EarlyGate::STATE, array() );
 
+		echo '<div class="ss-card" id="ss-private"><h2>' . esc_html__( 'Private folder', 'sentinel-shield' ) . '</h2>';
+		/* translators: %s: folder path. */
+		echo '<p>' . esc_html( sprintf( __( 'The early firewall\'s snapshot (including allowlisted addresses), its block log and the server blocklist files are kept in %s, outside the web root, so they cannot be downloaded on any web server.', 'sentinel-shield' ), DataDir::path() ) ) . '</p>';
+		if ( DataDir::ready() ) {
+			$this->status( 'ok', __( 'Confirmed private and writable.', 'sentinel-shield' ) );
+		} else {
+			$this->status( 'bad', DataDir::problem() . ' ' . __( 'Until then, the early firewall, the server files and the block log are not written.', 'sentinel-shield' ) );
+		}
+		View::form_open( 'server' );
+		echo '<input type="hidden" name="op" value="recheck">';
+		submit_button( __( 'Re-check', 'sentinel-shield' ), 'small', 'submit', false );
+		echo '</form><p class="description">' . esc_html__( 'To use another folder, add define( \'SENTINEL_SHIELD_DATA_DIR\', \'/path/outside/the/web/root\' ); to wp-config.php.', 'sentinel-shield' ) . '</p></div>';
+
 		echo '<div class="ss-card" id="ss-early"><h2>' . esc_html__( 'Early firewall', 'sentinel-shield' ) . '</h2>';
 		$mode   = $gate->mode();
 		$active = EarlyGate::active_as();
@@ -60,9 +73,12 @@ final class ServerPanel {
 			}
 		}
 		if ( $state ) {
-			/* translators: 1: date, 2: block count, 3: allow count, 4: date. */
-			$text = sprintf( __( 'Snapshot built %1$s: %2$d blocked ranges, %3$d allowlisted, blocklist feeds %5$s; used until %4$s or the next change.', 'sentinel-shield' ), wp_date( 'Y-m-d H:i', (int) $state['built'] ), (int) $state['block'], (int) $state['allow'], wp_date( 'Y-m-d H:i', (int) $state['valid_until'] ), ! empty( $state['feeds'] ) ? __( 'included', 'sentinel-shield' ) : __( 'not included', 'sentinel-shield' ) );
+			/* translators: 1: generation, 2: date, 3: block count, 4: allow count, 5: feeds state, 6: date. */
+			$text = sprintf( __( 'Policy generation %1$d, built %2$s: %3$d blocked ranges after removing %4$d allowlisted ones, blocklist feeds %5$s. Rebuilt on every change and at %6$s, when the next temporary rule expires.', 'sentinel-shield' ), (int) ( $state['generation'] ?? 0 ), wp_date( 'Y-m-d H:i', (int) $state['built'] ), (int) $state['block'], (int) $state['allow'], ! empty( $state['feeds'] ) ? __( 'included', 'sentinel-shield' ) : __( 'not included', 'sentinel-shield' ), wp_date( 'Y-m-d H:i', (int) $state['valid_until'] ) );
 			echo '<p>' . esc_html( $text ) . '</p>';
+			if ( isset( $state['enforcing'] ) && ! $state['enforcing'] ) {
+				$this->status( 'warn', __( 'WordPress is not enforcing IP blocks (protection or the IP gate is off), so every layer gets an empty policy.', 'sentinel-shield' ) );
+			}
 			if ( ! empty( $state['error'] ) ) {
 				$this->status( 'bad', (string) $state['error'] );
 			}
@@ -74,11 +90,13 @@ final class ServerPanel {
 			echo '</form>';
 		}
 		/* translators: %s: file path. */
-		echo '<p class="description">' . esc_html( sprintf( __( 'Emergency switch-off without WordPress: create an empty file named gate.disabled in %s (or delete gate.json there). The early firewall then lets everything through to WordPress.', 'sentinel-shield' ), GeoUpdater::dir() ) ) . '</p></div>';
+		echo '<p class="description">' . esc_html( sprintf( __( 'Emergency switch-off without WordPress: create an empty file named gate.disabled in %s (or delete gate.json there). The early firewall then lets everything through to WordPress. Deactivating the plugin removes the snapshot too.', 'sentinel-shield' ), DataDir::path() ) ) . '</p></div>';
 
 		if ( $settings->get( 'firewall.server_files', false ) ) {
-			$dir = GeoUpdater::dir();
-			echo '<div class="ss-card"><h2>' . esc_html__( 'Server blocklist files', 'sentinel-shield' ) . '</h2><table class="widefat striped"><tbody>';
+			$dir = DataDir::path();
+			echo '<div class="ss-card"><h2>' . esc_html__( 'Server blocklist files', 'sentinel-shield' ) . '</h2>';
+			/* translators: %d: generation. */
+			echo '<p>' . esc_html( sprintf( __( 'The files hold policy generation %d (your block rules minus the allowlist). The web server applies them only after a reload, and temporary rules stay there until that reload; reload often (or leave short lockouts to WordPress and the early firewall). When protection is switched off or the plugin is deactivated, the files are emptied, not deleted, so your server configuration keeps working.', 'sentinel-shield' ), (int) ( $state['generation'] ?? 0 ) ) ) . '</p><table class="widefat striped"><tbody>';
 			echo '<tr><th style="width:8em">nginx</th><td><code>' . esc_html( 'include ' . $dir . '/nginx-deny.conf;' ) . '</code><br><span class="description">' . esc_html__( 'Inside the server block. Reload nginx after changes, for example every few minutes from cron: nginx -t && nginx -s reload', 'sentinel-shield' ) . '</span></td></tr>';
 			echo '<tr><th>Apache 2.4</th><td><code>' . esc_html( 'Include ' . $dir . '/apache-deny.conf' ) . '</code><br><span class="description">' . esc_html__( 'Inside the virtual host or a <Directory> block of the site. Apache reads it on graceful restart.', 'sentinel-shield' ) . '</span></td></tr>';
 			echo '</tbody></table></div>';
@@ -88,14 +106,24 @@ final class ServerPanel {
 		echo '<div class="ss-card" id="ss-cloudflare"><h2>' . esc_html__( 'Cloudflare IP list', 'sentinel-shield' ) . '</h2>';
 		$sync = CloudflareSync::state();
 		if ( $sync ) {
-			$this->status(
-				! empty( $sync['ok'] ) ? 'ok' : 'bad',
-				! empty( $sync['ok'] )
-					/* translators: 1: date, 2: count. */
-					? sprintf( __( 'Last sync %1$s: %2$d items.', 'sentinel-shield' ), wp_date( 'Y-m-d H:i', (int) $sync['time'] ), (int) $sync['count'] )
-					/* translators: 1: date, 2: error. */
-					: sprintf( __( 'Last sync %1$s failed: %2$s', 'sentinel-shield' ), wp_date( 'Y-m-d H:i', (int) $sync['time'] ), (string) $sync['error'] )
+			$labels = array(
+				'applying' => array( 'warn', __( 'Sent to Cloudflare, waiting for it to confirm', 'sentinel-shield' ) ),
+				'active'   => array( 'ok', __( 'Active at Cloudflare', 'sentinel-shield' ) ),
+				'cleared'  => array( 'ok', __( 'List emptied at Cloudflare', 'sentinel-shield' ) ),
+				'failed'   => array( 'bad', __( 'Failed', 'sentinel-shield' ) ),
+				'unknown'  => array( 'warn', __( 'Not confirmed by Cloudflare', 'sentinel-shield' ) ),
 			);
+			$label  = $labels[ (string) ( $sync['status'] ?? '' ) ] ?? ( ! empty( $sync['ok'] ) ? $labels['active'] : $labels['failed'] );
+			/* translators: 1: status, 2: generation, 3: local generation, 4: count, 5: date. */
+			$text = sprintf( __( '%1$s: generation %2$d (local policy: %3$d), %4$d items, %5$s.', 'sentinel-shield' ), $label[1], (int) ( $sync['generation'] ?? 0 ), (int) ( $state['generation'] ?? 0 ), (int) $sync['count'], wp_date( 'Y-m-d H:i', (int) $sync['time'] ) );
+			if ( ! empty( $sync['skipped'] ) || ! empty( $sync['expanded'] ) ) {
+				/* translators: 1: entries left out, 2: entries widened. */
+				$text .= ' ' . sprintf( __( '%1$d entries left out (Cloudflare takes IPv6 ranges up to /64 only; WordPress still blocks them), %2$d single IPv6 addresses widened to /64.', 'sentinel-shield' ), (int) ( $sync['skipped'] ?? 0 ), (int) ( $sync['expanded'] ?? 0 ) );
+			}
+			if ( ! empty( $sync['error'] ) ) {
+				$text .= ' ' . (string) $sync['error'];
+			}
+			$this->status( $label[0], $text );
 		}
 		View::form_open( 'server' );
 		echo '<input type="hidden" name="op" value="cf_token">';

@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace SentinelShield;
 
+defined( 'ABSPATH' ) || exit;
+
 use SentinelShield\Admin\Admin;
 use SentinelShield\Admin\AdminBar;
 use SentinelShield\CLI\Command;
@@ -58,8 +60,6 @@ use SentinelShield\Unlock\UnlockService;
 use SentinelShield\Firewall\EarlyGate;
 use SentinelShield\Firewall\CloudflareSync;
 use SentinelShield\Audit\AuditExporter;
-
-defined( 'ABSPATH' ) || exit;
 
 /**
  * Singleton entry point.

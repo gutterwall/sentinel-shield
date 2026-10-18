@@ -13,6 +13,8 @@ declare(strict_types=1);
 
 namespace SentinelShield\Admin;
 
+defined( 'ABSPATH' ) || exit;
+
 use SentinelShield\Container;
 use SentinelShield\Cron\CronControl;
 use SentinelShield\Feeds\FeedCatalog;
@@ -41,14 +43,13 @@ use SentinelShield\Repository\BlockRepository;
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Safety\AdminProtection;
 use SentinelShield\Settings;
+use SentinelShield\Support\DataDir;
 use SentinelShield\SettingsSchema;
 use SentinelShield\TwoFactor\UserTwoFactor;
 use SentinelShield\Unlock\UnlockService;
 use SentinelShield\Firewall\EarlyGate;
 use SentinelShield\Firewall\CloudflareSync;
 use SentinelShield\Audit\AuditExporter;
-
-defined( 'ABSPATH' ) || exit;
 
 /**
  * Form and link handlers for the admin UI.
@@ -491,6 +492,14 @@ final class Actions {
 				View::flash( empty( $state['error'] ) ? 'success' : 'error', empty( $state['error'] ) ? __( 'Snapshot rebuilt.', 'sentinel-shield' ) : (string) $state['error'] );
 				$back .= '#ss-early';
 				break;
+			case 'recheck':
+				$private = DataDir::recheck();
+				View::flash( true === $private ? 'success' : 'error', true === $private ? __( 'The private folder is confirmed private.', 'sentinel-shield' ) : DataDir::problem() );
+				if ( true === $private ) {
+					$this->c->get( EarlyGate::class )->rebuild();
+				}
+				$back .= '#ss-private';
+				break;
 			case 'cf_token':
 				$token = isset( $_POST['token'] ) ? sanitize_text_field( wp_unslash( $_POST['token'] ) ) : '';
 				$cloudflare->set_token( $token );
@@ -507,7 +516,7 @@ final class Actions {
 				if ( ! $cloudflare->enabled() ) {
 					View::flash( 'error', __( 'Switch on "Sync blocked IPs to a Cloudflare IP list" and enter the account ID, list ID and token first.', 'sentinel-shield' ) );
 				} else {
-					$state = $cloudflare->sync();
+					$state = $cloudflare->sync( true );
 					$this->audit( 'cloudflare_sync' );
 					/* translators: %d: number of items. */
 					View::flash( ! empty( $state['ok'] ) ? 'success' : 'error', ! empty( $state['ok'] ) ? sprintf( __( 'Synced %d items to Cloudflare.', 'sentinel-shield' ), (int) $state['count'] ) : (string) $state['error'] );

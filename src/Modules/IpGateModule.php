@@ -16,7 +16,7 @@ defined( 'ABSPATH' ) || exit;
 
 /**
  * Enforces immediately while the plugin file loads, the earliest point a regular
- * plugin can run. (Phase 6 adds an auto_prepend_file firewall that runs earlier still.)
+ * plugin can run. The optional early firewall (early-gate.php) runs earlier still.
  */
 final class IpGateModule implements ModuleInterface {
 

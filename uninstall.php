@@ -18,7 +18,9 @@ foreach ( array( 'sentinel_ip_rules', 'sentinel_events', 'sentinel_offenses', 's
 	$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $wpdb->base_prefix . $sentinel_shield_table ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.SchemaChange -- Uninstall cleanup.
 }
 
-foreach ( array( 'sentinel_shield_settings', 'sentinel_shield_db_version', 'sentinel_shield_secret', 'sentinel_shield_cloudflare_ranges', 'sentinel_shield_welcome', 'sentinel_shield_feeds_state', 'sentinel_shield_admin_approvals', 'sentinel_shield_scan_report', 'sentinel_shield_scan_baseline', 'sentinel_shield_scan_uploads', 'sentinel_shield_integrity_state', 'sentinel_shield_integrity_report', 'sentinel_shield_gate_state', 'sentinel_shield_audit_state', 'sentinel_shield_audit_secret', 'sentinel_shield_mail_health', 'sentinel_shield_gate_dirty', 'sentinel_shield_cf_token', 'sentinel_shield_cf_state', 'sentinel_shield_lock_health', 'sentinel_shield_maintenance_last', 'sentinel_shield_report_gen', 'sentinel_shield_geo_db' ) as $sentinel_shield_option ) {
+// Read before the options are deleted below.
+$sentinel_shield_data = get_site_option( 'sentinel_shield_data_dir' );
+foreach ( array( 'sentinel_shield_settings', 'sentinel_shield_db_version', 'sentinel_shield_secret', 'sentinel_shield_cloudflare_ranges', 'sentinel_shield_welcome', 'sentinel_shield_feeds_state', 'sentinel_shield_admin_approvals', 'sentinel_shield_scan_report', 'sentinel_shield_scan_baseline', 'sentinel_shield_scan_uploads', 'sentinel_shield_integrity_state', 'sentinel_shield_integrity_report', 'sentinel_shield_gate_state', 'sentinel_shield_data_dir', 'sentinel_shield_audit_state', 'sentinel_shield_audit_secret', 'sentinel_shield_mail_health', 'sentinel_shield_gate_dirty', 'sentinel_shield_cf_token', 'sentinel_shield_cf_state', 'sentinel_shield_lock_health', 'sentinel_shield_maintenance_last', 'sentinel_shield_report_gen', 'sentinel_shield_geo_db' ) as $sentinel_shield_option ) {
 	delete_site_option( $sentinel_shield_option );
 }
 
@@ -66,6 +68,16 @@ if ( is_multisite() ) {
 $sentinel_shield_loader = WPMU_PLUGIN_DIR . '/sentinel-shield-early-gate.php';
 if ( is_file( $sentinel_shield_loader ) && str_contains( (string) file_get_contents( $sentinel_shield_loader ), 'sentinel-shield-early-gate-loader' ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Local file.
 	wp_delete_file( $sentinel_shield_loader );
+}
+
+// Private data folder (early firewall snapshot, block log, server files).
+if ( is_array( $sentinel_shield_data ) && ! empty( $sentinel_shield_data['path'] ) && is_dir( (string) $sentinel_shield_data['path'] ) ) {
+	foreach ( array( 'gate.json', 'gate-block.bin', 'gate-allow.bin', 'early-blocks.log', 'early-blocks.log.import', 'nginx-deny.conf', 'apache-deny.conf', 'gate.disabled' ) as $sentinel_shield_file ) {
+		if ( is_file( $sentinel_shield_data['path'] . '/' . $sentinel_shield_file ) ) {
+			wp_delete_file( $sentinel_shield_data['path'] . '/' . $sentinel_shield_file );
+		}
+	}
+	@rmdir( (string) $sentinel_shield_data['path'] ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- Only if empty.
 }
 
 // Country database folder (main site's uploads).

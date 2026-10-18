@@ -22,7 +22,7 @@ final class UserTwoFactor {
 	/**
 	 * Every meta key this class and the login flow write.
 	 */
-	public const KEYS = array( 'totp', 'totp_pending', 'totp_last_step', 'totp_added', 'email', 'backup', 'backup_created', 'devices', 'trusted', 'login', 'budget', 'passkeys', 'webauthn_handle', 'passkey_reg', 'reauth', 'reauth_challenge' );
+	public const KEYS = array( 'totp', 'totp_pending', 'totp_last_step', 'totp_added', 'email', 'backup', 'backup_created', 'devices', 'trusted', 'login', 'budget', 'passkeys', 'webauthn_handle', 'passkey_reg', 'reauth', 'reauth_challenge', 'reauth_fails' );
 
 	public const REAUTH_TTL = 600;
 

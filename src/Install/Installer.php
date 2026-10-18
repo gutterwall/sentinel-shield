@@ -89,9 +89,12 @@ final class Installer {
 		}
 		// Without the plugin the rules would be unmanaged; reactivating re-adds them on the next settings save.
 		UploadGuard::sync_htaccess( false );
-		// Without the plugin the early firewall would run on a stale snapshot.
-		EarlyGate::remove_loader();
+		// Without the plugin nothing would keep the other layers in step: the early
+		// firewall stops (no snapshot), server files are emptied, Cloudflare is cleared.
+		EarlyGate::deactivate();
+		Plugin::instance()->container()->get( CloudflareSync::class )->clear_remote( __( 'plugin deactivated', 'sentinel-shield' ) );
 		wp_clear_scheduled_hook( CloudflareSync::CRON );
+		wp_clear_scheduled_hook( CloudflareSync::CHECK );
 		wp_clear_scheduled_hook( AuditExporter::CRON );
 		foreach ( array_merge( MaintenanceModule::CRON_HOOKS, LockdownModule::CRON_HOOKS, array( FeedUpdater::CRON_HOOK, GeoUpdater::CRON_HOOK ) ) as $hook ) {
 			wp_clear_scheduled_hook( $hook );

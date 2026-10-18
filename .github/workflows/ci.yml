@@ -34,8 +34,8 @@ jobs:
       - run: composer install --no-progress --no-interaction
       - name: Coding standards (WordPress + PHP 8.1 compatibility)
         run: vendor/bin/phpcs -q
-      - name: Settings reference in readme.txt is current
-        run: php bin/readme-settings.php --check
+      - name: Settings reference (docs/SETTINGS.md) is current
+        run: php bin/settings-docs.php --check
       - name: Release build (versions agree, zip and checksums)
         run: bin/build.sh --skip-tests
       - uses: actions/upload-artifact@v5
@@ -161,8 +161,17 @@ jobs:
         with:
           php-version: '8.3'
           extensions: mysqli, sodium
-          tools: wp-cli
           coverage: none
+      # Pinned and checksum-verified; setup-php's tool download failed once (run 39165610025).
+      - name: Install WP-CLI
+        run: |
+          V=2.12.0
+          URL=https://github.com/wp-cli/wp-cli/releases/download/v$V/wp-cli-$V.phar
+          curl -fsSL --retry 5 --retry-delay 5 -o /tmp/wp.phar "$URL"
+          curl -fsSL --retry 5 --retry-delay 5 -o /tmp/wp.sha512 "$URL.sha512"
+          echo "$(cat /tmp/wp.sha512)  /tmp/wp.phar" | sha512sum -c -
+          sudo install -m 755 /tmp/wp.phar /usr/local/bin/wp
+          wp --info
       - name: Create a throwaway site with the plugin active
         run: |
           # The official tarball: wp core download can cut paths over 100 characters on some systems.
@@ -177,7 +186,7 @@ jobs:
         run: |
           # Several workers, so the smoke test can send simultaneous requests.
           # The early firewall runs as auto_prepend_file; the plugin is a symlink, so tell it where the snapshot is.
-          (cd /tmp/site && SENTINEL_SHIELD_GATE_CONFIG=/tmp/site/wp-content/uploads/sentinel-shield/gate.json PHP_CLI_SERVER_WORKERS=8 \
+          (cd /tmp/site && SENTINEL_SHIELD_GATE_CONFIG=/tmp/sentinel-shield-data/gate.json PHP_CLI_SERVER_WORKERS=8 \
             php -d auto_prepend_file="$GITHUB_WORKSPACE/early-gate.php" -S 127.0.0.1:8099 -t . > /tmp/server.log 2>&1 &)
           for i in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:8099/ && exit 0; sleep 1; done
           cat /tmp/server.log; exit 1
@@ -191,6 +200,16 @@ jobs:
           wp option update home http://localhost:8099 --path=/tmp/site
           wp user create pk_user pk@example.org --role=administrator --user_pass=Pk-pass-12345 --path=/tmp/site
           PASSKEY_USER=pk_user PASSKEY_PASS=Pk-pass-12345 python3 bin/passkey-e2e.py http://localhost:8099
+      - name: Plugin Check on the release zip
+        run: |
+          bin/build.sh --skip-tests --allow-dirty
+          wp plugin deactivate sentinel-shield --path=/tmp/site
+          rm /tmp/site/wp-content/plugins/sentinel-shield
+          unzip -q dist/sentinel-shield-*.zip -d /tmp/site/wp-content/plugins
+          wp plugin install plugin-check --version=2.1.0 --activate --path=/tmp/site
+          wp plugin activate sentinel-shield --path=/tmp/site
+          wp plugin check sentinel-shield --path=/tmp/site --format=csv --fields=file,line,type,code,message | tee /tmp/plugin-check.csv
+          if grep -q ',\(ERROR\|WARNING\),' /tmp/plugin-check.csv; then echo "Plugin Check reported problems"; exit 1; fi
       - name: Server log
         if: failure()
         run: tail -100 /tmp/server.log

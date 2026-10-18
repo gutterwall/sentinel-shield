@@ -45,6 +45,13 @@ final class Mutex {
 	private static array $how = array();
 
 	/**
+	 * Value of each lock row this request holds ("<lease end>|<owner token>").
+	 *
+	 * @var array<string, string>
+	 */
+	private static array $rows = array();
+
+	/**
 	 * Takes a lock, waiting up to $timeout seconds.
 	 *
 	 * @param string $name    Lock name (any length).
@@ -87,21 +94,22 @@ final class Mutex {
 		$suppress = $wpdb->suppress_errors( true );
 		try {
 			do {
-				$now = time();
-				$ins = $wpdb->query( $wpdb->prepare( 'INSERT IGNORE INTO %i (option_name, option_value, autoload) VALUES (%s, %s, %s)', $table, $key, (string) ( $now + self::LEASE ), 'no' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- A lock row must bypass the options cache.
+				$now   = time();
+				$value = ( $now + self::LEASE ) . '|' . bin2hex( random_bytes( 8 ) );
+				$ins   = $wpdb->query( $wpdb->prepare( 'INSERT IGNORE INTO %i (option_name, option_value, autoload) VALUES (%s, %s, %s)', $table, $key, $value, 'no' ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- A lock row must bypass the options cache.
 				if ( false === $ins ) {
 					self::health( 'failed', (string) $wpdb->last_error );
 					return false;
 				}
 				if ( 1 === (int) $ins ) {
-					return self::took_row( $name );
+					return self::took_row( $name, $value );
 				}
 				// Held by someone; take it over only once its lease has run out.
 				$until = $wpdb->get_var( $wpdb->prepare( 'SELECT option_value FROM %i WHERE option_name = %s', $table, $key ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- See above.
 				if ( null !== $until && (int) $until < $now ) {
-					$cas = $wpdb->query( $wpdb->prepare( 'UPDATE %i SET option_value = %s WHERE option_name = %s AND option_value = %s', $table, (string) ( $now + self::LEASE ), $key, (string) $until ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- See above.
+					$cas = $wpdb->query( $wpdb->prepare( 'UPDATE %i SET option_value = %s WHERE option_name = %s AND option_value = %s', $table, $value, $key, (string) $until ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- See above.
 					if ( 1 === (int) $cas ) {
-						return self::took_row( $name );
+						return self::took_row( $name, $value );
 					}
 				}
 				if ( microtime( true ) >= $deadline ) {
@@ -117,11 +125,13 @@ final class Mutex {
 	/**
 	 * Notes a lock taken with a lock row.
 	 *
-	 * @param string $name Lock name.
+	 * @param string $name  Lock name.
+	 * @param string $value Row value (lease end and owner token).
 	 */
-	private static function took_row( string $name ): bool {
+	private static function took_row( string $name, string $value ): bool {
 		self::$held[ $name ] = 1;
 		self::$how[ $name ]  = 'row';
+		self::$rows[ $name ] = $value;
 		self::health( 'row' );
 		return true;
 	}
@@ -177,7 +187,9 @@ final class Mutex {
 		unset( self::$held[ $name ] );
 		global $wpdb;
 		if ( 'row' === ( self::$how[ $name ] ?? '' ) ) {
-			$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE option_name = %s', $wpdb->base_prefix . 'options', '_' . self::db_name( $name ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Lock row.
+			// Only our own row: if our lease ran out and another worker took over, its lock stays.
+			$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE option_name = %s AND option_value = %s', $wpdb->base_prefix . 'options', '_' . self::db_name( $name ), (string) ( self::$rows[ $name ] ?? '' ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Lock row.
+			unset( self::$rows[ $name ] );
 		} else {
 			$wpdb->query( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', self::db_name( $name ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Named locks are not cacheable.
 		}
@@ -203,6 +215,30 @@ final class Mutex {
 		} finally {
 			self::release( $name );
 		}
+	}
+
+	/**
+	 * Extends a held lock row's lease (call during long work). Named locks need
+	 * no renewal. Returns false when the lease was lost to another worker.
+	 *
+	 * @param string $name Lock name.
+	 */
+	public static function renew( string $name ): bool {
+		if ( 'row' !== ( self::$how[ $name ] ?? '' ) ) {
+			return isset( self::$held[ $name ] );
+		}
+		global $wpdb;
+		$value = ( time() + self::LEASE ) . '|' . substr( (string) self::$rows[ $name ], (int) strpos( (string) self::$rows[ $name ], '|' ) + 1 );
+		if ( $value === self::$rows[ $name ] ) {
+			// Same second: nothing to extend (MySQL would report 0 rows changed); just check we still own it.
+			return self::$rows[ $name ] === $wpdb->get_var( $wpdb->prepare( 'SELECT option_value FROM %i WHERE option_name = %s', $wpdb->base_prefix . 'options', '_' . self::db_name( $name ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Lock row.
+		}
+		$done = $wpdb->query( $wpdb->prepare( 'UPDATE %i SET option_value = %s WHERE option_name = %s AND option_value = %s', $wpdb->base_prefix . 'options', $value, '_' . self::db_name( $name ), (string) self::$rows[ $name ] ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Lock row.
+		if ( 1 !== (int) $done ) {
+			return false;
+		}
+		self::$rows[ $name ] = $value;
+		return true;
 	}
 
 	/**

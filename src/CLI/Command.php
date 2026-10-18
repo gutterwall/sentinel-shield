@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace SentinelShield\CLI;
 
+defined( 'ABSPATH' ) || exit;
+
 use SentinelShield\Container;
 use SentinelShield\Cron\CronInspector;
 use SentinelShield\Feeds\FeedCatalog;
@@ -45,8 +47,6 @@ use SentinelShield\TwoFactor\UserTwoFactor;
 use SentinelShield\Unlock\UnlockService;
 use WP_CLI;
 use SentinelShield\Safety\Health;
-
-defined( 'ABSPATH' ) || exit;
 
 /**
  * Manage Sentinel Shield. WP-CLI requests are never blocked.
@@ -1177,7 +1177,8 @@ final class Command {
 	 */
 	public function server_export( array $args, array $assoc_args ): void {
 		unset( $assoc_args );
-		$labels = $this->c->get( EarlyGate::class )->compile()['blocked'];
+		$data   = $this->c->get( EarlyGate::class )->compile();
+		$labels = $data['blocked'];
 		switch ( $args[0] ?? '' ) {
 			case 'nginx':
 				WP_CLI::line( rtrim( EarlyGate::nginx( $labels ) ) );
@@ -1189,7 +1190,11 @@ final class Command {
 				WP_CLI::line( implode( "\n", $labels ) );
 				break;
 			case 'cloudflare':
-				WP_CLI::line( implode( "\n", CloudflareSync::items( $labels ) ) );
+				$conv = CloudflareSync::items( $labels, (string) $this->c->get( Settings::class )->get( 'cloudflare.ipv6', 'skip' ), $data['allow_set'] );
+				WP_CLI::line( implode( "\n", $conv['items'] ) );
+				if ( $conv['skipped'] || $conv['expanded'] ) {
+					WP_CLI::warning( sprintf( '%d entries left out (Cloudflare lists take IPv6 ranges up to /64 only), %d single IPv6 addresses widened to /64.', $conv['skipped'], $conv['expanded'] ) );
+				}
 				break;
 			default:
 				WP_CLI::error( 'Format must be nginx, apache, text or cloudflare.' );
@@ -1220,7 +1225,7 @@ final class Command {
 		if ( ! $sync->enabled() ) {
 			WP_CLI::error( 'Cloudflare sync is off or not configured (cloudflare.sync, cloudflare.account_id, cloudflare.list_id and a token saved on the Server & CDN tab).' );
 		}
-		$state = $sync->sync();
+		$state = $sync->sync( true );
 		empty( $state['ok'] ) ? WP_CLI::error( (string) $state['error'] ) : WP_CLI::success( sprintf( 'Synced %d items.', (int) $state['count'] ) );
 	}
 

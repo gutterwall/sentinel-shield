@@ -45,7 +45,7 @@ final class AlertsPanel {
 			'test'   => __( 'Test alerts', 'sentinel-shield' ),
 		);
 		$health = Mailer::health();
-		echo '<table class="widefat striped ss-narrow"><thead><tr><th>' . esc_html__( 'Email', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Last sent', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Last failure', 'sentinel-shield' ) . '</th></tr></thead><tbody>';
+		echo '<table class="widefat striped ss-narrow"><thead><tr><th>' . esc_html__( 'Email', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Last accepted by the mail system', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Last refused', 'sentinel-shield' ) . '</th></tr></thead><tbody>';
 		foreach ( $kinds as $kind => $label ) {
 			$entry = (array) ( $health[ $kind ] ?? array() );
 			$fail  = empty( $entry['last_fail'] ) ? '—' : wp_date( 'Y-m-d H:i', (int) $entry['last_fail'] ) . ': ' . (string) ( $entry['error'] ?? '' );

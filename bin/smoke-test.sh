@@ -96,6 +96,10 @@ if [ "${SMOKE_EARLY_GATE:-0}" = 1 ]; then
 	[ "$CODE" = 403 ] && grep -qi '^x-sentinel-shield-gate: early' "$OUT.h" && pass "a blocked IP is refused before WordPress loads" || fail "the early firewall did not block (HTTP $CODE)"
 	CODE=$(curl -s -o "$OUT" -D "$OUT.h" -w '%{http_code}' -H 'X-Forwarded-For: 198.51.100.89' "$URL/")
 	[ "$CODE" = 200 ] && ! grep -qi '^x-sentinel-shield-gate' "$OUT.h" && pass "other visitors pass through to WordPress" || fail "the early firewall blocked another visitor (HTTP $CODE)"
+	DATA=$(dirname "$(cd "$WP_PATH" && pwd -P)")/sentinel-shield-data
+	[ -s "$DATA/gate.json" ] && [ ! -e "$WP_PATH/wp-content/uploads/sentinel-shield/gate.json" ] && pass "the snapshot is kept outside the web root ($DATA)" || fail "the snapshot is not in $DATA"
+	CODE=$(curl -s -o "$OUT" -w '%{http_code}' -H 'X-Forwarded-For: 198.51.100.88' "$URL/wp-content/plugins/sentinel-shield/early-gate.php")
+	[ "$CODE" = 200 ] && [ ! -s "$OUT" ] && pass "early-gate.php requested directly does nothing" || fail "early-gate.php answered a direct request (HTTP $CODE)"
 	"${WP[@]}" sentinel unblock 198.51.100.88 >/dev/null
 	"${WP[@]}" sentinel early-gate rebuild >/dev/null
 	[ "$(get 198.51.100.88 "$URL/")" = 200 ] && pass "unblocking takes effect in the early firewall" || fail "still blocked after unblock"

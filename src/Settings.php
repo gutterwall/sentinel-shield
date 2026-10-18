@@ -94,6 +94,7 @@ final class Settings {
 				'sync'       => false,
 				'account_id' => '',
 				'list_id'    => '',
+				'ipv6'       => 'skip',
 			),
 			// Every public blocklist is opt-in.
 			'feeds'      => array(
