@@ -15,6 +15,7 @@ use SentinelShield\Repository\EventRepository;
 use SentinelShield\Settings;
 use SentinelShield\Support\Mutex;
 use SentinelShield\Support\Throttle;
+use SentinelShield\Support\Mailer;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -132,17 +133,21 @@ final class TwoFactorLogin {
 	 * The ways an account can pass the second step right now.
 	 *
 	 * @param \WP_User $user Account.
-	 * @return list<string> Any of totp, email, backup.
+	 * @return list<string> Any of passkey, totp, email, backup.
 	 */
 	public function methods( \WP_User $user ): array {
 		$id      = (int) $user->ID;
 		$totp    = $this->users->has_totp( $id );
+		$passkey = (bool) $this->users->passkeys( $id );
 		$methods = array();
+		if ( $passkey ) {
+			$methods[] = 'passkey';
+		}
 		if ( $totp && null !== $this->users->totp_secret( $id ) ) {
 			$methods[] = 'totp';
 		}
-		// Required accounts without an app get emailed codes until they set one up.
-		if ( $this->email_allowed() && ( $this->users->email_enabled( $id ) || ( $this->required( $user ) && ! $totp ) ) ) {
+		// Required accounts without an app or passkey get emailed codes until they set one up.
+		if ( $this->email_allowed() && ( $this->users->email_enabled( $id ) || ( $this->required( $user ) && ! $totp && ! $passkey ) ) ) {
 			$methods[] = 'email';
 		}
 		if ( ( $totp || $methods ) && $this->users->backup_remaining( $id ) > 0 ) {
@@ -182,7 +187,7 @@ final class TwoFactorLogin {
 	 */
 	public function setup_missing( \WP_User $user ): bool {
 		$id = (int) $user->ID;
-		return $this->required( $user ) && ! $this->users->has_totp( $id ) && ! ( $this->email_allowed() && $this->users->email_enabled( $id ) );
+		return $this->required( $user ) && ! $this->users->has_totp( $id ) && ! $this->users->passkeys( $id ) && ! ( $this->email_allowed() && $this->users->email_enabled( $id ) );
 	}
 
 	/**
@@ -288,7 +293,7 @@ final class TwoFactorLogin {
 		$this->save_pending( $id, $pending );
 		$code    = '';
 		$methods = $this->methods( $user );
-		if ( ! in_array( 'totp', $methods, true ) && in_array( 'email', $methods, true ) ) {
+		if ( ! in_array( 'totp', $methods, true ) && ! in_array( 'passkey', $methods, true ) && in_array( 'email', $methods, true ) ) {
 			$reserved = $this->reserve_email( $user, $pending );
 			$code     = is_string( $reserved ) ? $reserved : '';
 		}
@@ -443,7 +448,7 @@ final class TwoFactorLogin {
 			substr( $code, 0, 4 ) . ' ' . substr( $code, 4 ),
 			(string) ( $this->ip )()
 		);
-		if ( ! wp_mail( $user->user_email, $subject, $body ) ) {
+		if ( ! Mailer::send( $user->user_email, $subject, $body, 'code' ) ) {
 			return new \WP_Error( 'sentinel_shield_2fa_email', __( 'The code could not be emailed. Use your authenticator app or a backup code, or contact the site administrator.', 'sentinel-shield' ) );
 		}
 		return true;
@@ -527,6 +532,95 @@ final class TwoFactorLogin {
 			);
 		}
 
+		return $this->wrong_attempt( $user, $pending, $budget, $now );
+	}
+
+	/**
+	 * The passkey challenge for a pending login, created on first use and
+	 * replaced after every attempt (so a response cannot be replayed).
+	 *
+	 * @param \WP_User             $user    Account.
+	 * @param array<string, mixed> $pending Pending login.
+	 * @return array<string, mixed> Options for navigator.credentials.get().
+	 */
+	public function passkey_options( \WP_User $user, array &$pending ): array {
+		if ( empty( $pending['webauthn'] ) ) {
+			$pending['webauthn'] = WebAuthn::challenge();
+			$this->save_pending( (int) $user->ID, $pending );
+		}
+		return WebAuthn::for_site()->request_options( (string) $pending['webauthn'], array_map( 'strval', array_keys( $this->users->passkeys( (int) $user->ID ) ) ) );
+	}
+
+	/**
+	 * Checks a passkey response for a pending login; same limits as codes.
+	 *
+	 * @param \WP_User $user     Account.
+	 * @param string   $token    Pending login token.
+	 * @param string   $response JSON from the browser: {id, client, auth, signature} (base64url).
+	 * @return array{result:string, method:string}
+	 */
+	public function attempt_passkey( \WP_User $user, string $token, string $response ): array {
+		return Mutex::run(
+			self::lock_name( (int) $user->ID ),
+			self::LOCK_WAIT,
+			function () use ( $user, $token, $response ): array {
+				$id = (int) $user->ID;
+				self::refresh( $id );
+				$pending = $this->pending( $id, $token );
+				if ( null === $pending ) {
+					return array(
+						'result' => 'expired',
+						'method' => '',
+					);
+				}
+				$now    = ( $this->clock )();
+				$budget = $this->budget( $id, $now );
+				if ( count( $budget['wrong'] ) >= self::WRONG_PER_HOUR ) {
+					$this->drop_pending( $id );
+					return array(
+						'result' => 'too_many',
+						'method' => '',
+					);
+				}
+				$challenge           = (string) ( $pending['webauthn'] ?? '' );
+				$pending['webauthn'] = WebAuthn::challenge();
+				$data                = json_decode( $response, true );
+				$keys                = $this->users->passkeys( $id );
+				$cred                = is_array( $data ) ? (string) ( $data['id'] ?? '' ) : '';
+				if ( '' !== $challenge && isset( $keys[ $cred ] ) ) {
+					try {
+						$count = WebAuthn::for_site()->verify_assertion( $keys[ $cred ], WebAuthn::unb64u( (string) ( $data['client'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['auth'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['signature'] ?? '' ) ), $challenge );
+						$this->users->touch_passkey( $id, $cred, $count, $now );
+						$this->drop_pending( $id );
+						return array(
+							'result' => 'ok',
+							'method' => 'passkey',
+						);
+					} catch ( \RuntimeException $e ) {
+						$this->log( 'twofa_failed', $user, mb_substr( __( 'Passkey refused:', 'sentinel-shield' ) . ' ' . $e->getMessage(), 0, 255 ) );
+					}
+				}
+				return $this->wrong_attempt( $user, $pending, $budget, $now );
+			},
+			array(
+				'result' => 'busy',
+				'method' => '',
+			)
+		);
+	}
+
+	/**
+	 * Counts a failed second step (code or passkey) and ends the login after
+	 * MAX_TRIES. Call with the account's lock held.
+	 *
+	 * @param \WP_User                 $user    Account.
+	 * @param array<string, mixed>     $pending Pending login.
+	 * @param array<string, list<int>> $budget  Account budget.
+	 * @param int                      $now     Unix time.
+	 * @return array{result:string, method:string}
+	 */
+	private function wrong_attempt( \WP_User $user, array $pending, array $budget, int $now ): array {
+		$id                = (int) $user->ID;
 		$pending['tries']  = (int) $pending['tries'] + 1;
 		$budget['wrong'][] = $now;
 		$this->save_budget( $id, $budget );
@@ -659,7 +753,18 @@ final class TwoFactorLogin {
 		$error   = null;
 		// phpcs:disable WordPress.Security.NonceVerification.Missing -- The pending-login token in the HttpOnly cookie ties the form to this login.
 		if ( 'POST' === Request::method() ) {
-			if ( isset( $_POST['sentinel_shield_send_email'] ) ) {
+			if ( isset( $_POST['sentinel_shield_passkey'] ) && '' !== $_POST['sentinel_shield_passkey'] ) {
+				$result = $this->attempt_passkey( $user, $token, (string) wp_unslash( $_POST['sentinel_shield_passkey'] ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- JSON checked by WebAuthn verification.
+				if ( 'ok' === $result['result'] ) {
+					$this->complete( $user, $pending, ! empty( $_POST['sentinel_shield_trust'] ) );
+				}
+				if ( 'too_many' === $result['result'] || 'expired' === $result['result'] ) {
+					$this->set_cookie( self::COOKIE, '', 1 );
+					$this->page_message( __( 'Too many failed attempts. Please log in again.', 'sentinel-shield' ) );
+				}
+				$error   = new \WP_Error( self::ERROR_WRONG, __( '<strong>Error:</strong> The passkey could not be verified. Try again, or use another method.', 'sentinel-shield' ) );
+				$pending = (array) $this->pending( (int) $user->ID, $token );
+			} elseif ( isset( $_POST['sentinel_shield_send_email'] ) ) {
 				$sent = $this->send_email_code( $user, $token );
 				if ( is_wp_error( $sent ) ) {
 					$error = $sent;
@@ -746,6 +851,9 @@ final class TwoFactorLogin {
 	 */
 	private function render_form( \WP_User $user, array $methods, array $pending, string $notice, ?\WP_Error $error ): void {
 		$lines = array();
+		if ( in_array( 'passkey', $methods, true ) ) {
+			$lines[] = __( 'Use your passkey or security key.', 'sentinel-shield' );
+		}
 		if ( in_array( 'totp', $methods, true ) ) {
 			$lines[] = __( 'Enter the 6-digit code from your authenticator app.', 'sentinel-shield' );
 		}
@@ -767,15 +875,29 @@ final class TwoFactorLogin {
 		}
 		login_header( __( 'Two-factor authentication', 'sentinel-shield' ), $message, $error );
 		$action = $this->screen_url( ! empty( $pending['interim'] ) );
-		if ( $methods ) {
-			echo '<form name="sentinel_shield_2fa" id="loginform" action="' . esc_url( $action ) . '" method="post" autocomplete="off">';
-			echo '<p><label for="sentinel-shield-code">' . esc_html__( 'Authentication code', 'sentinel-shield' ) . '</label>';
-			echo '<input type="text" name="sentinel_shield_code" id="sentinel-shield-code" class="input" value="" size="20" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" required autofocus></p>';
-			$days = (int) $this->settings->get( 'twofa.remember_days', 0 );
+		$days   = (int) $this->settings->get( 'twofa.remember_days', 0 );
+		$trust  = static function ( string $suffix ) use ( $days ): void {
 			if ( $days > 0 ) {
 				/* translators: %d: number of days. */
-				echo '<p class="forgetmenot"><input name="sentinel_shield_trust" type="checkbox" id="sentinel-shield-trust" value="1"> <label for="sentinel-shield-trust">' . esc_html( sprintf( _n( 'Trust this browser for %d day', 'Trust this browser for %d days', $days, 'sentinel-shield' ), $days ) ) . '</label></p>';
+				echo '<p class="forgetmenot"><input name="sentinel_shield_trust" type="checkbox" id="sentinel-shield-trust' . esc_attr( $suffix ) . '" value="1"> <label for="sentinel-shield-trust' . esc_attr( $suffix ) . '">' . esc_html( sprintf( _n( 'Trust this browser for %d day', 'Trust this browser for %d days', $days, 'sentinel-shield' ), $days ) ) . '</label></p>';
 			}
+		};
+		if ( in_array( 'passkey', $methods, true ) ) {
+			$options = $this->passkey_options( $user, $pending );
+			echo '<form id="sentinel-shield-passkey-form" class="ss-passkey" action="' . esc_url( $action ) . '" method="post" style="margin-bottom:16px">';
+			echo '<input type="hidden" name="sentinel_shield_passkey" value="">';
+			$trust( '-pk' );
+			echo '<p class="submit"><button type="button" class="button button-primary button-large" style="width:100%" data-ss-passkey="get" data-field="sentinel_shield_passkey" data-options="' . esc_attr( (string) wp_json_encode( $options ) ) . '">' . esc_html__( 'Use a passkey', 'sentinel-shield' ) . '</button></p>';
+			echo '<p class="ss-passkey-error" role="alert" style="color:#d63638"></p>';
+			echo '</form>';
+			echo '<script src="' . esc_url( plugins_url( 'assets/passkeys.js', SENTINEL_SHIELD_FILE ) . '?ver=' . SENTINEL_SHIELD_VERSION ) . '"></script>'; // phpcs:ignore WordPress.WP.EnqueuedResources.NonEnqueuedScript -- The login screen is rendered directly.
+		}
+		$codes = array_diff( $methods, array( 'passkey' ) );
+		if ( $codes ) {
+			echo '<form name="sentinel_shield_2fa" id="loginform" action="' . esc_url( $action ) . '" method="post" autocomplete="off">';
+			echo '<p><label for="sentinel-shield-code">' . esc_html__( 'Authentication code', 'sentinel-shield' ) . '</label>';
+			echo '<input type="text" name="sentinel_shield_code" id="sentinel-shield-code" class="input" value="" size="20" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" required' . ( in_array( 'passkey', $methods, true ) ? '' : ' autofocus' ) . '></p>';
+			$trust( '' );
 			echo '<p class="submit"><input type="submit" class="button button-primary button-large" value="' . esc_attr__( 'Verify', 'sentinel-shield' ) . '"></p>';
 			echo '</form>';
 			if ( in_array( 'email', $methods, true ) ) {

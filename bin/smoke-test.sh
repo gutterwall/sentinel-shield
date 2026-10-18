@@ -86,6 +86,23 @@ TRIED=$("${WP[@]}" db query "SELECT COUNT(*) FROM $("${WP[@]}" db prefix)sentine
 [ -n "$TRIED" ] && [ "$TRIED" -le 5 ] && pass "20 simultaneous wrong logins from one IP: $TRIED checked, never more than the limit" || fail "concurrent logins got past the limit ($TRIED checked)"
 "${WP[@]}" sentinel unblock 198.51.100.77 >/dev/null
 
+if [ "${SMOKE_EARLY_GATE:-0}" = 1 ]; then
+	# The server must run with auto_prepend_file=.../early-gate.php (and SENTINEL_SHIELD_GATE_CONFIG if needed).
+	echo "Early firewall (auto_prepend_file)"
+	"${WP[@]}" sentinel settings-set firewall.early_gate prepend >/dev/null
+	"${WP[@]}" sentinel block 198.51.100.88 --reason=smoke >/dev/null
+	"${WP[@]}" sentinel early-gate rebuild >/dev/null
+	CODE=$(curl -s -o "$OUT" -D "$OUT.h" -w '%{http_code}' -H 'X-Forwarded-For: 198.51.100.88' "$URL/")
+	[ "$CODE" = 403 ] && grep -qi '^x-sentinel-shield-gate: early' "$OUT.h" && pass "a blocked IP is refused before WordPress loads" || fail "the early firewall did not block (HTTP $CODE)"
+	CODE=$(curl -s -o "$OUT" -D "$OUT.h" -w '%{http_code}' -H 'X-Forwarded-For: 198.51.100.89' "$URL/")
+	[ "$CODE" = 200 ] && ! grep -qi '^x-sentinel-shield-gate' "$OUT.h" && pass "other visitors pass through to WordPress" || fail "the early firewall blocked another visitor (HTTP $CODE)"
+	"${WP[@]}" sentinel unblock 198.51.100.88 >/dev/null
+	"${WP[@]}" sentinel early-gate rebuild >/dev/null
+	[ "$(get 198.51.100.88 "$URL/")" = 200 ] && pass "unblocking takes effect in the early firewall" || fail "still blocked after unblock"
+	"${WP[@]}" sentinel settings-set firewall.early_gate off >/dev/null
+	rm -f "$OUT.h"
+fi
+
 echo "Two-factor"
 "${WP[@]}" sentinel settings-set twofa.required all >/dev/null
 CODE=$(login 198.51.100.20 smoke_user "$SMOKE_PASS")
@@ -113,7 +130,7 @@ echo "Admin pages"
 curl -s -o /dev/null -c "$JAR" -H 'X-Forwarded-For: 198.51.100.30' -b 'wordpress_test_cookie=WP%20Cookie%20check' \
 	--data-urlencode 'log=smoke_admin' --data-urlencode "pwd=$SMOKE_PASS" -d 'wp-submit=Log+In&testcookie=1' "$URL/wp-login.php"
 PAGES="sentinel-shield sentinel-shield-rules sentinel-shield-events sentinel-shield-lockdown sentinel-shield-cron sentinel-shield-tools"
-for tab in general ip_detection lockout login geo blocklists lockdown modules docs; do PAGES="$PAGES sentinel-shield-settings&tab=$tab"; done
+for tab in general ip_detection lockout login geo blocklists server alerts lockdown modules docs; do PAGES="$PAGES sentinel-shield-settings&tab=$tab"; done
 for page in $PAGES; do
 	CODE=$(curl -s -o "$OUT" -w '%{http_code}' -b "$JAR" -H 'X-Forwarded-For: 198.51.100.30' "$URL/wp-admin/admin.php?page=$page")
 	[ "$CODE" = 200 ] || fail "admin page $page: HTTP $CODE"

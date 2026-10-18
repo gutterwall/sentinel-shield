@@ -18,6 +18,7 @@ use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockdown\UploadGuard;
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Settings;
+use SentinelShield\Support\Mailer;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -189,14 +190,15 @@ final class LockdownModule implements ModuleInterface {
 		$lines[] = '';
 		$lines[] = __( 'Review them (and approve anything you recognize) here:', 'sentinel-shield' );
 		$lines[] = Admin::url( 'sentinel-shield-lockdown' );
-		wp_mail(
+		Mailer::send(
 			(string) get_site_option( 'admin_email' ),
 			'integrity' === $source
 				/* translators: %s: site name. */
 				? sprintf( __( '[%s] File integrity: changed files found', 'sentinel-shield' ), wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ) )
 				/* translators: %s: site name. */
 				: sprintf( __( '[%s] Malware scan: new findings', 'sentinel-shield' ), wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ) ),
-			implode( "\n", $lines )
+			implode( "\n", $lines ),
+			'alert'
 		);
 	}
 }

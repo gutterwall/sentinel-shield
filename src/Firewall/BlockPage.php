@@ -50,8 +50,9 @@ final class BlockPage {
 	 * @param string   $ip       Client IP.
 	 * @param string   $notice   Optional notice.
 	 * @param bool     $preview  Admin preview banner.
+	 * @param bool     $early    Template for the early firewall (placeholders, unlock link instead of the form).
 	 */
-	public static function html( Decision $decision, Settings $settings, string $ip, string $notice = '', bool $preview = false ): string {
+	public static function html( Decision $decision, Settings $settings, string $ip, string $notice = '', bool $preview = false, bool $early = false ): string {
 		$banner = $preview ? '<p class="preview">' . esc_html__( 'Preview: this is what blocked visitors see. You are not blocked.', 'sentinel-shield' ) . '</p>' : '';
 
 		if ( '404' === $settings->get( 'general.block_response' ) ) {
@@ -70,14 +71,19 @@ final class BlockPage {
 		if ( '' !== $decision->reason ) {
 			$body .= '<dt>' . esc_html__( 'Reason', 'sentinel-shield' ) . '</dt><dd>' . esc_html( $decision->reason ) . '</dd>';
 		}
-		$body .= '<dt>' . esc_html__( 'Time (UTC)', 'sentinel-shield' ) . '</dt><dd>' . esc_html( gmdate( 'Y-m-d H:i:s' ) ) . '</dd>';
+		$body .= '<dt>' . esc_html__( 'Time (UTC)', 'sentinel-shield' ) . '</dt><dd>' . ( $early ? '%%TIME%%' : esc_html( gmdate( 'Y-m-d H:i:s' ) ) ) . '</dd>';
 		$body .= '</dl>';
 
 		if ( '' !== $notice ) {
 			$body .= '<p class="notice" role="status">' . esc_html( $notice ) . '</p>';
 		}
 
-		if ( $settings->is_module_enabled( 'unlock' ) ) {
+		if ( $early && $settings->is_module_enabled( 'unlock' ) ) {
+			// The early firewall runs without WordPress and cannot make the form's token;
+			// this link reaches WordPress, whose block page has the form.
+			$body .= '<h2>' . esc_html__( 'Are you a site administrator?', 'sentinel-shield' ) . '</h2>';
+			$body .= '<p><a href="' . esc_url( add_query_arg( 'sentinel_unlock_form', '1', home_url( '/' ) ) ) . '">' . esc_html__( 'Request a one-time unlock link', 'sentinel-shield' ) . '</a></p>';
+		} elseif ( $settings->is_module_enabled( 'unlock' ) ) {
 			$body .= '<form method="post" action="' . esc_url( home_url( '/' ) ) . '">';
 			$body .= '<h2>' . esc_html__( 'Are you a site administrator?', 'sentinel-shield' ) . '</h2>';
 			$body .= '<p>' . esc_html__( 'Enter the email address of your administrator account and we will send a one-time unlock link.', 'sentinel-shield' ) . '</p>';
@@ -90,6 +96,16 @@ final class BlockPage {
 			$body .= '</form>';
 		}
 		return self::wrap( esc_html__( 'Access denied', 'sentinel-shield' ), $body );
+	}
+
+	/**
+	 * The block page for the early firewall, with %%IP%%, %%REASON%% and
+	 * %%TIME%% placeholders (filled in, escaped, by early-gate.php).
+	 *
+	 * @param Settings $settings Settings.
+	 */
+	public static function early_template( Settings $settings ): string {
+		return self::html( new Decision( Decision::BLOCK, '%%REASON%%' ), $settings, '%%IP%%', '', false, true );
 	}
 
 	/**

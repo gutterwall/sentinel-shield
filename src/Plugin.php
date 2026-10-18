@@ -55,6 +55,9 @@ use SentinelShield\TwoFactor\SecretBox;
 use SentinelShield\TwoFactor\TwoFactorLogin;
 use SentinelShield\TwoFactor\UserTwoFactor;
 use SentinelShield\Unlock\UnlockService;
+use SentinelShield\Firewall\EarlyGate;
+use SentinelShield\Firewall\CloudflareSync;
+use SentinelShield\Audit\AuditExporter;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -140,6 +143,20 @@ final class Plugin {
 		$c->set( FeedRepository::class, static fn(): FeedRepository => new FeedRepository( $GLOBALS['wpdb'] ) );
 		$c->set( AdminRegistry::class, static fn(): AdminRegistry => new AdminRegistry() );
 		$c->set( FileIntegrity::class, static fn(): FileIntegrity => new FileIntegrity() );
+		$c->set(
+			EarlyGate::class,
+			static fn( Container $c ): EarlyGate => new EarlyGate(
+				$c->get( Settings::class ),
+				$c->get( BlockRepository::class ),
+				$c->get( RuleCache::class ),
+				$c->get( Gate::class ),
+				$c->get( SafetyGuard::class ),
+				$c->get( ClientIpFactory::class ),
+				$c->get( EventRepository::class )
+			)
+		);
+		$c->set( AuditExporter::class, static fn( Container $c ): AuditExporter => new AuditExporter( $c->get( Settings::class ), $c->get( EventRepository::class ) ) );
+		$c->set( CloudflareSync::class, static fn( Container $c ): CloudflareSync => new CloudflareSync( $c->get( Settings::class ), $c->get( SecretBox::class ), $c->get( EarlyGate::class ) ) );
 		$c->set(
 			IntegrityScanner::class,
 			static fn( Container $c ): IntegrityScanner => new IntegrityScanner( $c->get( AdminRegistry::class ), $c->get( EventRepository::class ), $c->get( Settings::class ) )
@@ -309,6 +326,10 @@ final class Plugin {
 		);
 
 		( new MaintenanceModule() )->register( $this->container );
+		// Always hooked: the snapshot must follow rule and settings changes even with modules off.
+		$this->container->get( EarlyGate::class )->register();
+		$this->container->get( CloudflareSync::class )->register();
+		$this->container->get( AuditExporter::class )->register();
 		CronControl::register_guard();
 		$container = $this->container;
 		add_action( 'sentinel_shield_settings_saved', static fn() => LockdownModule::on_settings_saved( $container ) );

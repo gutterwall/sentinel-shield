@@ -18,6 +18,8 @@ use SentinelShield\Repository\LoginAttemptRepository;
 use SentinelShield\Repository\OffenseRepository;
 use SentinelShield\Repository\TokenRepository;
 use SentinelShield\Settings;
+use SentinelShield\Firewall\EarlyGate;
+use SentinelShield\Audit\AuditExporter;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -92,6 +94,12 @@ final class MaintenanceModule implements ModuleInterface {
 		if ( $result['rules'] > 0 ) {
 			$container->get( RuleCache::class )->flush();
 		}
+		$gate            = $container->get( EarlyGate::class );
+		$result['early'] = $gate->import_log();
+		$gate->rebuild_if_dirty();
+		$audit = $container->get( AuditExporter::class );
+		$audit->heartbeat();
+		$audit->run();
 		update_site_option( self::LAST_RUN, time() );
 		return $result;
 	}

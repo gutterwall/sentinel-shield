@@ -22,7 +22,9 @@ final class UserTwoFactor {
 	/**
 	 * Every meta key this class and the login flow write.
 	 */
-	public const KEYS = array( 'totp', 'totp_pending', 'totp_last_step', 'totp_added', 'email', 'backup', 'backup_created', 'devices', 'trusted', 'login', 'budget' );
+	public const KEYS = array( 'totp', 'totp_pending', 'totp_last_step', 'totp_added', 'email', 'backup', 'backup_created', 'devices', 'trusted', 'login', 'budget', 'passkeys', 'webauthn_handle', 'passkey_reg', 'reauth', 'reauth_challenge' );
+
+	public const REAUTH_TTL = 600;
 
 	/**
 	 * Constructor.
@@ -309,10 +311,123 @@ final class UserTwoFactor {
 	}
 
 	/**
+	 * Registered passkeys and security keys: credential ID (base64url) => {name, alg, key, count, created, used, aaguid}.
+	 *
+	 * @param int $user_id User.
+	 * @return array<string, array<string, mixed>>
+	 */
+	public function passkeys( int $user_id ): array {
+		$keys = get_user_meta( $user_id, self::META . 'passkeys', true );
+		return is_array( $keys ) ? $keys : array();
+	}
+
+	/**
+	 * Stores a newly registered key. A new method ends trust in browsers, like
+	 * any other change of methods.
+	 *
+	 * @param int                  $user_id User.
+	 * @param array<string, mixed> $cred    WebAuthn::verify_registration() result.
+	 * @param string               $name    Name the user gave it.
+	 * @param int                  $now     Unix time.
+	 */
+	public function add_passkey( int $user_id, array $cred, string $name, int $now ): void {
+		$keys                         = $this->passkeys( $user_id );
+		$keys[ (string) $cred['id'] ] = array(
+			'name'    => '' === trim( $name ) ? __( 'Passkey', 'sentinel-shield' ) : mb_substr( trim( $name ), 0, 60 ),
+			'alg'     => (int) $cred['alg'],
+			'key'     => (string) $cred['key'],
+			'count'   => (int) $cred['count'],
+			'created' => $now,
+			'used'    => 0,
+			'aaguid'  => (string) ( $cred['aaguid'] ?? '' ),
+		);
+		update_user_meta( $user_id, self::META . 'passkeys', $keys );
+		$this->forget_devices( $user_id );
+	}
+
+	/**
+	 * Removes a key.
+	 *
+	 * @param int    $user_id User.
+	 * @param string $id      Credential ID.
+	 */
+	public function remove_passkey( int $user_id, string $id ): bool {
+		$keys = $this->passkeys( $user_id );
+		if ( ! isset( $keys[ $id ] ) ) {
+			return false;
+		}
+		unset( $keys[ $id ] );
+		$keys ? update_user_meta( $user_id, self::META . 'passkeys', $keys ) : delete_user_meta( $user_id, self::META . 'passkeys' );
+		$this->forget_devices( $user_id );
+		return true;
+	}
+
+	/**
+	 * Records a successful use: the new signature counter and the time.
+	 *
+	 * @param int    $user_id User.
+	 * @param string $id      Credential ID.
+	 * @param int    $count   Signature counter.
+	 * @param int    $now     Unix time.
+	 */
+	public function touch_passkey( int $user_id, string $id, int $count, int $now ): void {
+		$keys = $this->passkeys( $user_id );
+		if ( isset( $keys[ $id ] ) ) {
+			$keys[ $id ]['count'] = $count;
+			$keys[ $id ]['used']  = $now;
+			update_user_meta( $user_id, self::META . 'passkeys', $keys );
+		}
+	}
+
+	/**
+	 * The account's WebAuthn user handle (random, not the user ID; base64url).
+	 *
+	 * @param int $user_id User.
+	 */
+	public function webauthn_handle( int $user_id ): string {
+		$handle = (string) get_user_meta( $user_id, self::META . 'webauthn_handle', true );
+		if ( '' === $handle ) {
+			$handle = WebAuthn::b64u( random_bytes( 32 ) );
+			update_user_meta( $user_id, self::META . 'webauthn_handle', $handle );
+		}
+		return $handle;
+	}
+
+	/**
+	 * Whether the user confirmed their password (or a passkey) in this login
+	 * session within the last REAUTH_TTL seconds.
+	 *
+	 * @param int    $user_id User.
+	 * @param string $session Session token (wp_get_session_token()).
+	 * @param int    $now     Unix time.
+	 */
+	public function recently_confirmed( int $user_id, string $session, int $now ): bool {
+		if ( '' === $session ) {
+			return false;
+		}
+		$stamps = get_user_meta( $user_id, self::META . 'reauth', true );
+		return is_array( $stamps ) && (int) ( $stamps[ hash( 'sha256', $session ) ] ?? 0 ) > $now - self::REAUTH_TTL;
+	}
+
+	/**
+	 * Records a fresh confirmation for this login session.
+	 *
+	 * @param int    $user_id User.
+	 * @param string $session Session token.
+	 * @param int    $now     Unix time.
+	 */
+	public function confirm( int $user_id, string $session, int $now ): void {
+		$stamps                               = get_user_meta( $user_id, self::META . 'reauth', true );
+		$stamps                               = is_array( $stamps ) ? array_filter( $stamps, static fn( $t ): bool => (int) $t > $now - self::REAUTH_TTL ) : array();
+		$stamps[ hash( 'sha256', $session ) ] = $now;
+		update_user_meta( $user_id, self::META . 'reauth', $stamps );
+	}
+
+	/**
 	 * Summary for admin screens and WP-CLI.
 	 *
 	 * @param int $user_id User.
-	 * @return array{totp:bool, totp_readable:bool, email:bool, backup:int}
+	 * @return array{totp:bool, totp_readable:bool, email:bool, backup:int, passkeys:int}
 	 */
 	public function summary( int $user_id ): array {
 		$totp = $this->has_totp( $user_id );
@@ -321,6 +436,7 @@ final class UserTwoFactor {
 			'totp_readable' => $totp && null !== $this->totp_secret( $user_id ),
 			'email'         => $this->email_enabled( $user_id ),
 			'backup'        => $this->backup_remaining( $user_id ),
+			'passkeys'      => count( $this->passkeys( $user_id ) ),
 		);
 	}
 

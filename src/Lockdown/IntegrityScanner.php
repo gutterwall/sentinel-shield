@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace SentinelShield\Lockdown;
 
 use SentinelShield\Cron\CronInspector;
+use SentinelShield\Firewall\EarlyGate;
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Settings;
 use SentinelShield\Support\FileWalk;
@@ -347,6 +348,9 @@ final class IntegrityScanner {
 			}
 		}
 		foreach ( $targets as $target => $sources ) {
+			if ( EarlyGate::is_own_gate( $target ) && self::own_file_intact( EarlyGate::gate_file() ) ) {
+				continue; // Sentinel Shield's own early firewall, unchanged.
+			}
 			$exists  = is_file( $target );
 			$code    = $exists ? $this->read( $target ) : '';
 			$reasons = self::signatures( $code );
@@ -394,7 +398,10 @@ final class IntegrityScanner {
 	 */
 	private function check_mu_plugins(): void {
 		foreach ( (array) glob( WPMU_PLUGIN_DIR . '/*.php' ) as $path ) {
-			$path  = (string) $path;
+			$path = (string) $path;
+			if ( EarlyGate::is_own_loader( $path ) ) {
+				continue; // Sentinel Shield's own early firewall loader, exactly as it writes it.
+			}
 			$slug  = basename( $path, '.php' );
 			$extra = is_dir( WP_PLUGIN_DIR . '/' . $slug )
 				? array( array( __( 'the same plugin is also installed as a regular plugin, as SC does', 'sentinel-shield' ), 'critical' ) )
@@ -1023,6 +1030,28 @@ final class IntegrityScanner {
 		if ( count( $this->coverage[ $kind ] ) < 50 && ! in_array( $rel, $this->coverage[ $kind ], true ) ) {
 			$this->coverage[ $kind ][] = $rel;
 		}
+	}
+
+	/**
+	 * Whether a file of this plugin matches the release's checksums.sha256
+	 * (true when there is no checksum file, as in a development copy).
+	 *
+	 * @param string $path File inside the plugin folder.
+	 */
+	public static function own_file_intact( string $path ): bool {
+		$root = dirname( SENTINEL_SHIELD_FILE );
+		$list = $root . '/checksums.sha256';
+		if ( ! is_file( $list ) ) {
+			return true;
+		}
+		$rel = ltrim( substr( wp_normalize_path( $path ), strlen( wp_normalize_path( $root ) ) ), '/' );
+		foreach ( (array) file( $list, FILE_IGNORE_NEW_LINES ) as $line ) {
+			$parts = preg_split( '/\s+\*?/', trim( (string) $line ), 2 );
+			if ( is_array( $parts ) && 2 === count( $parts ) && ltrim( $parts[1], './' ) === $rel ) {
+				return hash_equals( strtolower( $parts[0] ), (string) hash_file( 'sha256', $path ) );
+			}
+		}
+		return false;
 	}
 
 	/**

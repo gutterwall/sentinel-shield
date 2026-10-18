@@ -195,6 +195,25 @@ final class BlockRepository {
 	}
 
 	/**
+	 * Active rules of a list with their source and label (for the early firewall).
+	 *
+	 * @param string $type List type.
+	 * @return list<array{start_hex:string, end_hex:string, expires_at:?string, source:string, label:string}>
+	 */
+	public function active_rules( string $type ): array {
+		$rows = $this->db->get_results(
+			$this->db->prepare(
+				'SELECT HEX(ip_start) AS start_hex, HEX(ip_end) AS end_hex, expires_at, source, label FROM %i WHERE list_type = %s AND (expires_at IS NULL OR expires_at > %s) ORDER BY id',
+				$this->table(),
+				$type,
+				gmdate( 'Y-m-d H:i:s' )
+			),
+			ARRAY_A
+		);
+		return is_array( $rows ) ? $rows : array();
+	}
+
+	/**
 	 * Deletes one rule.
 	 *
 	 * @param int $id Rule ID.

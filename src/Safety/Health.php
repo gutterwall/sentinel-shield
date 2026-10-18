@@ -12,6 +12,8 @@ namespace SentinelShield\Safety;
 use SentinelShield\Container;
 use SentinelShield\Cron\CronInspector;
 use SentinelShield\Feeds\FeedCatalog;
+use SentinelShield\Firewall\CloudflareSync;
+use SentinelShield\Firewall\EarlyGate;
 use SentinelShield\Feeds\FeedUpdater;
 use SentinelShield\Geo\CountryDatabase;
 use SentinelShield\Lockdown\FileIntegrity;
@@ -19,6 +21,8 @@ use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Modules\MaintenanceModule;
 use SentinelShield\Settings;
 use SentinelShield\Support\Mutex;
+use SentinelShield\Audit\AuditExporter;
+use SentinelShield\Support\Mailer;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -161,6 +165,67 @@ final class Health {
 					? sprintf( __( 'Not updated for a long time (or never): %s. See the Blocklists tab for the last error.', 'sentinel-shield' ), implode( ', ', $stale ) )
 					: __( 'Every enabled list is up to date.', 'sentinel-shield' )
 			);
+		}
+
+		// Early firewall and edge blocking.
+		$gate = $this->c->get( EarlyGate::class );
+		if ( 'off' !== $gate->mode() ) {
+			$snap  = (array) get_site_option( EarlyGate::STATE, array() );
+			$issue = '';
+			if ( ! $snap || ! is_file( EarlyGate::path() ) ) {
+				$issue = __( 'No snapshot yet; it is written on the next settings save or hourly.', 'sentinel-shield' );
+			} elseif ( ! empty( $snap['error'] ) ) {
+				$issue = (string) $snap['error'];
+			} elseif ( (int) $snap['valid_until'] < time() ) {
+				$issue = __( 'The snapshot is out of date, so the early firewall lets everything through to WordPress until it is rebuilt. Check that scheduled jobs run.', 'sentinel-shield' );
+			} elseif ( 'mu_plugin' === $gate->mode() && ! EarlyGate::is_own_loader( EarlyGate::loader_path() ) ) {
+				$issue = __( 'The must-use loader is missing; save the Server & CDN settings again (the mu-plugins folder must be writable).', 'sentinel-shield' );
+			} elseif ( null !== $details && '' === EarlyGate::active_as() ) {
+				$issue = 'prepend' === $gate->mode() ? __( 'Not running: add the auto_prepend_file line shown on the Server & CDN tab and restart PHP.', 'sentinel-shield' ) : __( 'Not running for this request.', 'sentinel-shield' );
+			}
+			$add( 'early', __( 'Early firewall', 'sentinel-shield' ), '' === $issue ? 'ok' : 'warn', '' === $issue ? __( 'Running with a current snapshot.', 'sentinel-shield' ) : $issue );
+		}
+		if ( $settings->get( 'cloudflare.sync', false ) ) {
+			$cf = CloudflareSync::state();
+			$add(
+				'cloudflare',
+				__( 'Cloudflare IP list', 'sentinel-shield' ),
+				! empty( $cf['ok'] ) ? 'ok' : 'warn',
+				! empty( $cf['ok'] )
+					/* translators: 1: date, 2: count. */
+					? sprintf( __( 'Synced %1$s (%2$d items).', 'sentinel-shield' ), wp_date( 'Y-m-d H:i', (int) $cf['time'] ), (int) $cf['count'] )
+					: ( empty( $cf ) ? __( 'Not synced yet.', 'sentinel-shield' ) : (string) $cf['error'] )
+			);
+		}
+
+		// Alerts actually leaving the site.
+		$failing = array_values( array_filter( array( 'alert', 'code', 'unlock' ), array( Mailer::class, 'failing' ) ) );
+		$add(
+			'mail',
+			__( 'Alert emails', 'sentinel-shield' ),
+			$failing ? 'bad' : 'ok',
+			$failing
+				/* translators: 1: kinds of email, 2: error. */
+				? sprintf( __( 'The last attempt failed for: %1$s (%2$s). Alerts and codes may not reach anyone; see Settings → Alerts & Audit Log.', 'sentinel-shield' ), implode( ', ', $failing ), (string) ( Mailer::health()[ $failing[0] ]['error'] ?? '' ) )
+				: __( 'No recent delivery failures.', 'sentinel-shield' )
+		);
+		$audit = AuditExporter::state();
+		if ( '' !== (string) $settings->get( 'audit.webhook_url', '' ) ) {
+			$stuck = ! empty( $audit['failures'] ) && (int) ( $audit['failed'] ?? 0 ) - (int) ( $audit['last_ok'] ?? 0 ) > HOUR_IN_SECONDS;
+			$add(
+				'audit',
+				__( 'Remote audit log', 'sentinel-shield' ),
+				$stuck ? 'warn' : 'ok',
+				$stuck
+					/* translators: %s: error. */
+					? sprintf( __( 'Deliveries have been failing for over an hour: %s. Events are kept and sent when the endpoint works again.', 'sentinel-shield' ), (string) ( $audit['error'] ?? '' ) )
+					: __( 'Events are being delivered.', 'sentinel-shield' )
+			);
+		}
+		$beat = (array) ( $audit['heartbeat'] ?? array() );
+		if ( '' !== (string) $settings->get( 'audit.heartbeat_url', '' ) && $beat && empty( $beat['ok'] ) ) {
+			/* translators: %s: error. */
+			$add( 'heartbeat', __( 'Heartbeat', 'sentinel-shield' ), 'warn', sprintf( __( 'The last ping failed: %s.', 'sentinel-shield' ), (string) $beat['error'] ) );
 		}
 
 		// Country database.

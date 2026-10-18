@@ -40,6 +40,8 @@ final class DocsTab {
 			'ss-doc-admins'    => __( 'Administrator approvals (who may be an administrator)', 'sentinel-shield' ),
 			'ss-doc-login'     => __( 'Login security: brute-force protection and two-factor authentication', 'sentinel-shield' ),
 			'ss-doc-scans'     => __( 'Malware scan, file integrity, health and performance', 'sentinel-shield' ),
+			'ss-doc-edge'      => __( 'Early firewall, server and Cloudflare blocking', 'sentinel-shield' ),
+			'ss-doc-audit'     => __( 'Alerts and the remote audit log', 'sentinel-shield' ),
 			'ss-doc-settings'  => __( 'Every setting and what it does', 'sentinel-shield' ),
 			'ss-doc-constants' => __( 'wp-config.php constants', 'sentinel-shield' ),
 			'ss-doc-recovery'  => __( 'Locked out? Ways back in', 'sentinel-shield' ),
@@ -55,6 +57,8 @@ final class DocsTab {
 		$this->admins();
 		$this->login();
 		$this->scans();
+		$this->edge();
+		$this->audit();
 		$this->settings();
 		$this->constants();
 		$this->recovery();
@@ -271,6 +275,8 @@ final class DocsTab {
 			array(
 				__( 'After a correct password, accounts with two-factor authentication are asked for a code before they are logged in. No login cookie exists until the code is right. The code screen lasts 10 minutes and allows five tries; each wrong code counts as a failed login for the brute-force limits.', 'sentinel-shield' ),
 				__( 'Limits are per account, not per login, so starting the login again resets nothing: at most 10 code screens, 6 emailed codes (one a minute) and 15 wrong codes an hour per account. Up to three code screens can be open at once, so someone else starting a login does not cancel yours, and a correct code closes them all.', 'sentinel-shield' ),
+				__( 'Passkeys and security keys are the strongest method: a phone, the computer\'s Windows Hello or Touch ID, or a security key such as a YubiKey confirms the login with a fingerprint, face or PIN. A passkey only works on this site, so it cannot be phished. Each user can add several (name them so they can tell them apart). Passkeys need an https:// site (or localhost).', 'sentinel-shield' ),
+				__( 'Fresh confirmation: adding or removing any method (passkey, app, email codes) or creating new backup codes needs the user to confirm their password, or use a passkey, within the last 10 minutes in the same login session. Someone who steals a login cookie therefore cannot plant their own authenticator. Administrators resetting another user\'s two-factor confirm their own password.', 'sentinel-shield' ),
 				__( 'Methods, set up by each user under Users → Two-Factor Authentication: an authenticator app (any app that supports time-based codes; the QR code is drawn by this site, so the secret never leaves it), codes by email (8 digits, valid 10 minutes, if this site allows them), and ten one-time backup codes for a lost phone. Authenticator secrets are encrypted with keys from wp-config.php; backup and email codes are stored only as keyed hashes.', 'sentinel-shield' ),
 				__( 'Requiring it: "Required for administrator-level accounts" (recommended) or "for every account". An account that is required to use it but has no authenticator app gets a code by email at each login and a reminder in the dashboard until it sets one up. If email codes are off, such accounts cannot log in at all until an app is set up for them; the Login Security tab lists them, and you cannot switch email codes off while your own login needs them. A required account is never let in with only its password. Check that this site can send email before requiring it.', 'sentinel-shield' ),
 				__( 'XML-RPC and the REST API cannot show a code screen, so password logins there are refused for two-factor accounts. Application passwords (Users → Profile) keep working: they are separate, revocable secrets that only a logged-in user can create.', 'sentinel-shield' ),
@@ -323,6 +329,52 @@ final class DocsTab {
 	}
 
 	/**
+	 * Early firewall, server files and Cloudflare.
+	 */
+	private function edge(): void {
+		echo '<div class="ss-card ss-docs" id="ss-doc-edge"><h2>' . esc_html__( 'Early firewall, server and Cloudflare blocking', 'sentinel-shield' ) . '</h2>';
+		$this->section(
+			__( 'Early firewall', 'sentinel-shield' ),
+			array(
+				__( 'The normal firewall runs when Sentinel Shield loads, after WordPress itself and any plugins loaded before it. The early firewall (early-gate.php) runs first: as a must-use plugin before other plugins, or through auto_prepend_file before WordPress and before any other PHP file on the site. A blocked IP then costs almost nothing, even during a flood.', 'sentinel-shield' ),
+				__( 'It does not load WordPress. It reads a snapshot (uploads/sentinel-shield/gate.json) that WordPress writes after every rule or settings change and hourly: your proxy setup, this server\'s addresses, the allowlist, the enforced block rules (test mode is respected) and the compiled blocklist feeds. The snapshot expires with the next rule expiry (at most a day); a stale, missing or damaged snapshot makes the early firewall step aside, so it never blocks more than WordPress would. Allowlisted IPs, this server\'s cron requests and unlock links always pass, and its blocks appear in the event log (module early_gate) within the hour.', 'sentinel-shield' ),
+				__( 'For auto_prepend_file, add the line shown on the Server & CDN tab to php.ini, .user.ini, an Apache php_value line or nginx\'s PHP_VALUE, then restart PHP. Only one file can be prepended; if another security plugin uses it (Wordfence does), use the must-use plugin option. The malware scan recognizes this plugin\'s own gate and loader and does not report them, unless they were changed.', 'sentinel-shield' ),
+				__( 'Emergency switch-off without WordPress: create an empty file named gate.disabled next to gate.json (or delete gate.json).', 'sentinel-shield' ),
+			)
+		);
+		$this->section(
+			__( 'Blocking at the web server or at Cloudflare', 'sentinel-shield' ),
+			array(
+				__( 'PHP only runs for PHP requests; images, scripts and other static files are served without it. To refuse blocked IPs for everything, let the web server or the CDN do it. "Write nginx and Apache blocklist files" keeps nginx-deny.conf and apache-deny.conf in uploads/sentinel-shield current with your enforced block rules (manual rules and lockouts; blocklist feeds are left out because they can be very large): include the file in the server configuration; nginx needs a reload to pick up changes.', 'sentinel-shield' ),
+				__( 'With Cloudflare, Sentinel Shield can replace the items of one Cloudflare account IP list with the same rules whenever they change (at most 10,000; single IPv6 addresses become their /64). Create an IP list, an API token with "Account Filter Lists: Edit", and a WAF custom rule (ip.src in $your_list) with the action Block. The token is stored encrypted and never exported. Blocked IPs then never reach your server at all.', 'sentinel-shield' ),
+			)
+		);
+		echo '</div>';
+	}
+
+	/**
+	 * Alerts, delivery checks and the remote audit log.
+	 */
+	private function audit(): void {
+		echo '<div class="ss-card ss-docs" id="ss-doc-audit"><h2>' . esc_html__( 'Alerts and the remote audit log', 'sentinel-shield' ) . '</h2>';
+		$this->section(
+			__( 'Alert delivery', 'sentinel-shield' ),
+			array(
+				__( 'Every email Sentinel Shield sends (security alerts, two-factor codes, unlock links) records whether WordPress\'s mailer accepted it, with the mailer\'s error message when not. A failing alert email shows as a problem on the Enforcement health card, and Settings → Alerts & Audit Log lists the last success and failure per kind. "Send a test alert" tries every channel at once.', 'sentinel-shield' ),
+				__( 'A heartbeat URL is pinged every hour; a monitoring service such as healthchecks.io alerts you when the pings stop, which is what happens when the site is down, Sentinel Shield was switched off, or scheduled jobs stopped.', 'sentinel-shield' ),
+			)
+		);
+		$this->section(
+			__( 'Remote audit log', 'sentinel-shield' ),
+			array(
+				__( 'Whoever takes over a site can empty its database, and with it the event log. With a webhook set, security events (or all events) are POSTed as JSON to your endpoint as they happen: when the request that logged them ends, and from a retry queue with growing delays when the endpoint is down, so nothing is lost. Events can also go to the server\'s syslog (facility auth, tag sentinel-shield).', 'sentinel-shield' ),
+				__( 'Each delivery is signed: the header X-Sentinel-Shield-Signature carries t=<time>,v1=HMAC-SHA256(secret, "<time>.<body>"). Each event carries seq (a running number), prev and hash, where hash is SHA-256 of prev, a newline and the event\'s JSON without seq, prev and hash. A gap in seq, or a prev that is not the previous hash, means events are missing or were changed. wp sentinel audit-export prints the stored events in the same format, for SIEM imports or an offline copy.', 'sentinel-shield' ),
+			)
+		);
+		echo '</div>';
+	}
+
+	/**
 	 * Recovery options.
 	 */
 	private function recovery(): void {
@@ -332,6 +384,7 @@ final class DocsTab {
 			array( __( 'Your administrator rights are suspended', 'sentinel-shield' ), __( 'Ask an approved administrator to approve you, or run wp sentinel approve-admin <your login>. If SENTINEL_SHIELD_ADMINS is defined, add your login#ID to it in wp-config.php instead. As a last resort, use the SENTINEL_SHIELD_DISABLE constant and approve yourself from the Malware Lockdown page, then remove the constant.', 'sentinel-shield' ) ),
 			array( __( 'Your login is refused because of your location', 'sentinel-shield' ), __( 'Add your IP to the allowlist with wp sentinel allow <ip>, or change the countries with wp sentinel settings-set geo.countries "US, CA" (or geo.mode off). The SENTINEL_SHIELD_DISABLE constant also works. Check where an IP is with wp sentinel geo <ip>.', 'sentinel-shield' ) ),
 			array( __( 'Too many failed logins', 'sentinel-shield' ), __( 'Wait for the lockout to end, or run wp sentinel unblock <ip> and wp sentinel login-attempts --clear --ip=<ip>. If your account is protected after an attack, log in from an IP you used before, or clear it with wp sentinel login-attempts --clear --account=<login>.', 'sentinel-shield' ) ),
+			array( __( 'The early firewall blocks something it should not', 'sentinel-shield' ), __( 'Create an empty file named gate.disabled in uploads/sentinel-shield (or delete gate.json there): the early firewall then lets everything through. Remove the auto_prepend_file line or set Early firewall to Off to switch it off for good. It only ever blocks what the normal firewall would; check the rule with wp sentinel check <ip>.', 'sentinel-shield' ) ),
 			array( __( 'You lost your two-factor phone', 'sentinel-shield' ), __( 'Use a backup code or an emailed code. Otherwise ask another administrator to reset two-factor on your profile, or run wp sentinel 2fa <your login> --reset. The SENTINEL_SHIELD_DISABLE constant also turns two-factor off.', 'sentinel-shield' ) ),
 			array( __( 'You need to install a plugin or theme', 'sentinel-shield' ), __( 'Untick "Block installing and uploading plugins and themes" on the Malware Lockdown tab, install, then tick it again. Or install with WP-CLI.', 'sentinel-shield' ) ),
 			array( __( 'A plugin needs a blockchain gateway', 'sentinel-shield' ), __( 'Untick "Block blockchain command channels", or allow the specific host with the sentinel_shield_allowed_chain_hosts filter.', 'sentinel-shield' ) ),
@@ -368,6 +421,11 @@ final class DocsTab {
 			'geo-update'                        => __( 'Downloads the DB-IP country database now.', 'sentinel-shield' ),
 			'feeds / feeds-update'              => __( 'Shows blocklist status, or downloads enabled lists now.', 'sentinel-shield' ),
 			'cron'                              => __( 'Lists scheduled tasks with last-run status and origin.', 'sentinel-shield' ),
+			'early-gate [rebuild]'              => __( 'Early firewall status and setup lines, or rebuild its snapshot and the server blocklist files now.', 'sentinel-shield' ),
+			'server-export <format>'            => __( 'Prints the enforced blocklist for nginx, Apache, as plain text or in Cloudflare\'s format.', 'sentinel-shield' ),
+			'cloudflare-sync [--test]'          => __( 'Syncs the blocklist to the Cloudflare IP list now, or only checks the connection.', 'sentinel-shield' ),
+			'audit-export'                      => __( 'Prints events as hash-chained JSON lines (--days, --all), like the webhook sends them.', 'sentinel-shield' ),
+			'audit-test'                        => __( 'Sends a test through every alert channel: email, webhook, heartbeat, syslog.', 'sentinel-shield' ),
 			'health'                            => __( 'Whether protection is actually working (enforcing or test mode, locks, scheduled jobs, blocklists, scans); exits with code 1 on a problem, for monitoring.', 'sentinel-shield' ),
 			'scan'                              => __( 'Runs the whole malware scan at once (no time limit) and lists files it could only partly read; exits with code 1 when there are alerts, for monitoring.', 'sentinel-shield' ),
 			'verify'                            => __( 'Verifies core and plugin files against WordPress.org checksums now; --coverage lists every item with its result. Exits with code 1 when files differ.', 'sentinel-shield' ),

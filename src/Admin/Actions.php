@@ -44,6 +44,9 @@ use SentinelShield\Settings;
 use SentinelShield\SettingsSchema;
 use SentinelShield\TwoFactor\UserTwoFactor;
 use SentinelShield\Unlock\UnlockService;
+use SentinelShield\Firewall\EarlyGate;
+use SentinelShield\Firewall\CloudflareSync;
+use SentinelShield\Audit\AuditExporter;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -81,6 +84,8 @@ final class Actions {
 			'lockdown'           => 'lockdown',
 			'geo'                => 'geo',
 			'login_security'     => 'login_security',
+			'server'             => 'server',
+			'alerts'             => 'alerts',
 		);
 		foreach ( $map as $action => $method ) {
 			add_action( 'admin_post_sentinel_shield_' . $action, array( $this, $method ) );
@@ -428,6 +433,89 @@ final class Actions {
 			);
 		} else {
 			View::flash( 'error', __( 'Unknown action.', 'sentinel-shield' ) );
+		}
+		View::redirect( $back );
+	}
+
+	/**
+	 * Alerts & Audit Log tab actions: test every channel, send now, new secret.
+	 */
+	public function alerts(): void {
+		View::guard( 'sentinel_shield_alerts' );
+		$op     = isset( $_POST['op'] ) ? sanitize_key( wp_unslash( $_POST['op'] ) ) : '';
+		$export = $this->c->get( AuditExporter::class );
+		$back   = Admin::url( 'sentinel-shield-settings', array( 'tab' => 'alerts' ) );
+		switch ( $op ) {
+			case 'test':
+				$names = array(
+					'email'     => __( 'Email', 'sentinel-shield' ),
+					'webhook'   => __( 'Webhook', 'sentinel-shield' ),
+					'heartbeat' => __( 'Heartbeat', 'sentinel-shield' ),
+					'syslog'    => __( 'Syslog', 'sentinel-shield' ),
+				);
+				foreach ( $export->test() as $channel => $result ) {
+					View::flash( 'info', ( $names[ $channel ] ?? $channel ) . ': ' . $result );
+				}
+				$this->audit( 'alert_test' );
+				$back .= '#ss-delivery';
+				break;
+			case 'send':
+				$state = $export->run();
+				View::flash( empty( $state['failures'] ) ? 'success' : 'error', empty( $state['failures'] ) ? __( 'Waiting events sent.', 'sentinel-shield' ) : (string) $state['error'] );
+				$back .= '#ss-audit';
+				break;
+			case 'new_secret':
+				AuditExporter::new_secret();
+				$this->audit( 'audit_secret_renewed' );
+				View::flash( 'success', __( 'A new signing secret was created. Update your receiver.', 'sentinel-shield' ) );
+				$back .= '#ss-audit';
+				break;
+			default:
+				View::flash( 'error', __( 'Unknown action.', 'sentinel-shield' ) );
+		}
+		View::redirect( $back );
+	}
+
+	/**
+	 * Server & CDN tab actions: rebuild the snapshot, Cloudflare token, test and sync.
+	 */
+	public function server(): void {
+		View::guard( 'sentinel_shield_server' );
+		$op         = isset( $_POST['op'] ) ? sanitize_key( wp_unslash( $_POST['op'] ) ) : '';
+		$cloudflare = $this->c->get( CloudflareSync::class );
+		$back       = Admin::url( 'sentinel-shield-settings', array( 'tab' => 'server' ) );
+		switch ( $op ) {
+			case 'rebuild':
+				$state = $this->c->get( EarlyGate::class )->rebuild();
+				$this->audit( 'early_gate_rebuild' );
+				View::flash( empty( $state['error'] ) ? 'success' : 'error', empty( $state['error'] ) ? __( 'Snapshot rebuilt.', 'sentinel-shield' ) : (string) $state['error'] );
+				$back .= '#ss-early';
+				break;
+			case 'cf_token':
+				$token = isset( $_POST['token'] ) ? sanitize_text_field( wp_unslash( $_POST['token'] ) ) : '';
+				$cloudflare->set_token( $token );
+				$this->audit( '' === $token ? 'cloudflare_token_removed' : 'cloudflare_token_saved' );
+				View::flash( 'success', '' === $token ? __( 'Cloudflare token removed.', 'sentinel-shield' ) : __( 'Cloudflare token saved.', 'sentinel-shield' ) );
+				$back .= '#ss-cloudflare';
+				break;
+			case 'cf_test':
+				$result = $cloudflare->test();
+				View::flash( $result['ok'] ? 'success' : 'error', $result['message'] );
+				$back .= '#ss-cloudflare';
+				break;
+			case 'cf_sync':
+				if ( ! $cloudflare->enabled() ) {
+					View::flash( 'error', __( 'Switch on "Sync blocked IPs to a Cloudflare IP list" and enter the account ID, list ID and token first.', 'sentinel-shield' ) );
+				} else {
+					$state = $cloudflare->sync();
+					$this->audit( 'cloudflare_sync' );
+					/* translators: %d: number of items. */
+					View::flash( ! empty( $state['ok'] ) ? 'success' : 'error', ! empty( $state['ok'] ) ? sprintf( __( 'Synced %d items to Cloudflare.', 'sentinel-shield' ), (int) $state['count'] ) : (string) $state['error'] );
+				}
+				$back .= '#ss-cloudflare';
+				break;
+			default:
+				View::flash( 'error', __( 'Unknown action.', 'sentinel-shield' ) );
 		}
 		View::redirect( $back );
 	}

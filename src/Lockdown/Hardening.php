@@ -13,6 +13,7 @@ use SentinelShield\Admin\Admin;
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Settings;
 use SentinelShield\Support\Throttle;
+use SentinelShield\Support\Mailer;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -437,11 +438,12 @@ final class Hardening {
 			$advice,
 			Admin::url( 'sentinel-shield-lockdown' ),
 		);
-		wp_mail(
+		Mailer::send(
 			(string) get_site_option( 'admin_email' ),
 			/* translators: %s: site name. */
 			sprintf( __( '[%s] New administrator account', 'sentinel-shield' ), wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ) ),
-			implode( "\n", $lines )
+			implode( "\n", $lines ),
+			'alert'
 		);
 	}
 

@@ -457,10 +457,58 @@ final class TwoFactorTest extends \WP_UnitTestCase {
 		$step->begin( $user );
 		$trust = $step->trust_value( $user->ID, 'device', $this->now + 999 );
 		$this->users->reset( $user->ID );
-		$this->assertSame( array( 'totp' => false, 'totp_readable' => false, 'email' => false, 'backup' => 0 ), $this->users->summary( $user->ID ) );
+		$this->assertSame( array( 'totp' => false, 'totp_readable' => false, 'email' => false, 'backup' => 0, 'passkeys' => 0 ), $this->users->summary( $user->ID ) );
 		$this->assertSame( '', get_user_meta( $user->ID, UserTwoFactor::META . 'login', true ) );
 		$this->assertNotSame( $trust, $step->trust_value( $user->ID, 'device', $this->now + 999 ), 'trusted browsers forgotten' );
 		$this->assertFalse( $step->needs_second_step( $user ) );
+	}
+
+	/**
+	 * A passkey as the second step: the challenge is single-use, a wrong
+	 * response counts like a wrong code, and a correct one logs in.
+	 */
+	public function test_passkey_login(): void {
+		$user = self::factory()->user->create_and_get( array( 'user_pass' => 'right' ) );
+		$rp   = \SentinelShield\TwoFactor\WebAuthn::for_site();
+		$key  = new SoftAuthenticator( \SentinelShield\TwoFactor\WebAuthn::ALG_ES256, $rp->rp_id(), \SentinelShield\TwoFactor\WebAuthn::origin_of( site_url( '/' ) ) );
+		$reg  = \SentinelShield\TwoFactor\WebAuthn::challenge();
+		$resp = $key->register( $reg );
+		$this->users->add_passkey( $user->ID, $rp->verify_registration( \SentinelShield\TwoFactor\WebAuthn::unb64u( $resp['client'] ), \SentinelShield\TwoFactor\WebAuthn::unb64u( $resp['attestation'] ), $reg ), 'Laptop', $this->now );
+		$step = $this->login_step();
+		$this->assertSame( array( 'passkey' ), $step->methods( $user ) );
+		$this->assertTrue( $step->needs_second_step( $user ) );
+
+		$token   = $step->begin( $user );
+		$pending = $step->pending( $user->ID, $token );
+		$options = $step->passkey_options( $user, $pending );
+		$this->assertSame( array( \SentinelShield\TwoFactor\WebAuthn::b64u( $key->id ) ), array_column( $options['allowCredentials'], 'id' ) );
+
+		// Signed for another challenge: wrong, and counted.
+		$this->assertSame( 'wrong', $step->attempt_passkey( $user, $token, (string) wp_json_encode( $key->sign( \SentinelShield\TwoFactor\WebAuthn::challenge() ) ) )['result'] );
+		$this->assertSame( 1, $step->pending( $user->ID, $token )['tries'] );
+
+		// The challenge changed after that attempt; the old one cannot be replayed.
+		$old = $options['challenge'];
+		$this->assertSame( 'wrong', $step->attempt_passkey( $user, $token, (string) wp_json_encode( $key->sign( $old ) ) )['result'] );
+
+		$pending = $step->pending( $user->ID, $token );
+		$fresh   = $step->passkey_options( $user, $pending );
+		$this->assertSame( array( 'ok', 'passkey' ), array_values( $step->attempt_passkey( $user, $token, (string) wp_json_encode( $key->sign( $fresh['challenge'] ) ) ) ) );
+		$this->assertSame( $this->now, $this->users->passkeys( $user->ID )[ \SentinelShield\TwoFactor\WebAuthn::b64u( $key->id ) ]['used'] );
+		$this->assertNull( $step->pending( $user->ID, $token ) );
+	}
+
+	/**
+	 * Fresh authentication: a confirmation is per session and expires.
+	 */
+	public function test_recent_confirmation_is_per_session_and_expires(): void {
+		$id = self::factory()->user->create();
+		$this->assertFalse( $this->users->recently_confirmed( $id, 'session-a', $this->now ) );
+		$this->users->confirm( $id, 'session-a', $this->now );
+		$this->assertTrue( $this->users->recently_confirmed( $id, 'session-a', $this->now + 60 ) );
+		$this->assertFalse( $this->users->recently_confirmed( $id, 'session-b', $this->now + 60 ), 'another session (a stolen cookie elsewhere) is not confirmed' );
+		$this->assertFalse( $this->users->recently_confirmed( $id, 'session-a', $this->now + UserTwoFactor::REAUTH_TTL + 1 ) );
+		$this->assertFalse( $this->users->recently_confirmed( $id, '', $this->now ) );
 	}
 
 	public function test_mask_email(): void {

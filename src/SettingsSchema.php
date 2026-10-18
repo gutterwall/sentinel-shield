@@ -35,6 +35,8 @@ final class SettingsSchema {
 			'login'        => __( 'Login Security', 'sentinel-shield' ),
 			'geo'          => __( 'Login Location', 'sentinel-shield' ),
 			'blocklists'   => __( 'Blocklists', 'sentinel-shield' ),
+			'server'       => __( 'Server & CDN', 'sentinel-shield' ),
+			'alerts'       => __( 'Alerts & Audit Log', 'sentinel-shield' ),
 			'lockdown'     => __( 'Malware Lockdown', 'sentinel-shield' ),
 			'modules'      => __( 'Modules', 'sentinel-shield' ),
 			'docs'         => __( 'Documentation', 'sentinel-shield' ),
@@ -483,6 +485,88 @@ final class SettingsSchema {
 			);
 		}
 
+		$fields[] = array(
+			'key'         => 'audit.webhook_url',
+			'tab'         => 'alerts',
+			'type'        => 'url',
+			'label'       => __( 'Send events to a webhook', 'sentinel-shield' ),
+			'help'        => __( 'An https:// address that receives security events as JSON as they happen (a log service, SIEM, or your own script). Each request is signed with HMAC-SHA256 using the secret shown below, and each event is chained to the previous one by a hash, so missing or altered events show. Someone who takes over the site can empty its database; events already sent stay safe. Failed deliveries are retried with increasing delays.', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'audit.scope',
+			'tab'         => 'alerts',
+			'type'        => 'select',
+			'options'     => array(
+				'security' => __( 'Security events (everything except routine blocked requests)', 'sentinel-shield' ),
+				'all'      => __( 'All events, including every blocked request', 'sentinel-shield' ),
+			),
+			'label'       => __( 'Events to send', 'sentinel-shield' ),
+			'help'        => __( 'Blocked requests can be thousands an hour during an attack; leave them out unless your receiver expects that volume.', 'sentinel-shield' ),
+			'recommended' => 'security',
+		);
+		$fields[] = array(
+			'key'         => 'audit.syslog',
+			'tab'         => 'alerts',
+			'type'        => 'checkbox',
+			'label'       => __( 'Also write events to the system log', 'sentinel-shield' ),
+			'help'        => __( 'Writes each event as a line of JSON to syslog (facility auth, tag sentinel-shield), so the server can forward it (for example rsyslog to a central log server) or fail2ban can act on it.', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'audit.heartbeat_url',
+			'tab'         => 'alerts',
+			'type'        => 'url',
+			'label'       => __( 'Heartbeat URL', 'sentinel-shield' ),
+			'help'        => __( 'Pinged every hour by the maintenance job, for a monitoring service that alerts you when the pings stop (for example healthchecks.io or Uptime Kuma push monitors). Silence means the site is down, Sentinel Shield was switched off, or scheduled jobs stopped: all things an attacker might cause.', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'firewall.early_gate',
+			'tab'         => 'server',
+			'type'        => 'select',
+			'options'     => array(
+				'off'       => __( 'Off', 'sentinel-shield' ),
+				'mu_plugin' => __( 'Before other plugins (must-use plugin, set up automatically)', 'sentinel-shield' ),
+				'prepend'   => __( 'Before WordPress (auto_prepend_file, set up in your server configuration)', 'sentinel-shield' ),
+			),
+			'label'       => __( 'Early firewall', 'sentinel-shield' ),
+			'help'        => __( 'Blocks IPs on your blocklist (manual rules, lockouts and enabled blocklist feeds) before WordPress or other plugins load, so floods from blocked IPs cost almost nothing. "Before other plugins" installs a small must-use plugin. "Before WordPress" also covers PHP files outside WordPress, and needs one line in php.ini, .user.ini or the web server configuration (shown below). Allowlisted IPs, this server\'s cron requests and unlock links always pass; anything doubtful is left to the normal firewall, so it never blocks more than WordPress would.', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'firewall.server_files',
+			'tab'         => 'server',
+			'type'        => 'checkbox',
+			'label'       => __( 'Write nginx and Apache blocklist files', 'sentinel-shield' ),
+			'help'        => __( 'Keeps nginx-deny.conf and apache-deny.conf in uploads/sentinel-shield up to date with your enforced block rules (manual rules and lockouts), so the web server can refuse those IPs before PHP runs, including for images and other static files. Include the file in your server configuration; nginx needs a reload to pick up changes (for example from a cron job).', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'cloudflare.sync',
+			'tab'         => 'server',
+			'type'        => 'checkbox',
+			'label'       => __( 'Sync blocked IPs to a Cloudflare IP list', 'sentinel-shield' ),
+			'help'        => __( 'Replaces the items of one Cloudflare account IP list with your enforced block rules whenever they change (at most 10,000; single IPv6 addresses become their /64). Add a WAF custom rule in Cloudflare that blocks requests whose IP is in the list, and blocked IPs never reach your server. Needs the account ID, the list ID and an API token with "Account Filter Lists: Edit" (entered below).', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'cloudflare.account_id',
+			'tab'         => 'server',
+			'type'        => 'hex_id',
+			'label'       => __( 'Cloudflare account ID', 'sentinel-shield' ),
+			'help'        => __( 'Shown in the Cloudflare dashboard on the account\'s overview page (32 characters).', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'cloudflare.list_id',
+			'tab'         => 'server',
+			'type'        => 'hex_id',
+			'label'       => __( 'Cloudflare IP list ID', 'sentinel-shield' ),
+			'help'        => __( 'Create a list of type IP under Manage Account → Configurations → Lists; its ID is the last part of the list\'s address in the dashboard (32 characters). Sentinel Shield replaces all items of this list, so use a list of its own.', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+
 		$lockdown = array(
 			'disable_file_editor' => array(
 				__( 'Disable the plugin and theme file editor', 'sentinel-shield' ),
@@ -666,6 +750,16 @@ final class SettingsSchema {
 					? sprintf( __( '%1$s: ignored unknown country codes: %2$s', 'sentinel-shield' ), $field['label'], implode( ', ', array_map( 'sanitize_text_field', $invalid ) ) )
 					: null;
 				return array( implode( ', ', $codes ), $error );
+			case 'url':
+				$url = esc_url_raw( trim( is_scalar( $value ) ? (string) $value : '' ), array( 'https' ) );
+				if ( '' === $url && '' !== trim( is_scalar( $value ) ? (string) $value : '' ) ) {
+					/* translators: %s: setting label. */
+					return array( '', sprintf( __( '%s: only https:// addresses are accepted.', 'sentinel-shield' ), $field['label'] ) );
+				}
+				return array( substr( $url, 0, 500 ), null );
+			case 'hex_id':
+				$clean = strtolower( (string) preg_replace( '/[^A-Fa-f0-9]/', '', is_scalar( $value ) ? (string) $value : '' ) );
+				return array( substr( $clean, 0, 64 ), null );
 			case 'server_var':
 				$clean = strtoupper( (string) preg_replace( '/[^A-Za-z0-9_]/', '', is_scalar( $value ) ? (string) $value : '' ) );
 				return array( substr( $clean, 0, 64 ), null );

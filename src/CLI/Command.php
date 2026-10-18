@@ -19,6 +19,9 @@ use SentinelShield\Geo\CountryList;
 use SentinelShield\Geo\GeoResolver;
 use SentinelShield\Geo\GeoUpdater;
 use SentinelShield\Geo\LoginGeoGuard;
+use SentinelShield\Audit\AuditExporter;
+use SentinelShield\Firewall\EarlyGate;
+use SentinelShield\Firewall\CloudflareSync;
 use SentinelShield\Lockdown\AdminRegistry;
 use SentinelShield\Lockdown\FileIntegrity;
 use SentinelShield\Lockdown\IntegrityScanner;
@@ -1049,6 +1052,176 @@ final class Command {
 			return;
 		}
 		WP_CLI\Utils\format_items( $format, $rows, array( 'type', 'subject', 'failures', 'spread', 'last' ) );
+	}
+
+	/**
+	 * Prints events as JSON lines with the same hash chain as the webhook.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--days=<days>]
+	 * : How far back.
+	 * ---
+	 * default: 30
+	 * ---
+	 *
+	 * [--all]
+	 * : Include routine blocked requests.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp sentinel audit-export --days=7 > events.jsonl
+	 *
+	 * @subcommand audit-export
+	 *
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function audit_export( array $args, array $assoc_args ): void {
+		unset( $args );
+		global $wpdb;
+		$table = $this->c->get( \SentinelShield\Repository\EventRepository::class )->table();
+		$since = gmdate( 'Y-m-d H:i:s', time() - max( 1, (int) ( $assoc_args['days'] ?? 30 ) ) * DAY_IN_SECONDS );
+		$last  = 0;
+		$seq   = 0;
+		$hash  = '';
+		do {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Reads the event table in pages.
+			$rows = (array) $wpdb->get_results( $wpdb->prepare( 'SELECT id, created_at, ip_text, event, module, reason, uri, user_agent, user_id, is_test, context FROM %i WHERE id > %d AND created_at >= %s ORDER BY id LIMIT 1000', $table, $last, $since ), ARRAY_A );
+			if ( ! $rows ) {
+				break;
+			}
+			$last = (int) end( $rows )['id'];
+			if ( ! isset( $assoc_args['all'] ) ) {
+				$rows = array_values( array_filter( $rows, static fn( array $r ): bool => ! in_array( $r['event'], AuditExporter::NOISY, true ) ) );
+			}
+			[ $events, $seq, $hash ] = AuditExporter::chain( $rows, $seq, $hash );
+			foreach ( $events as $event ) {
+				WP_CLI::line( (string) wp_json_encode( $event ) );
+			}
+		} while ( true );
+	}
+
+	/**
+	 * Sends a test alert through every configured channel.
+	 *
+	 * @subcommand audit-test
+	 */
+	public function audit_test(): void {
+		foreach ( $this->c->get( AuditExporter::class )->test() as $channel => $result ) {
+			WP_CLI::log( str_pad( $channel . ':', 11 ) . $result );
+		}
+	}
+
+	/**
+	 * Early firewall status, or rebuild its snapshot (and server files).
+	 *
+	 * ## OPTIONS
+	 *
+	 * [<action>]
+	 * : status (default) or rebuild.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp sentinel early-gate
+	 *     wp sentinel early-gate rebuild
+	 *
+	 * @subcommand early-gate
+	 *
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function early_gate( array $args, array $assoc_args ): void {
+		unset( $assoc_args );
+		$gate = $this->c->get( EarlyGate::class );
+		if ( 'rebuild' === ( $args[0] ?? 'status' ) ) {
+			if ( ! $gate->wanted() ) {
+				WP_CLI::error( 'Nothing uses the snapshot: the early firewall, server files and Cloudflare sync are all off.' );
+			}
+			$state = $gate->rebuild();
+			if ( ! empty( $state['error'] ) ) {
+				WP_CLI::error( (string) $state['error'] );
+			}
+			WP_CLI::success( sprintf( 'Snapshot rebuilt: %d blocked ranges, %d allowlisted, valid until %s.', (int) $state['block'], (int) $state['allow'], wp_date( 'Y-m-d H:i', (int) $state['valid_until'] ) ) );
+			return;
+		}
+		$state = (array) get_site_option( EarlyGate::STATE, array() );
+		WP_CLI::log( 'Mode:      ' . $gate->mode() );
+		WP_CLI::log( 'Gate file: ' . EarlyGate::gate_file() );
+		WP_CLI::log( 'Snapshot:  ' . ( $state ? sprintf( '%s (built %s, valid until %s, %d blocked, %d allowlisted)', EarlyGate::path(), wp_date( 'Y-m-d H:i', (int) $state['built'] ), wp_date( 'Y-m-d H:i', (int) $state['valid_until'] ), (int) $state['block'], (int) $state['allow'] ) : 'none' ) );
+		WP_CLI::log( 'Loader:    ' . ( EarlyGate::is_own_loader( EarlyGate::loader_path() ) ? EarlyGate::loader_path() : 'not installed' ) );
+		if ( 'prepend' === $gate->mode() ) {
+			WP_CLI::log( 'Add one of these lines to the server configuration:' );
+			foreach ( EarlyGate::prepend_snippets() as $where => $line ) {
+				WP_CLI::log( "  $where: $line" );
+			}
+		}
+	}
+
+	/**
+	 * Prints the enforced blocklist for a web server or CDN.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <format>
+	 * : nginx, apache, text or cloudflare.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp sentinel server-export nginx > /etc/nginx/sentinel-deny.conf
+	 *
+	 * @subcommand server-export
+	 *
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function server_export( array $args, array $assoc_args ): void {
+		unset( $assoc_args );
+		$labels = $this->c->get( EarlyGate::class )->compile()['blocked'];
+		switch ( $args[0] ?? '' ) {
+			case 'nginx':
+				WP_CLI::line( rtrim( EarlyGate::nginx( $labels ) ) );
+				break;
+			case 'apache':
+				WP_CLI::line( rtrim( EarlyGate::apache( $labels ) ) );
+				break;
+			case 'text':
+				WP_CLI::line( implode( "\n", $labels ) );
+				break;
+			case 'cloudflare':
+				WP_CLI::line( implode( "\n", CloudflareSync::items( $labels ) ) );
+				break;
+			default:
+				WP_CLI::error( 'Format must be nginx, apache, text or cloudflare.' );
+		}
+	}
+
+	/**
+	 * Syncs the enforced blocklist to the configured Cloudflare IP list now.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--test]
+	 * : Only check the connection.
+	 *
+	 * @subcommand cloudflare-sync
+	 *
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function cloudflare_sync( array $args, array $assoc_args ): void {
+		unset( $args );
+		$sync = $this->c->get( CloudflareSync::class );
+		if ( isset( $assoc_args['test'] ) ) {
+			$result = $sync->test();
+			$result['ok'] ? WP_CLI::success( $result['message'] ) : WP_CLI::error( $result['message'] );
+			return;
+		}
+		if ( ! $sync->enabled() ) {
+			WP_CLI::error( 'Cloudflare sync is off or not configured (cloudflare.sync, cloudflare.account_id, cloudflare.list_id and a token saved on the Server & CDN tab).' );
+		}
+		$state = $sync->sync();
+		empty( $state['ok'] ) ? WP_CLI::error( (string) $state['error'] ) : WP_CLI::success( sprintf( 'Synced %d items.', (int) $state['count'] ) );
 	}
 
 	/**

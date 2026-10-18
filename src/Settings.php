@@ -49,7 +49,7 @@ final class Settings {
 	 */
 	public static function defaults(): array {
 		return array(
-			'general'  => array(
+			'general'    => array(
 				'enabled'                  => true,
 				'test_mode'                => true,
 				'test_mode_hours'          => 0,
@@ -61,32 +61,47 @@ final class Settings {
 				'admin_bar'                => true,
 				'delete_data_on_uninstall' => false,
 			),
-			'proxy'    => array(
+			'proxy'      => array(
 				'mode'          => 'none',
 				'header'        => 'X-Forwarded-For',
 				'trusted_cidrs' => '',
 				'server_ips'    => '',
 			),
-			'lockout'  => array(
+			'lockout'    => array(
 				'step1_minutes'      => 15,
 				'step2_minutes'      => 60,
 				'step3_minutes'      => 1440,
 				'step4_minutes'      => 0,
 				'repeat_window_days' => 7,
 			),
-			'unlock'   => array(
+			'unlock'     => array(
 				'token_ttl_minutes'     => 30,
 				'allow_hours'           => 24,
 				'admin_allow_days'      => 30,
 				'max_requests_per_hour' => 3,
 			),
+			'firewall'   => array(
+				'early_gate'   => 'off',
+				'server_files' => false,
+			),
+			'audit'      => array(
+				'webhook_url'   => '',
+				'scope'         => 'security',
+				'syslog'        => false,
+				'heartbeat_url' => '',
+			),
+			'cloudflare' => array(
+				'sync'       => false,
+				'account_id' => '',
+				'list_id'    => '',
+			),
 			// Every public blocklist is opt-in.
-			'feeds'    => array(
+			'feeds'      => array(
 				'update_hours' => '24',
 				'lists'        => array_fill_keys( array_keys( FeedCatalog::NAMES ), false ),
 			),
 			// Brute-force limits are on by default; account-enumeration hiding too.
-			'login'    => array(
+			'login'      => array(
 				'max_failures'             => 5,
 				'window_minutes'           => 15,
 				'account_max_failures'     => 20,
@@ -98,13 +113,13 @@ final class Settings {
 				'app_password_unused_days' => 0,
 			),
 			// Two-factor authentication is optional for every account until required here.
-			'twofa'    => array(
+			'twofa'      => array(
 				'required'      => 'none',
 				'email'         => true,
 				'remember_days' => 0,
 			),
 			// Login location restriction is off until a mode and countries are chosen.
-			'geo'      => array(
+			'geo'        => array(
 				'mode'       => 'off',
 				'countries'  => '',
 				'scope'      => 'all',
@@ -113,7 +128,7 @@ final class Settings {
 				'server_var' => '',
 			),
 			// Malware lockdown measures are opt-in except the alerts, which change nothing.
-			'lockdown' => array(
+			'lockdown'   => array(
 				'disable_file_editor' => false,
 				'block_installs'      => false,
 				'block_php_uploads'   => false,
@@ -124,7 +139,7 @@ final class Settings {
 				'scan_email'          => true,
 				'integrity_checks'    => true,
 			),
-			'modules'  => array(
+			'modules'    => array(
 				'ip_gate'      => array(
 					'enabled'   => true,
 					'test_mode' => 'inherit',

@@ -4,7 +4,7 @@ Tags: security, firewall, two-factor, brute force, login
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.7.0
+Stable tag: 0.8.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -20,6 +20,8 @@ Sentinel Shield is a self-hosted security plugin. Everything runs on your server
 * IP allowlist and blocklist for single IPs, CIDR ranges and IPv6, with reason, source, created/expiry time and hit counts. CSV and plain-text import, CSV export.
 * Public blocklist feeds (all opt-in, one checkbox each): Spamhaus DROP, FireHOL Level 1, Emerging Threats compromised hosts, blocklist.de, CINS Army, IPsum, DShield top 20 and Tor exit nodes. Lists combine additively, update on a polite schedule (twice daily to weekly, never more often than the provider allows, conditional requests, random jitter, backoff on errors), never include private/reserved ranges, and never override your allowlist.
 * Progressive lockout engine (for example 15 min → 1 h → 24 h → permanent).
+* Early firewall: blocks listed IPs before WordPress loads (auto_prepend_file) or before other plugins (a must-use plugin set up automatically), from a snapshot WordPress keeps current; anything doubtful is left to the normal firewall.
+* Blocking before PHP: nginx and Apache blocklist files kept up to date, and sync to a Cloudflare IP list for blocking at the edge.
 
 **Login brute-force protection**
 
@@ -32,7 +34,7 @@ Sentinel Shield is a self-hosted security plugin. Everything runs on your server
 
 **Two-factor authentication**
 
-* Authenticator apps (TOTP, with a QR code drawn on your own server), codes by email, and one-time backup codes. Each user sets it up under Users → Two-Factor Authentication.
+* Passkeys and security keys (WebAuthn: phones, Windows Hello, Touch ID, YubiKeys), authenticator apps (TOTP, with a QR code drawn on your own server), codes by email, and one-time backup codes. Adding or removing a method needs a fresh password or passkey confirmation. Each user sets it up under Users → Two-Factor Authentication.
 * Optional for everyone, or required for administrator-level accounts or every account. Required accounts without an app get a code by email until they set one up, plus a dashboard reminder.
 * Works with wp-login.php, the session-expired login popup and other login forms that use WordPress's login (such as WooCommerce). Password logins over XML-RPC and the REST API are refused for two-factor accounts; application passwords keep working.
 * Authenticator secrets are encrypted with keys from wp-config.php; backup and email codes are stored only as keyed hashes. Codes cannot be reused, five wrong codes cancel the login, and each wrong code counts toward the brute-force limits; code screens, emailed codes and wrong codes are also limited per account per hour, so restarting the login resets nothing. Optional "Trust this browser" for a set number of days, with a per-browser list and revocation; a password change or reset, or a new authenticator, revokes every trusted browser.
@@ -57,12 +59,14 @@ Protection against the "SC" WordPress malware (described by Sucuri in September 
 **Monitoring and tools**
 
 * Scheduled Tasks page (WP-Cron monitor): every task with its schedule, next and last run, failures and the PHP error that stopped it, the code it calls and where that code lives. Run now, pause/resume, change schedule and delete. Highlights overdue tasks, tasks with no code and tasks whose code lives in uploads or eval()'d code.
+* Alerts that are checked: every alert email's delivery is recorded and failures show on the health card; a test button tries every channel; an hourly heartbeat to a monitoring service.
+* Remote audit log: security events sent as they happen to a webhook (signed, hash-chained so missing events show, retried when the endpoint is down) and optionally to syslog, so a compromised database cannot erase the evidence. `wp sentinel audit-export` writes the same format.
 * Enforcement health on the dashboard and as `wp sentinel health` (exit code for monitoring): enforcing or test mode, IP detection, concurrency locks, scheduled jobs, blocklist and country database freshness, open scan findings.
 * Security events log, dashboard and admin bar counter.
 * Test mode everywhere: global log-only mode with optional auto-expiry, per-module overrides, a decision simulator, an IP resolution simulator, a lockout tester, a block page preview and a test unlock email.
 * Documentation tab (Settings → Documentation) with this whole reference, generated from the plugin's own settings, plus the current administrator approvals.
 * Multisite: network-wide rules and settings; per-site overrides for the block page.
-* WP-CLI: `wp sentinel status|check|resolve-ip|block|allow|unblock|remove|list|lockout|test-mode|settings-get|settings-set|settings-keys|settings-export|settings-import|cloudflare-update|cron|feeds|feeds-update|login-attempts|2fa|geo|geo-update|health|scan|verify|admins|approve-admin|revoke-admin|flush-cache|prune|unlock-link|events`.
+* WP-CLI: `wp sentinel status|check|resolve-ip|block|allow|unblock|remove|list|lockout|test-mode|settings-get|settings-set|settings-keys|settings-export|settings-import|cloudflare-update|cron|feeds|feeds-update|login-attempts|2fa|geo|geo-update|health|early-gate|server-export|cloudflare-sync|audit-export|audit-test|scan|verify|admins|approve-admin|revoke-admin|flush-cache|prune|unlock-link|events`.
 
 **Lockout safety**
 
@@ -72,7 +76,7 @@ The admin's IP is auto-allowlisted on activation from wp-admin and on every sett
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.7.0.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.8.0.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
@@ -203,6 +207,21 @@ Malware Lockdown measures are not affected by test mode: once switched on, they 
 * **DShield top 20 attacking networks** (`feeds.lists.dshield_top`; default: Off; recommended: your choice). The 20 /24 networks with the most attack reports over the last three days, from SANS ISC. Licensed CC BY-NC-SA: non-commercial use only. Terms: Non-commercial only (https://feeds.dshield.org/block.txt).
 * **Tor exit nodes** (`feeds.lists.tor_exits`; default: Off; recommended: your choice). Not a list of attackers: blocks everyone using the Tor anonymity network, including legitimate privacy-conscious visitors. Enable only if your site has no Tor audience. Terms: Free to use (https://check.torproject.org/).
 
+= Settings → Server & CDN =
+
+* **Early firewall** (`firewall.early_gate`; default: Off; recommended: your choice). Choices: "Off"; "Before other plugins (must-use plugin, set up automatically)"; "Before WordPress (auto_prepend_file, set up in your server configuration)". Blocks IPs on your blocklist (manual rules, lockouts and enabled blocklist feeds) before WordPress or other plugins load, so floods from blocked IPs cost almost nothing. "Before other plugins" installs a small must-use plugin. "Before WordPress" also covers PHP files outside WordPress, and needs one line in php.ini, .user.ini or the web server configuration (shown below). Allowlisted IPs, this server's cron requests and unlock links always pass; anything doubtful is left to the normal firewall, so it never blocks more than WordPress would.
+* **Write nginx and Apache blocklist files** (`firewall.server_files`; default: Off; recommended: your choice). Keeps nginx-deny.conf and apache-deny.conf in uploads/sentinel-shield up to date with your enforced block rules (manual rules and lockouts), so the web server can refuse those IPs before PHP runs, including for images and other static files. Include the file in your server configuration; nginx needs a reload to pick up changes (for example from a cron job).
+* **Sync blocked IPs to a Cloudflare IP list** (`cloudflare.sync`; default: Off; recommended: your choice). Replaces the items of one Cloudflare account IP list with your enforced block rules whenever they change (at most 10,000; single IPv6 addresses become their /64). Add a WAF custom rule in Cloudflare that blocks requests whose IP is in the list, and blocked IPs never reach your server. Needs the account ID, the list ID and an API token with "Account Filter Lists: Edit" (entered below).
+* **Cloudflare account ID** (`cloudflare.account_id`; default: (empty); recommended: your choice). Shown in the Cloudflare dashboard on the account's overview page (32 characters).
+* **Cloudflare IP list ID** (`cloudflare.list_id`; default: (empty); recommended: your choice). Create a list of type IP under Manage Account → Configurations → Lists; its ID is the last part of the list's address in the dashboard (32 characters). Sentinel Shield replaces all items of this list, so use a list of its own.
+
+= Settings → Alerts & Audit Log =
+
+* **Send events to a webhook** (`audit.webhook_url`; default: (empty); recommended: your choice). An https:// address that receives security events as JSON as they happen (a log service, SIEM, or your own script). Each request is signed with HMAC-SHA256 using the secret shown below, and each event is chained to the previous one by a hash, so missing or altered events show. Someone who takes over the site can empty its database; events already sent stay safe. Failed deliveries are retried with increasing delays.
+* **Events to send** (`audit.scope`; default: Security events (everything except routine blocked requests); recommended: Security events (everything except routine blocked requests)). Choices: "Security events (everything except routine blocked requests)"; "All events, including every blocked request". Blocked requests can be thousands an hour during an attack; leave them out unless your receiver expects that volume.
+* **Also write events to the system log** (`audit.syslog`; default: Off; recommended: your choice). Writes each event as a line of JSON to syslog (facility auth, tag sentinel-shield), so the server can forward it (for example rsyslog to a central log server) or fail2ban can act on it.
+* **Heartbeat URL** (`audit.heartbeat_url`; default: (empty); recommended: your choice). Pinged every hour by the maintenance job, for a monitoring service that alerts you when the pings stop (for example healthchecks.io or Uptime Kuma push monitors). Silence means the site is down, Sentinel Shield was switched off, or scheduled jobs stopped: all things an attacker might cause.
+
 = Settings → Malware Lockdown =
 
 * **Disable the plugin and theme file editor** (`lockdown.disable_file_editor`; default: Off; recommended: On). Removes Appearance → Theme File Editor and Plugins → Plugin File Editor for everyone, like DISALLOW_FILE_EDIT. A stolen admin login can then not be used to paste a backdoor into a theme, which is how SC's theme copy is often planted.
@@ -321,6 +340,18 @@ Each row says what is wrong. The most common on new sites: test mode is still on
 
 No. Entries added automatically when an administrator saves settings only keep that IP from being blocked, so the administrator can always get back in. Everyone else behind the same address still has to stay within the login limits and location rules. Add the address yourself on the IP Rules page if you want to exempt it from those too.
 
+= How do I set up the early firewall? =
+
+On Settings → Server & CDN choose "Before other plugins" (installed automatically as a must-use plugin) or "Before WordPress" and add the auto_prepend_file line shown there to your PHP configuration. The tab and the health card show whether it is running. If it ever gets in the way, create an empty file named gate.disabled in wp-content/uploads/sentinel-shield.
+
+= Do passkeys replace passwords? =
+
+Not yet: a passkey is used as the second step after the password, as the strongest of the two-factor methods. Keep backup codes in case you lose the device; an administrator can reset two-factor for an account.
+
+= What should my webhook receiver do? =
+
+Check the X-Sentinel-Shield-Signature header (HMAC-SHA256 of "<time>.<body>" with the secret shown on the Alerts & Audit Log tab), reject old timestamps, and store the events. To detect tampering, check that seq has no gaps and each event's prev equals the previous event's hash. Answer with any 2xx status; anything else is retried later.
+
 = Why does every visitor have the same IP? =
 
 Your site is behind a proxy and Trusted Proxy is set to None. Pick the matching preset on the IP Detection tab and use the IP resolution simulator on the Tools page to check it.
@@ -338,6 +369,15 @@ No. DShield and FireHOL Level 1 (which includes DShield data) are CC BY-NC-SA, n
 No. Test mode only records what would have been blocked. Use it to validate settings, then turn it off. Malware Lockdown measures are the exception: they are always enforced once switched on.
 
 == Changelog ==
+
+= 0.8.0 =
+* Passkeys and security keys (WebAuthn) as a two-factor method: added on the Two-Factor Authentication page, used with one tap on the login code screen; ES256, EdDSA and RS256 keys, signature counters checked, challenges single-use. Tested end to end in Chrome with a virtual authenticator.
+* Fresh confirmation: adding or removing a two-factor method or creating backup codes needs the password or a passkey within the last 10 minutes of the same login session; administrators confirm their own password to reset another user's two-factor.
+* Early firewall (early-gate.php): blocks listed IPs before WordPress loads (auto_prepend_file) or before other plugins (must-use plugin), from a snapshot WordPress keeps current; steps aside whenever anything is unclear. Emergency switch: a gate.disabled file.
+* Server and edge blocking: nginx and Apache blocklist files kept up to date, Cloudflare IP list sync, and wp sentinel server-export.
+* Remote audit log: security events sent to a webhook as they happen (HMAC-signed, hash-chained, retried with backoff), optional syslog, wp sentinel audit-export.
+* Alert delivery monitoring: every email's delivery is recorded and failures shown on the health card, a test for every channel, and an hourly heartbeat for monitoring services.
+* Health card: early firewall, Cloudflare sync, alert emails, audit delivery and heartbeat rows.
 
 = 0.7.0 =
 Security and performance work from a second code review:
@@ -397,6 +437,9 @@ Security fixes from a code review:
 * Phase 1: core framework, client IP detection, IP rules, lockout engine, lockout safety, test mode tooling, events, WP-CLI.
 
 == Upgrade Notice ==
+
+= 0.8.0 =
+Adds passkeys, a fresh password confirmation before changing two-factor methods, an early firewall that runs before WordPress, nginx/Apache/Cloudflare blocking, a signed and hash-chained remote audit log, and checks that alert emails actually go out. New features are off until you switch them on.
 
 = 0.7.0 =
 Counts wrong REST API application passwords, keeps account attack history through lockouts, refuses limited logins before password hashing, revokes trusted browsers on password changes, and adds an enforcement health card. Automatic administrator allowlist entries no longer exempt their IP from login limits; add your office IP yourself if you relied on that. Trusted browsers have to be trusted again once.

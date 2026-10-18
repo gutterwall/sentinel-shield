@@ -24,6 +24,9 @@ use SentinelShield\Safety\AdminProtection;
 use SentinelShield\Safety\SafetyGuard;
 use SentinelShield\Settings;
 use SentinelShield\Support\Secret;
+use SentinelShield\Firewall\EarlyGate;
+use SentinelShield\Firewall\CloudflareSync;
+use SentinelShield\Audit\AuditExporter;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -86,6 +89,10 @@ final class Installer {
 		}
 		// Without the plugin the rules would be unmanaged; reactivating re-adds them on the next settings save.
 		UploadGuard::sync_htaccess( false );
+		// Without the plugin the early firewall would run on a stale snapshot.
+		EarlyGate::remove_loader();
+		wp_clear_scheduled_hook( CloudflareSync::CRON );
+		wp_clear_scheduled_hook( AuditExporter::CRON );
 		foreach ( array_merge( MaintenanceModule::CRON_HOOKS, LockdownModule::CRON_HOOKS, array( FeedUpdater::CRON_HOOK, GeoUpdater::CRON_HOOK ) ) as $hook ) {
 			wp_clear_scheduled_hook( $hook );
 			wp_clear_scheduled_hook( $hook, array( 'soon' ) );

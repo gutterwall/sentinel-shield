@@ -45,6 +45,17 @@ final class ClientIpFactory {
 	 * @param array<string, mixed>|null $proxy  Proxy settings override.
 	 */
 	public function create( array $server, ?array $proxy = null ): ClientIp {
+		$config = $this->config( $proxy );
+		return new ClientIp( $server, $config['mode'], $config['header'], IpRangeSet::from_strings( $config['cidrs'] ) );
+	}
+
+	/**
+	 * The effective proxy configuration: preset, header and trusted ranges.
+	 *
+	 * @param array<string, mixed>|null $proxy proxy.* settings (default: saved ones).
+	 * @return array{mode:string, header:string, cidrs:list<string>}
+	 */
+	public function config( ?array $proxy = null ): array {
 		$proxy  = $proxy ?? (array) $this->settings->get( 'proxy', array() );
 		$mode   = (string) ( $proxy['mode'] ?? 'none' );
 		$lines  = IpRangeSet::parse_lines( (string) ( $proxy['trusted_cidrs'] ?? '' ) );
@@ -66,6 +77,10 @@ final class ClientIpFactory {
 				$cidrs  = array();
 				$header = '';
 		}
-		return new ClientIp( $server, $mode, $header, IpRangeSet::from_strings( $cidrs ) );
+		return array(
+			'mode'   => $mode,
+			'header' => $header,
+			'cidrs'  => array_values( $cidrs ),
+		);
 	}
 }

@@ -177,6 +177,7 @@ final class RuleCache {
 	public function flush_feeds(): void {
 		$this->feed_memo = null;
 		FeedSnapshot::delete_all();
+		do_action( 'sentinel_shield_feeds_changed' );
 		wp_cache_delete( 'feed_set', self::GROUP );
 		delete_site_transient( 'sentinel_shield_feed_set' );
 	}

@@ -17,6 +17,7 @@ use SentinelShield\Repository\TokenRepository;
 use SentinelShield\Settings;
 use SentinelShield\Support\Mutex;
 use SentinelShield\Support\Throttle;
+use SentinelShield\Support\Mailer;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -257,7 +258,7 @@ final class UnlockService {
 			$url,
 			$ttl
 		);
-		wp_mail( $user->user_email, $subject, $body );
+		Mailer::send( $user->user_email, $subject, $body, 'unlock' );
 	}
 
 	/**

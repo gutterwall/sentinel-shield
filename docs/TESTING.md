@@ -154,7 +154,9 @@ Every push and pull request runs `.github/workflows/ci.yml` (and it runs weekly,
 | Coding standards, docs and build | phpcs (WordPress standards, PHP 8.1 compatibility), the readme settings reference, and a release build (version numbers agree; the zip is kept as an artifact) |
 | Unit tests | PHP 8.1, 8.2, 8.3 and 8.4 |
 | Integration | The WordPress test suite on the oldest supported WordPress (6.4) and the latest, each as a single site and as multisite, on PHP 8.1 to 8.4 |
-| Smoke test | A throwaway site with the plugin active, exercised over HTTP: firewall lockout and unblock, identical login errors, the two-factor step, a required account without any method, the malware scan, WordPress.org checksum verification, and every admin page without PHP errors |
+| Smoke test | A throwaway site with the plugin active, exercised over HTTP: firewall lockout and unblock, identical login errors, REST application passwords, 20 simultaneous logins against a multi-worker server, the early firewall running as auto_prepend_file, the two-factor step, a required account without any method, health, the malware scan, WordPress.org checksum verification, and every admin page without PHP errors |
+| Passkeys | Headless Chrome with a virtual authenticator: confirm identity, add a passkey, log in with it, and refuse a login without it (`bin/passkey-e2e.py`) |
+| Object cache | The integration tests again with a Redis persistent object cache |
 
 Run the same locally:
 
@@ -169,6 +171,11 @@ WP_TESTS_DIR=/tmp/wp-tests/tests-lib WP_MULTISITE=1 vendor/bin/phpunit --testsui
 
 # Smoke test against a throwaway site served from 127.0.0.1 (it changes settings and creates users):
 bin/smoke-test.sh /path/to/throwaway-site http://127.0.0.1:8099
+# With the early firewall: start PHP with -d auto_prepend_file=.../early-gate.php, then
+SMOKE_EARLY_GATE=1 bin/smoke-test.sh /path/to/throwaway-site http://127.0.0.1:8099
+
+# Passkeys in Chrome (the site must answer on http://localhost:<port>):
+PASSKEY_USER=admin PASSKEY_PASS=secret bin/passkey-e2e.py http://localhost:8099
 ```
 
 Security fixes come with a regression test (see `tests/Integration/PentestRegressionTest.php` and `ReviewRegressionTest.php`), so a fix cannot quietly come undone.

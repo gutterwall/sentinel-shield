@@ -70,6 +70,10 @@ final class SettingsPage {
 			( new GeoPanel( $this->c ) )->render();
 		} elseif ( 'login' === $tab ) {
 			( new LoginSecurityPanel( $this->c ) )->render();
+		} elseif ( 'server' === $tab ) {
+			( new ServerPanel( $this->c ) )->render();
+		} elseif ( 'alerts' === $tab ) {
+			( new AlertsPanel( $this->c ) )->render();
 		}
 
 		View::form_open( 'save_settings' );

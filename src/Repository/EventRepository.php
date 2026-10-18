@@ -63,6 +63,14 @@ final class EventRepository {
 				(string) $ctx
 			)
 		);
+		/**
+		 * After a security event is stored (used by the remote audit export).
+		 *
+		 * @param int                  $id    Row ID.
+		 * @param string               $event Event type.
+		 * @param array<string, mixed> $data  Event data.
+		 */
+		do_action( 'sentinel_shield_event_logged', (int) $this->db->insert_id, $event, $data );
 	}
 
 	/**

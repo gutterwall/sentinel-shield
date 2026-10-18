@@ -176,10 +176,21 @@ jobs:
       - name: Start PHP's web server
         run: |
           # Several workers, so the smoke test can send simultaneous requests.
-          (cd /tmp/site && PHP_CLI_SERVER_WORKERS=8 php -S 127.0.0.1:8099 -t . > /tmp/server.log 2>&1 &)
+          # The early firewall runs as auto_prepend_file; the plugin is a symlink, so tell it where the snapshot is.
+          (cd /tmp/site && SENTINEL_SHIELD_GATE_CONFIG=/tmp/site/wp-content/uploads/sentinel-shield/gate.json PHP_CLI_SERVER_WORKERS=8 \
+            php -d auto_prepend_file="$GITHUB_WORKSPACE/early-gate.php" -S 127.0.0.1:8099 -t . > /tmp/server.log 2>&1 &)
           for i in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:8099/ && exit 0; sleep 1; done
           cat /tmp/server.log; exit 1
       - run: bin/smoke-test.sh /tmp/site http://127.0.0.1:8099
+        env:
+          SMOKE_EARLY_GATE: '1'
+      - name: Passkeys in a real browser (Chrome with a virtual authenticator)
+        run: |
+          # WebAuthn needs a host name, not an IP address: serve the same site as localhost.
+          wp option update siteurl http://localhost:8099 --path=/tmp/site
+          wp option update home http://localhost:8099 --path=/tmp/site
+          wp user create pk_user pk@example.org --role=administrator --user_pass=Pk-pass-12345 --path=/tmp/site
+          PASSKEY_USER=pk_user PASSKEY_PASS=Pk-pass-12345 python3 bin/passkey-e2e.py http://localhost:8099
       - name: Server log
         if: failure()
         run: tail -100 /tmp/server.log
