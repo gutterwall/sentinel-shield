@@ -11,6 +11,8 @@ namespace SentinelShield\Repository;
 
 use SentinelShield\Lockout\OffenseStore;
 
+use SentinelShield\Support\Batch;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -90,8 +92,6 @@ final class OffenseRepository implements OffenseStore {
 	 * @return int Rows deleted.
 	 */
 	public function prune( int $before ): int {
-		return (int) $this->db->query(
-			$this->db->prepare( 'DELETE FROM %i WHERE created_at < %s', $this->table(), gmdate( 'Y-m-d H:i:s', $before ) )
-		);
+		return Batch::delete( $this->db, $this->db->prepare( 'DELETE FROM %i WHERE created_at < %s', $this->table(), gmdate( 'Y-m-d H:i:s', $before ) ) );
 	}
 }

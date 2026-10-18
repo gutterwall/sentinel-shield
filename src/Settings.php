@@ -87,12 +87,15 @@ final class Settings {
 			),
 			// Brute-force limits are on by default; account-enumeration hiding too.
 			'login'    => array(
-				'max_failures'         => 5,
-				'window_minutes'       => 15,
-				'account_max_failures' => 20,
-				'instant_usernames'    => '',
-				'generic_errors'       => true,
-				'disable_xmlrpc'       => false,
+				'max_failures'             => 5,
+				'window_minutes'           => 15,
+				'account_max_failures'     => 20,
+				'instant_usernames'        => '',
+				'generic_errors'           => true,
+				'disable_xmlrpc'           => false,
+				'app_passwords'            => 'all',
+				'app_password_max_days'    => 0,
+				'app_password_unused_days' => 0,
 			),
 			// Two-factor authentication is optional for every account until required here.
 			'twofa'    => array(

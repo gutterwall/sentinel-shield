@@ -336,6 +336,7 @@ final class FileIntegrityTest extends \WP_UnitTestCase {
 		$result = $verifier->step( 5.0 );
 		$this->assertTrue( $result['busy'] );
 		$this->assertSame( 0, (int) FileIntegrity::state()['runs'] );
+		$other->query( $other->prepare( 'SELECT RELEASE_LOCK(%s)', $name->invoke( null, 'integrity_scan' ) ) );
 		$other->close();
 	}
 

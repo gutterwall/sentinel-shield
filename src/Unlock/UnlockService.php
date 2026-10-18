@@ -128,12 +128,18 @@ final class UnlockService {
 		}
 		$email = isset( $_POST['sentinel_email'] ) ? sanitize_email( wp_unslash( $_POST['sentinel_email'] ) ) : '';
 		// phpcs:enable
-		return (string) Mutex::run(
+		$out = Mutex::run(
 			'unlock_request',
-			5,
-			fn(): string => $this->request_locked( $ip, $email, $generic ),
-			__( 'The site is busy. Please try again in a minute.', 'sentinel-shield' )
+			2,
+			fn(): array => $this->request_locked( $ip, $email, $generic ),
+			array( 'message' => __( 'The site is busy. Please try again in a minute.', 'sentinel-shield' ) )
 		);
+		// The link was created and counted under the lock; the slow part, sending
+		// it, happens after the lock is released.
+		if ( isset( $out['user'], $out['url'] ) ) {
+			$this->mail_link( $out['user'], $ip, (string) $out['url'] );
+		}
+		return (string) $out['message'];
 	}
 
 	/**
@@ -142,18 +148,19 @@ final class UnlockService {
 	 * @param string $ip      Requesting IP.
 	 * @param string $email   Submitted address.
 	 * @param string $generic Generic answer.
+	 * @return array{message:string, user?:\WP_User, url?:string} The answer, and the link to send.
 	 */
-	private function request_locked( string $ip, string $email, string $generic ): string {
+	private function request_locked( string $ip, string $email, string $generic ): array {
 		$rate_key = 'sentinel_shield_unlock_rl_' . md5( $ip );
 		$count    = (int) get_site_transient( $rate_key );
 		if ( $count >= (int) $this->settings->get( 'unlock.max_requests_per_hour', 3 ) ) {
-			return __( 'Too many unlock requests from your IP. Try again in an hour.', 'sentinel-shield' );
+			return array( 'message' => __( 'Too many unlock requests from your IP. Try again in an hour.', 'sentinel-shield' ) );
 		}
 		set_site_transient( $rate_key, $count + 1, HOUR_IN_SECONDS );
 
 		$user = '' === $email ? false : get_user_by( 'email', $email );
 		if ( ! $user instanceof \WP_User || ! self::can_unlock( $user ) ) {
-			return $generic;
+			return array( 'message' => $generic );
 		}
 		$limit = $this->over_limit( (int) $user->ID );
 		if ( null !== $limit ) {
@@ -169,10 +176,13 @@ final class UnlockService {
 					)
 				);
 			}
-			return $generic;
+			return array( 'message' => $generic );
 		}
-		$this->send_link( $user, $ip );
-		return $generic;
+		return array(
+			'message' => $generic,
+			'user'    => $user,
+			'url'     => $this->send_link( $user, $ip, false, 'email' ),
+		);
 	}
 
 	/**
@@ -207,8 +217,9 @@ final class UnlockService {
 	 * @param \WP_User $user  Administrator.
 	 * @param string   $ip    IP that requested the unlock.
 	 * @param bool     $email Whether to send the email.
+	 * @param string   $via   How it was requested, for the log (default: email or cli).
 	 */
-	public function send_link( \WP_User $user, string $ip, bool $email = true ): string {
+	public function send_link( \WP_User $user, string $ip, bool $email = true, string $via = '' ): string {
 		$ttl   = (int) $this->settings->get( 'unlock.token_ttl_minutes', 30 );
 		$token = $this->tokens->create( (int) $user->ID, $ip, $ttl * MINUTE_IN_SECONDS );
 		$url   = add_query_arg( 'sentinel_unlock', $token, home_url( '/' ) );
@@ -217,24 +228,36 @@ final class UnlockService {
 			array(
 				'ip'      => $ip,
 				'module'  => 'unlock',
-				'reason'  => $email ? 'email' : 'cli',
+				'reason'  => '' !== $via ? $via : ( $email ? 'email' : 'cli' ),
 				'user_id' => (int) $user->ID,
 			)
 		);
 		if ( $email ) {
-			$site = wp_specialchars_decode( (string) get_bloginfo( 'name' ), ENT_QUOTES );
-			/* translators: %s: site name. */
-			$subject = sprintf( __( '[%s] Your Sentinel Shield unlock link', 'sentinel-shield' ), $site );
-			$body    = sprintf(
-				/* translators: 1: IP address, 2: unlock URL, 3: minutes. */
-				__( "Someone (hopefully you) asked to unlock the IP address %1\$s on this site.\n\nOpen this link to review and confirm the unlock:\n%2\$s\n\nThe link works once and expires in %3\$d minutes. If you did not request this, ignore this email; nothing will change.", 'sentinel-shield' ),
-				$ip,
-				$url,
-				$ttl
-			);
-			wp_mail( $user->user_email, $subject, $body );
+			$this->mail_link( $user, $ip, $url );
 		}
 		return $url;
+	}
+
+	/**
+	 * Emails an unlock link.
+	 *
+	 * @param \WP_User $user Administrator.
+	 * @param string   $ip   IP that requested the unlock.
+	 * @param string   $url  Link.
+	 */
+	private function mail_link( \WP_User $user, string $ip, string $url ): void {
+		$ttl  = (int) $this->settings->get( 'unlock.token_ttl_minutes', 30 );
+		$site = wp_specialchars_decode( (string) get_bloginfo( 'name' ), ENT_QUOTES );
+		/* translators: %s: site name. */
+		$subject = sprintf( __( '[%s] Your Sentinel Shield unlock link', 'sentinel-shield' ), $site );
+		$body    = sprintf(
+			/* translators: 1: IP address, 2: unlock URL, 3: minutes. */
+			__( "Someone (hopefully you) asked to unlock the IP address %1\$s on this site.\n\nOpen this link to review and confirm the unlock:\n%2\$s\n\nThe link works once and expires in %3\$d minutes. If you did not request this, ignore this email; nothing will change.", 'sentinel-shield' ),
+			$ip,
+			$url,
+			$ttl
+		);
+		wp_mail( $user->user_email, $subject, $body );
 	}
 
 	/**

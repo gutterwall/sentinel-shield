@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace SentinelShield\Repository;
 
+use SentinelShield\Support\Batch;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -154,8 +156,6 @@ final class TokenRepository {
 	 * @return int Rows deleted.
 	 */
 	public function prune(): int {
-		return (int) $this->db->query(
-			$this->db->prepare( 'DELETE FROM %i WHERE expires_at < %s', $this->table(), gmdate( 'Y-m-d H:i:s', time() - DAY_IN_SECONDS ) )
-		);
+		return Batch::delete( $this->db, $this->db->prepare( 'DELETE FROM %i WHERE expires_at < %s', $this->table(), gmdate( 'Y-m-d H:i:s', time() - DAY_IN_SECONDS ) ) );
 	}
 }

@@ -170,7 +170,9 @@ final class BruteForceGuard {
 		if ( $this->is_protected( $ip, $current ) ) {
 			return self::result( true, 'allowlist' );
 		}
-		if ( isset( $this->locked[ $ip ] ) ) {
+		// Locked out in this request, or by a parallel request after this one
+		// passed the firewall (its counter was reset by that lockout).
+		if ( isset( $this->locked[ $ip ] ) || ( $current && $this->gate->is_blocked_now( $ip ) ) ) {
 			return self::result( false, 'ip_limit' );
 		}
 		$since = $this->since();

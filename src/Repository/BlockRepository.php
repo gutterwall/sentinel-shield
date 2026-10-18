@@ -11,6 +11,8 @@ namespace SentinelShield\Repository;
 
 use SentinelShield\Net\Cidr;
 
+use SentinelShield\Support\Batch;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -224,10 +226,11 @@ final class BlockRepository {
 	 * Increments the hit counter.
 	 *
 	 * @param int $id Rule ID.
+	 * @param int $by Hits to add.
 	 */
-	public function increment_hits( int $id ): void {
+	public function increment_hits( int $id, int $by = 1 ): void {
 		$this->db->query(
-			$this->db->prepare( 'UPDATE %i SET hits = hits + 1, last_hit_at = %s WHERE id = %d', $this->table(), gmdate( 'Y-m-d H:i:s' ), $id )
+			$this->db->prepare( 'UPDATE %i SET hits = hits + %d, last_hit_at = %s WHERE id = %d', $this->table(), max( 1, $by ), gmdate( 'Y-m-d H:i:s' ), $id )
 		);
 	}
 
@@ -237,9 +240,7 @@ final class BlockRepository {
 	 * @return int Rows deleted.
 	 */
 	public function purge_expired(): int {
-		return (int) $this->db->query(
-			$this->db->prepare( 'DELETE FROM %i WHERE expires_at IS NOT NULL AND expires_at <= %s', $this->table(), gmdate( 'Y-m-d H:i:s' ) )
-		);
+		return Batch::delete( $this->db, $this->db->prepare( 'DELETE FROM %i WHERE expires_at IS NOT NULL AND expires_at <= %s', $this->table(), gmdate( 'Y-m-d H:i:s' ) ) );
 	}
 
 	/**

@@ -442,6 +442,7 @@ final class Actions {
 			$rows = $this->c->get( LoginAttemptRepository::class )->clear_all();
 			/* translators: %d: number of records. */
 			View::flash( 'success', sprintf( __( 'Forgot %d failed logins.', 'sentinel-shield' ), $rows ) );
+			\SentinelShield\Support\Cached::bump();
 			$this->audit( 'login_attempts_cleared', array( 'rows' => $rows ) );
 		} else {
 			View::flash( 'error', __( 'Unknown action.', 'sentinel-shield' ) );

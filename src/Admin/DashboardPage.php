@@ -15,6 +15,8 @@ use SentinelShield\Repository\BlockRepository;
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Safety\SafetyGuard;
 use SentinelShield\Settings;
+use SentinelShield\Support\Cached;
+use SentinelShield\Safety\Health;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -29,6 +31,25 @@ final class DashboardPage {
 	 * @param Container $c Services.
 	 */
 	public function __construct( private Container $c ) {}
+
+	/**
+	 * Enforcement health card.
+	 */
+	private function health(): void {
+		$checks = ( new Health( $this->c ) )->checks( (array) $this->c->get( 'client_ip_details' ) );
+		$labels = array(
+			'ok'   => __( 'OK', 'sentinel-shield' ),
+			'warn' => __( 'Degraded', 'sentinel-shield' ),
+			'bad'  => __( 'Problem', 'sentinel-shield' ),
+			'info' => __( 'Note', 'sentinel-shield' ),
+		);
+		$all    = Health::overall( $checks );
+		echo '<div class="ss-card" id="ss-health"><h2>' . esc_html__( 'Enforcement health', 'sentinel-shield' ) . ' ' . View::pill( $labels[ $all ], $all ) . '</h2><table class="widefat striped"><tbody>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.
+		foreach ( $checks as $check ) {
+			echo '<tr><td style="width:11em">' . View::pill( $labels[ $check['state'] ], $check['state'] ) . '</td><td><strong>' . esc_html( $check['label'] ) . '</strong><br><span class="description">' . esc_html( $check['detail'] ) . '</span></td></tr>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.
+		}
+		echo '</tbody></table><p class="description">' . esc_html__( 'Also available as wp sentinel health, which exits with code 1 when something is wrong, for monitoring.', 'sentinel-shield' ) . '</p></div>';
+	}
 
 	/**
 	 * Renders the page.
@@ -59,16 +80,27 @@ final class DashboardPage {
 		$this->stat( __( 'Protection', 'sentinel-shield' ), $state, '<a href="' . esc_url( Admin::url( 'sentinel-shield-tools' ) ) . '">' . esc_html__( 'Test mode controls', 'sentinel-shield' ) . '</a>' );
 		$this->stat( __( 'Your IP', 'sentinel-shield' ), '<code>' . esc_html( $ip ) . '</code>', $allowed ? View::pill( __( 'allowlisted', 'sentinel-shield' ), 'ok' ) : View::pill( __( 'not allowlisted', 'sentinel-shield' ), 'warn' ) );
 		$this->stat( __( 'Active rules', 'sentinel-shield' ), esc_html( number_format_i18n( $rules->count_active( 'block' ) ) ) . ' / ' . esc_html( number_format_i18n( $rules->count_active( 'allow' ) ) ), esc_html__( 'blocked / allowed', 'sentinel-shield' ) );
+		$counts = (array) Cached::remember(
+			'dashboard_counts',
+			MINUTE_IN_SECONDS,
+			static fn(): array => array(
+				$events->count_since( array( 'blocked' ), $since ),
+				$events->count_since( array( 'would_block', 'would_lockout' ), $since ),
+				$events->count_since( array( 'lockout' ), $since ),
+			)
+		);
 		$this->stat(
 			__( 'Last 24 hours', 'sentinel-shield' ),
-			esc_html( number_format_i18n( $events->count_since( array( 'blocked' ), $since ) ) ) . ' ' . esc_html__( 'blocked', 'sentinel-shield' ),
+			esc_html( number_format_i18n( (int) $counts[0] ) ) . ' ' . esc_html__( 'blocked', 'sentinel-shield' ),
 			/* translators: 1: would-block count, 2: lockout count. */
-			esc_html( sprintf( __( '%1$d would-block · %2$d lockouts', 'sentinel-shield' ), $events->count_since( array( 'would_block', 'would_lockout' ), $since ), $events->count_since( array( 'lockout' ), $since ) ) )
+			esc_html( sprintf( __( '%1$d would-block · %2$d lockouts', 'sentinel-shield' ), (int) $counts[1], (int) $counts[2] ) )
 		);
-		echo '</div><div class="ss-grid">';
+		echo '</div>';
+		$this->health();
+		echo '<div class="ss-grid">';
 
 		echo '<div class="ss-card"><h2>' . esc_html__( 'Top IPs (24 h)', 'sentinel-shield' ) . '</h2>';
-		$top = $events->top_ips( array( 'blocked', 'would_block', 'lockout', 'would_lockout' ), $since );
+		$top = (array) Cached::remember( 'dashboard_top_ips', MINUTE_IN_SECONDS, static fn(): array => $events->top_ips( array( 'blocked', 'would_block', 'lockout', 'would_lockout' ), $since ) );
 		if ( ! $top ) {
 			echo '<p>' . esc_html__( 'Nothing to report.', 'sentinel-shield' ) . '</p>';
 		} else {

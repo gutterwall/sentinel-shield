@@ -188,6 +188,8 @@ final class FeedUpdater {
 			return $this->fail( $slug, $entry, new \WP_Error( 'sentinel_shield_feed_db', __( 'Could not save the downloaded list; the previous copy was kept.', 'sentinel-shield' ) ) );
 		}
 		$this->cache->flush_feeds();
+		// Compile the new snapshot now, in the background job, not in a visitor's request.
+		$this->cache->feeds( FeedCatalog::enabled_slugs( $this->settings ) );
 
 		$entry['last_success'] = $now;
 		$entry['last_change']  = $now;
@@ -227,6 +229,7 @@ final class FeedUpdater {
 		}
 		if ( $removed > 0 ) {
 			$this->cache->flush_feeds();
+			$this->cache->feeds( FeedCatalog::enabled_slugs( $this->settings ) );
 		}
 	}
 

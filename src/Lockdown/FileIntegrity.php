@@ -604,7 +604,7 @@ final class FileIntegrity {
 				: $rel,
 			trim( $detail . ( $reasons ? ' ' . sprintf( /* translators: %s: list. */ __( 'Found: %s.', 'sentinel-shield' ), implode( '; ', array_unique( array_column( $reasons, 0 ) ) ) ) : '' ) ),
 			'file:' . $path,
-			(string) @sha1_file( $path ), // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Unreadable: not approvable.
+			IntegrityScanner::fingerprint( $path ),
 			$target
 		);
 	}

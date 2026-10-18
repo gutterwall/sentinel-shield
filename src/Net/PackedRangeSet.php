@@ -16,7 +16,7 @@ defined( 'ABSPATH' ) || exit;
  * (fixed-width "start.end" records) and binary-searches it in place. Loading
  * 50,000 ranges is one base64_decode instead of unserializing 100,000 strings.
  */
-final class PackedRangeSet {
+final class PackedRangeSet implements RangeLookup {
 
 	/**
 	 * Record width in bytes per IP version.

@@ -4,7 +4,7 @@ Tags: security, firewall, two-factor, brute force, login
 Requires at least: 6.4
 Tested up to: 6.8
 Requires PHP: 8.1
-Stable tag: 0.6.1
+Stable tag: 0.7.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -25,7 +25,9 @@ Sentinel Shield is a self-hosted security plugin. Everything runs on your server
 
 * Failed logins (wrong passwords, unknown usernames, wrong two-factor codes) are counted per IP and per account over a sliding window. An IP over the limit (5 failures in 15 minutes by default) is locked out with the progressive lockouts (15 min → 1 h → 24 h → permanent), and the login in progress is refused, so XML-RPC multicall cannot try hundreds of passwords in one request.
 * Distributed attacks: an account with too many failures from many IPs (20 by default) accepts password logins only from IPs it logged in from before (and allowlisted IPs) until the failures age out. No IP gets locked out for this, so attackers cannot use it to lock out the real user.
-* Refusals do not depend on the password. Optional: one message for wrong usernames and wrong passwords (on by default), instant lockout for usernames like "admin" that nobody uses, and XML-RPC logins turned off.
+* Refusals do not depend on the password and happen before WordPress checks it, so a refused login costs no password hashing. Logins from one IP are handled one at a time, so simultaneous requests cannot slip past the limit, and a lockout never erases an IP's failures from the accounts it tried. REST API application passwords get the same limits.
+* Optional: one message for wrong usernames and wrong passwords (on by default), instant lockout for usernames like "admin" that nobody uses, and XML-RPC logins turned off.
+* Application password controls: block them for administrator-level accounts or everyone, expire them after N days, retire unused ones, and review administrators' application passwords with when and where they were last used.
 * The Login Security tab lists the IPs and accounts with the most failed logins; test mode logs "would deny login" and "would lock out".
 
 **Two-factor authentication**
@@ -33,7 +35,7 @@ Sentinel Shield is a self-hosted security plugin. Everything runs on your server
 * Authenticator apps (TOTP, with a QR code drawn on your own server), codes by email, and one-time backup codes. Each user sets it up under Users → Two-Factor Authentication.
 * Optional for everyone, or required for administrator-level accounts or every account. Required accounts without an app get a code by email until they set one up, plus a dashboard reminder.
 * Works with wp-login.php, the session-expired login popup and other login forms that use WordPress's login (such as WooCommerce). Password logins over XML-RPC and the REST API are refused for two-factor accounts; application passwords keep working.
-* Authenticator secrets are encrypted with keys from wp-config.php; backup and email codes are stored only as keyed hashes. Codes cannot be reused, five wrong codes cancel the login, and each wrong code counts toward the brute-force limits. Optional "Trust this browser" for a set number of days.
+* Authenticator secrets are encrypted with keys from wp-config.php; backup and email codes are stored only as keyed hashes. Codes cannot be reused, five wrong codes cancel the login, and each wrong code counts toward the brute-force limits; code screens, emailed codes and wrong codes are also limited per account per hour, so restarting the login resets nothing. Optional "Trust this browser" for a set number of days, with a per-browser list and revocation; a password change or reset, or a new authenticator, revokes every trusted browser.
 * Administrators can reset a user who lost their phone from the user's profile or with `wp sentinel 2fa <user> --reset`.
 
 **Login location (GeoIP) restriction**
@@ -55,11 +57,12 @@ Protection against the "SC" WordPress malware (described by Sucuri in September 
 **Monitoring and tools**
 
 * Scheduled Tasks page (WP-Cron monitor): every task with its schedule, next and last run, failures and the PHP error that stopped it, the code it calls and where that code lives. Run now, pause/resume, change schedule and delete. Highlights overdue tasks, tasks with no code and tasks whose code lives in uploads or eval()'d code.
+* Enforcement health on the dashboard and as `wp sentinel health` (exit code for monitoring): enforcing or test mode, IP detection, concurrency locks, scheduled jobs, blocklist and country database freshness, open scan findings.
 * Security events log, dashboard and admin bar counter.
 * Test mode everywhere: global log-only mode with optional auto-expiry, per-module overrides, a decision simulator, an IP resolution simulator, a lockout tester, a block page preview and a test unlock email.
 * Documentation tab (Settings → Documentation) with this whole reference, generated from the plugin's own settings, plus the current administrator approvals.
 * Multisite: network-wide rules and settings; per-site overrides for the block page.
-* WP-CLI: `wp sentinel status|check|resolve-ip|block|allow|unblock|remove|list|lockout|test-mode|settings-get|settings-set|settings-keys|settings-export|settings-import|cloudflare-update|cron|feeds|feeds-update|login-attempts|2fa|geo|geo-update|scan|verify|admins|approve-admin|revoke-admin|flush-cache|prune|unlock-link|events`.
+* WP-CLI: `wp sentinel status|check|resolve-ip|block|allow|unblock|remove|list|lockout|test-mode|settings-get|settings-set|settings-keys|settings-export|settings-import|cloudflare-update|cron|feeds|feeds-update|login-attempts|2fa|geo|geo-update|health|scan|verify|admins|approve-admin|revoke-admin|flush-cache|prune|unlock-link|events`.
 
 **Lockout safety**
 
@@ -69,7 +72,7 @@ The admin's IP is auto-allowlisted on activation from wp-admin and on every sett
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.6.1.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.7.0.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
@@ -161,7 +164,7 @@ Malware Lockdown measures are not affected by test mode: once switched on, they 
 * **Repeat offense window (days)** (`lockout.repeat_window_days`; default: 7; recommended: 7). Range 1–365. Lockouts within this many days escalate to the next step. Older offenses are forgotten.
 * **Unlock link lifetime (minutes)** (`unlock.token_ttl_minutes`; default: 30; recommended: 30). Range 5–1440. Emailed unlock links are single-use and expire after this time.
 * **Temporary allowlist after unlock (hours)** (`unlock.allow_hours`; default: 24; recommended: 24). Range 1–720. After a successful unlock, the IP is allowlisted for this long so you can fix the cause.
-* **Keep automatic administrator allowlist entries for (days)** (`unlock.admin_allow_days`; default: 30; recommended: 30). Range 0–365. When an administrator saves settings, their IP is allowlisted so they cannot lock themselves out. The entry lasts this many days and is renewed whenever an administrator uses the dashboard from that IP, so only IPs nobody has used for that long drop off. Home and mobile IPs change and get reassigned to other people, so a permanent entry could end up trusting a stranger. 0 keeps the entries forever (the behavior before 0.6.0). Entries you add yourself on the IP Rules page are never changed.
+* **Keep automatic administrator allowlist entries for (days)** (`unlock.admin_allow_days`; default: 30; recommended: 30). Range 0–365. When an administrator saves settings, their IP is allowlisted so they cannot lock themselves out. The entry lasts this many days and is renewed whenever an administrator uses the dashboard from that IP, so only IPs nobody has used for that long drop off. Home and mobile IPs change and get reassigned to other people, so a permanent entry could end up trusting a stranger. 0 keeps the entries forever (the behavior before 0.6.0). Automatic entries keep the IP from being blocked but do not exempt it from login limits or login location rules (everyone at a shared address would be exempt too); add an address yourself on the IP Rules page for that. Entries you add yourself are never changed.
 * **Unlock emails per IP per hour** (`unlock.max_requests_per_hour`; default: 3; recommended: 3). Range 1–20. Limits abuse of the unlock form.
 
 = Settings → Login Security =
@@ -172,6 +175,9 @@ Malware Lockdown measures are not affected by test mode: once switched on, they 
 * **Lock out at once for these usernames** (`login.instant_usernames`; default: (empty); recommended: your choice). Usernames that nobody on this site uses but attackers try first, e.g. "admin, administrator, test, root". Separated by commas, spaces or new lines. A login attempt with one of them locks the IP out after the first failure. A name is ignored while an account with that username or email exists.
 * **Do not reveal which usernames exist** (`login.generic_errors`; default: On; recommended: On). WordPress normally says "The username is not registered" or "The password you entered for the username ... is incorrect", which tells attackers which accounts exist. With this on, both become "The username, email address or password is incorrect".
 * **Turn off logins over XML-RPC** (`login.disable_xmlrpc`; default: Off; recommended: your choice). XML-RPC (xmlrpc.php) lets programs log in with a username and password and is a favourite brute-force target. With this on, every XML-RPC method that needs a login is refused; pingbacks still work. Leave off if you use the WordPress mobile app with XML-RPC, Jetpack, or a desktop blogging client.
+* **Application passwords** (`login.app_passwords`; default: Allowed for every account (WordPress default); recommended: your choice). Choices: "Allowed for every account (WordPress default)"; "Not for administrator-level accounts"; "Not allowed for anyone". Application passwords let programs (the mobile app, integrations, scripts) use the REST API and XML-RPC. They skip two-factor authentication by design, so a forgotten one on an administrator account is a standing way in. Blocking them for administrator-level accounts is a good default when no integration needs one; existing ones then stop working and cannot be created.
+* **Application passwords expire after (days)** (`login.app_password_max_days`; default: 0; recommended: your choice). Range 0–3650. Application passwords older than this stop working; the owner creates a new one. 0 = never expire.
+* **Retire application passwords unused for (days)** (`login.app_password_unused_days`; default: 0; recommended: 180). Range 0–3650. An application password nobody used for this long stops working, so forgotten integrations do not stay open. 0 = keep them.
 * **Two-factor authentication** (`twofa.required`; default: Optional for everyone; recommended: Required for administrator-level accounts). Choices: "Optional for everyone"; "Required for administrator-level accounts"; "Required for every account". Every user can set up two-factor authentication under Users → Two-Factor Authentication (an authenticator app, codes by email, and backup codes). When it is required, an account without an authenticator app gets a code by email at every login until it sets one up (if email codes are allowed below), and sees a reminder in the dashboard. Administrator-level means the same accounts as the administrator lock. Make sure this site can send email before requiring it.
 * **Allow codes by email** (`twofa.email`; default: On; recommended: On). Lets users get an 8-digit login code by email (valid 10 minutes) instead of using an app. Weaker than an app, because anyone who controls the mailbox can log in with the password, but much stronger than a password alone. When off, required accounts without an app cannot log in until one is set up (they are never let in with only a password); the Login Security tab lists them, and it cannot be switched off while your own login needs it.
 * **Offer "Trust this browser" for (days)** (`twofa.remember_days`; default: 0; recommended: your choice). Range 0–90. Shows a "Trust this browser" box on the code screen; a trusted browser is not asked for a code again for this many days (the password is still needed). Users can forget all their trusted browsers on their Two-Factor Authentication page, and resetting an account's two-factor forgets them too. 0 asks for a code at every login.
@@ -307,6 +313,14 @@ WordPress was unpacked by a tool that shortens paths longer than 100 characters 
 
 Approve it on the Malware Lockdown page. You are warned again only if the file changes. Better still, keep custom code in a separate plugin, so updates do not overwrite it.
 
+= The Enforcement health card says "Degraded" or "Problem". What do I do? =
+
+Each row says what is wrong. The most common on new sites: test mode is still on with no end date (turn it off on the General tab once the detected IP is right), or scheduled jobs have not run yet (they need up to a day; if they never run, check WP-Cron on the Scheduled Tasks page). "Concurrency locks: degraded" means your database (often through a proxy such as ProxySQL, or a cluster) gives no named locks; Sentinel Shield uses lock rows instead, which works but is slower.
+
+= Does an automatic allowlist entry exempt my office from login limits? =
+
+No. Entries added automatically when an administrator saves settings only keep that IP from being blocked, so the administrator can always get back in. Everyone else behind the same address still has to stay within the login limits and location rules. Add the address yourself on the IP Rules page if you want to exempt it from those too.
+
 = Why does every visitor have the same IP? =
 
 Your site is behind a proxy and Trusted Proxy is set to None. Pick the matching preset on the IP Detection tab and use the IP resolution simulator on the Tools page to check it.
@@ -324,6 +338,20 @@ No. DShield and FireHOL Level 1 (which includes DShield data) are CC BY-NC-SA, n
 No. Test mode only records what would have been blocked. Use it to validate settings, then turn it off. Malware Lockdown measures are the exception: they are always enforced once switched on.
 
 == Changelog ==
+
+= 0.7.0 =
+Security and performance work from a second code review:
+* REST API application passwords: wrong ones are now counted toward the login limits (they were not), and a limited IP or account is refused before the password is checked (HTTP 429). XML-RPC logins are not counted twice.
+* A lockout no longer erases the locked-out IP's failures from the accounts it tried: enforcement uses new atomic per-minute counters, and only the IP's own count restarts. Before, rotating IPs could keep an account under its distributed-attack limit.
+* Login limits are checked before WordPress checks the password, so refused logins cost no password hashing, and the per-IP lock now covers the password check. A login from an IP that a parallel request has just locked out is refused too.
+* Trusted browsers: each one is listed (browser, IP, added, last used) and can be revoked on its own; a password change or reset, or adding, replacing or removing an authenticator app or email codes, revokes them all along with any open code screens.
+* Two-factor limits are per account: at most 10 code screens, 6 emailed codes and 15 wrong codes an hour, and up to three code screens can be open at once, so restarting the login resets nothing and cannot cancel someone else's. Codes are emailed after the account lock is released.
+* Concurrency locks: when the database gives no named lock, a lock row is used instead; when no lock can be taken at all, the operation is refused rather than run unprotected. Lock waits are shorter (1 second for logins, 2 for code checks).
+* Automatic administrator allowlist entries keep an IP from being blocked but no longer exempt it from login limits or location rules.
+* Enforcement health card on the dashboard and `wp sentinel health`.
+* Application password controls: block them for administrator-level accounts or everyone, expire them after N days, retire unused ones; administrators' application passwords are listed on the Login Security tab.
+* Performance: blocklists are compiled into a compact file and looked up with a few small reads (one worker compiles, others query the database meanwhile); with a persistent object cache, rule matches are cached and hit counts written at most once a minute; the rule lists are rebuilt by one worker at a time; old rows are deleted in small batches; large files are fingerprinted without reading them whole; admin report figures are cached for a minute.
+* CI: the smoke test now checks REST application passwords over HTTP and 20 simultaneous logins against a multi-worker server, and the integration tests also run with a Redis persistent object cache.
 
 = 0.6.1 =
 * File integrity check: files that are intact copies of official files saved under shortened names (paths over 100 characters cut off when the package was unpacked, as wp core download does on some systems) are now reported as one "damaged installation" finding with the fix, instead of one possible-backdoor warning per file. A shortened name with any other content is still reported as an added file.
@@ -369,6 +397,9 @@ Security fixes from a code review:
 * Phase 1: core framework, client IP detection, IP rules, lockout engine, lockout safety, test mode tooling, events, WP-CLI.
 
 == Upgrade Notice ==
+
+= 0.7.0 =
+Counts wrong REST API application passwords, keeps account attack history through lockouts, refuses limited logins before password hashing, revokes trusted browsers on password changes, and adds an enforcement health card. Automatic administrator allowlist entries no longer exempt their IP from login limits; add your office IP yourself if you relied on that. Trusted browsers have to be trusted again once.
 
 = 0.6.1 =
 Clearer file integrity results for WordPress installs damaged by unpacking tools that shorten long file names.

@@ -261,7 +261,7 @@ final class SettingsSchema {
 				'min'         => 0,
 				'max'         => 365,
 				'label'       => __( 'Keep automatic administrator allowlist entries for (days)', 'sentinel-shield' ),
-				'help'        => __( 'When an administrator saves settings, their IP is allowlisted so they cannot lock themselves out. The entry lasts this many days and is renewed whenever an administrator uses the dashboard from that IP, so only IPs nobody has used for that long drop off. Home and mobile IPs change and get reassigned to other people, so a permanent entry could end up trusting a stranger. 0 keeps the entries forever (the behavior before 0.6.0). Entries you add yourself on the IP Rules page are never changed.', 'sentinel-shield' ),
+				'help'        => __( 'When an administrator saves settings, their IP is allowlisted so they cannot lock themselves out. The entry lasts this many days and is renewed whenever an administrator uses the dashboard from that IP, so only IPs nobody has used for that long drop off. Home and mobile IPs change and get reassigned to other people, so a permanent entry could end up trusting a stranger. 0 keeps the entries forever (the behavior before 0.6.0). Automatic entries keep the IP from being blocked but do not exempt it from login limits or login location rules (everyone at a shared address would be exempt too); add an address yourself on the IP Rules page for that. Entries you add yourself are never changed.', 'sentinel-shield' ),
 				'recommended' => 30,
 			),
 			array(
@@ -329,6 +329,39 @@ final class SettingsSchema {
 			'label'       => __( 'Turn off logins over XML-RPC', 'sentinel-shield' ),
 			'help'        => __( 'XML-RPC (xmlrpc.php) lets programs log in with a username and password and is a favourite brute-force target. With this on, every XML-RPC method that needs a login is refused; pingbacks still work. Leave off if you use the WordPress mobile app with XML-RPC, Jetpack, or a desktop blogging client.', 'sentinel-shield' ),
 			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'login.app_passwords',
+			'tab'         => 'login',
+			'type'        => 'select',
+			'options'     => array(
+				'all'            => __( 'Allowed for every account (WordPress default)', 'sentinel-shield' ),
+				'non_privileged' => __( 'Not for administrator-level accounts', 'sentinel-shield' ),
+				'off'            => __( 'Not allowed for anyone', 'sentinel-shield' ),
+			),
+			'label'       => __( 'Application passwords', 'sentinel-shield' ),
+			'help'        => __( 'Application passwords let programs (the mobile app, integrations, scripts) use the REST API and XML-RPC. They skip two-factor authentication by design, so a forgotten one on an administrator account is a standing way in. Blocking them for administrator-level accounts is a good default when no integration needs one; existing ones then stop working and cannot be created.', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'login.app_password_max_days',
+			'tab'         => 'login',
+			'type'        => 'number',
+			'min'         => 0,
+			'max'         => 3650,
+			'label'       => __( 'Application passwords expire after (days)', 'sentinel-shield' ),
+			'help'        => __( 'Application passwords older than this stop working; the owner creates a new one. 0 = never expire.', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'login.app_password_unused_days',
+			'tab'         => 'login',
+			'type'        => 'number',
+			'min'         => 0,
+			'max'         => 3650,
+			'label'       => __( 'Retire application passwords unused for (days)', 'sentinel-shield' ),
+			'help'        => __( 'An application password nobody used for this long stops working, so forgotten integrations do not stay open. 0 = keep them.', 'sentinel-shield' ),
+			'recommended' => 180,
 		);
 		$fields[] = array(
 			'key'         => 'twofa.required',

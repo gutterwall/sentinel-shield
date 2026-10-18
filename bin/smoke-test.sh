@@ -6,7 +6,9 @@
 # Usage: bin/smoke-test.sh <wordpress-path> <site-url> [--offline]
 #   --offline  skip the WordPress.org checksum check (needs internet otherwise)
 #
-# The site must reach PHP directly from 127.0.0.1 (e.g. php -S 127.0.0.1:8099).
+# The site must reach PHP directly from 127.0.0.1, with several workers for the
+# concurrency check (e.g. PHP_CLI_SERVER_WORKERS=8 php -S 127.0.0.1:8099), and
+# allow application passwords over HTTP (define WP_ENVIRONMENT_TYPE as local).
 # DESTRUCTIVE: it changes settings, creates users and blocks test IPs. Use a
 # throwaway site only (CI creates one per run). Needs wp-cli and curl.
 set -euo pipefail
@@ -63,6 +65,27 @@ pass "5 failed logins: the right password is refused too"
 "${WP[@]}" sentinel unblock 198.51.100.66 >/dev/null
 [ "$(get 198.51.100.66 "$URL/")" = 200 ] && pass "wp sentinel unblock lifts it" || fail "unblock did not work"
 
+echo "REST API application passwords"
+APP=$("${WP[@]}" user application-password create smoke_user smoke --porcelain 2>/dev/null || true)
+if [ -n "$APP" ]; then
+	rest() { curl -s -o "$OUT" -w '%{http_code}' -H "X-Forwarded-For: $1" -u "smoke_user:$2" "$URL/?rest_route=/wp/v2/users/me&context=edit"; }
+	[ "$(rest 198.51.100.50 "$APP")" = 200 ] && grep -q '"smoke_user"' "$OUT" && pass "a correct application password works" || fail "application password login failed"
+	for i in 1 2 3 4 5; do rest 198.51.100.51 "wrong wrong wrong $i" >/dev/null; done
+	CODE=$(rest 198.51.100.51 "$APP")
+	[ "$CODE" = 429 ] || [ "$CODE" = 403 ] && pass "5 wrong application passwords: the right one is refused too (HTTP $CODE)" || fail "REST guesses were not limited (HTTP $CODE)"
+	"${WP[@]}" sentinel unblock 198.51.100.51 >/dev/null
+else
+	echo "  skip application passwords are not available (set WP_ENVIRONMENT_TYPE to local)"
+fi
+
+echo "Concurrency"
+"${WP[@]}" sentinel login-attempts --clear >/dev/null
+seq 1 20 | xargs -P 20 -I{} curl -s -o /dev/null -H 'X-Forwarded-For: 198.51.100.77' -b 'wordpress_test_cookie=WP%20Cookie%20check' \
+	--data-urlencode 'log=smoke_user' --data-urlencode 'pwd=parallel{}' -d 'wp-submit=Log+In&testcookie=1' "$URL/wp-login.php"
+TRIED=$("${WP[@]}" db query "SELECT COUNT(*) FROM $("${WP[@]}" db prefix)sentinel_login_attempts WHERE ip = INET6_ATON('198.51.100.77')" --skip-column-names 2>/dev/null | tr -d '[:space:]')
+[ -n "$TRIED" ] && [ "$TRIED" -le 5 ] && pass "20 simultaneous wrong logins from one IP: $TRIED checked, never more than the limit" || fail "concurrent logins got past the limit ($TRIED checked)"
+"${WP[@]}" sentinel unblock 198.51.100.77 >/dev/null
+
 echo "Two-factor"
 "${WP[@]}" sentinel settings-set twofa.required all >/dev/null
 CODE=$(login 198.51.100.20 smoke_user "$SMOKE_PASS")
@@ -75,6 +98,10 @@ login_error | grep -q 'two-factor' && ! grep -qi 'set-cookie: wordpress_logged_i
 "${WP[@]}" sentinel settings-set twofa.email true >/dev/null
 "${WP[@]}" sentinel settings-set twofa.required none >/dev/null
 rm -f "$OUT.h"
+
+echo "Health"
+"${WP[@]}" sentinel health --format=csv > "$OUT" 2>&1 || true
+grep -q '^state,label,detail' "$OUT" && pass "wp sentinel health reports" || fail "wp sentinel health failed"
 
 echo "Scans"
 "${WP[@]}" sentinel scan > "$OUT" 2>&1 && pass "malware scan: clean" || fail "malware scan reported problems"

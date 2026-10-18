@@ -28,6 +28,7 @@ defined( 'ABSPATH' ) || exit;
 final class MaintenanceModule implements ModuleInterface {
 
 	public const CRON_HOOKS = array( 'sentinel_shield_maintenance', 'sentinel_shield_cf_refresh' );
+	public const LAST_RUN   = 'sentinel_shield_maintenance_last';
 
 	/**
 	 * {@inheritDoc}
@@ -91,6 +92,7 @@ final class MaintenanceModule implements ModuleInterface {
 		if ( $result['rules'] > 0 ) {
 			$container->get( RuleCache::class )->flush();
 		}
+		update_site_option( self::LAST_RUN, time() );
 		return $result;
 	}
 }

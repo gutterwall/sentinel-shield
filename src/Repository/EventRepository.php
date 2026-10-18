@@ -12,6 +12,8 @@ namespace SentinelShield\Repository;
 use SentinelShield\Http\Request;
 use SentinelShield\Net\IpAddress;
 
+use SentinelShield\Support\Batch;
+
 defined( 'ABSPATH' ) || exit;
 
 /**
@@ -161,8 +163,6 @@ final class EventRepository {
 	 * @return int Rows deleted.
 	 */
 	public function prune( int $days ): int {
-		return (int) $this->db->query(
-			$this->db->prepare( 'DELETE FROM %i WHERE created_at < %s', $this->table(), gmdate( 'Y-m-d H:i:s', time() - ( max( 1, $days ) * DAY_IN_SECONDS ) ) )
-		);
+		return Batch::delete( $this->db, $this->db->prepare( 'DELETE FROM %i WHERE created_at < %s', $this->table(), gmdate( 'Y-m-d H:i:s', time() - ( max( 1, $days ) * DAY_IN_SECONDS ) ) ) );
 	}
 }

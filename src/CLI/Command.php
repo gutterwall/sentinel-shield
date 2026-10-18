@@ -41,6 +41,7 @@ use SentinelShield\TwoFactor\TwoFactorLogin;
 use SentinelShield\TwoFactor\UserTwoFactor;
 use SentinelShield\Unlock\UnlockService;
 use WP_CLI;
+use SentinelShield\Safety\Health;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -1002,6 +1003,7 @@ final class Command {
 			if ( '' === $ip && '' === $name ) {
 				$rows = $repo->clear_all();
 			}
+			\SentinelShield\Support\Cached::bump();
 			$this->audit( 'login_attempts_cleared', array( 'rows' => $rows ) );
 			WP_CLI::success( "Forgot $rows failed logins. Lockouts already applied stay; lift them with wp sentinel unblock <ip>." );
 			return;
@@ -1047,6 +1049,32 @@ final class Command {
 			return;
 		}
 		WP_CLI\Utils\format_items( $format, $rows, array( 'type', 'subject', 'failures', 'spread', 'last' ) );
+	}
+
+	/**
+	 * Shows whether protection is actually working: enforcement, locks,
+	 * scheduled jobs, blocklists, scans.
+	 *
+	 * Exits with status 1 when a check reports a problem (for monitoring).
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--format=<format>]
+	 * : table, csv, json or yaml.
+	 * ---
+	 * default: table
+	 * ---
+	 *
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function health( array $args, array $assoc_args ): void {
+		unset( $args );
+		$checks = ( new Health( $this->c ) )->checks();
+		WP_CLI\Utils\format_items( (string) ( $assoc_args['format'] ?? 'table' ), $checks, array( 'state', 'label', 'detail' ) );
+		if ( 'bad' === Health::overall( $checks ) ) {
+			WP_CLI::halt( 1 );
+		}
 	}
 
 	/**

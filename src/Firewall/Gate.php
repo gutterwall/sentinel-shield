@@ -87,7 +87,7 @@ final class Gate {
 			return new Decision( Decision::ALLOW, 'allowlist', 'ip_gate' );
 		}
 		if ( $this->rules->get( 'block' )->contains( $bin ) ) {
-			$rule = $this->repo->find_containing( 'block', $bin )[0] ?? null;
+			$rule = $this->rules->block_rule( $bin, fn(): ?array => $this->repo->find_containing( 'block', $bin )[0] ?? null );
 			if ( null === $rule ) {
 				// The cache is stale (rule deleted or expired). Self-heal and let the request through.
 				$this->rules->flush();
@@ -135,6 +135,34 @@ final class Gate {
 	}
 
 	/**
+	 * Counts a hit on a block rule without writing the rule row on every
+	 * blocked request. With a persistent object cache, hits add up atomically in
+	 * the cache and are written at most once a minute per rule. Without one, a
+	 * hit is written when the request is logged (at most once per IP per minute).
+	 *
+	 * @param int  $id     Rule ID.
+	 * @param bool $logged Whether this request was logged.
+	 */
+	private function count_hit( int $id, bool $logged ): void {
+		if ( ! wp_using_ext_object_cache() ) {
+			if ( $logged ) {
+				$this->repo->increment_hits( $id );
+			}
+			return;
+		}
+		$key = 'hits_' . $id;
+		wp_cache_add( $key, 0, RuleCache::GROUP );
+		wp_cache_incr( $key, 1, RuleCache::GROUP );
+		if ( wp_cache_add( 'hits_flush_' . $id, 1, RuleCache::GROUP, MINUTE_IN_SECONDS ) ) {
+			$pending = (int) wp_cache_get( $key, RuleCache::GROUP );
+			if ( $pending > 0 ) {
+				wp_cache_decr( $key, $pending, RuleCache::GROUP );
+				$this->repo->increment_hits( $id, $pending );
+			}
+		}
+	}
+
+	/**
 	 * Whether an IP may never be locked out (allowlisted or this server).
 	 *
 	 * With $login, for login limits and location rules: automatic administrator
@@ -151,6 +179,26 @@ final class Gate {
 			return true;
 		}
 		return $this->guard->is_server_ip( $bin ) || $this->rules->get( $login ? 'allow_login' : 'allow' )->contains( $bin );
+	}
+
+	/**
+	 * Whether an enforced block rule covers the IP right now, read from the
+	 * database rather than this request's compiled lists: a lockout created by
+	 * a parallel request a moment ago must count (login checks use this).
+	 *
+	 * @param string $ip IP text.
+	 */
+	public function is_blocked_now( string $ip ): bool {
+		$bin = IpAddress::to_binary( $ip );
+		if ( null === $bin ) {
+			return false;
+		}
+		foreach ( $this->repo->find_containing( 'block', $bin ) as $rule ) {
+			if ( ! $this->is_test_for_source( (string) ( $rule['source'] ?? 'manual' ) ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -187,13 +235,14 @@ final class Gate {
 		$rule = (array) $decision->rule;
 		$test = $this->is_test_for_source( (string) ( $rule['source'] ?? 'manual' ) );
 
-		if ( ! empty( $rule['id'] ) ) {
-			$this->repo->increment_hits( (int) $rule['id'] );
-		}
 		$event = $test ? 'would_block' : 'blocked';
 		// One row per IP per minute, and at most LOG_BUDGET rows per minute site-wide,
 		// so an attack (even from many IPs) cannot grow the event table without bound.
-		if ( Throttle::once_within_budget( 'evt_' . $event . '_' . md5( $ip ), MINUTE_IN_SECONDS, 'evt_blocked_all', self::LOG_BUDGET, MINUTE_IN_SECONDS ) ) {
+		$logged = Throttle::once_within_budget( 'evt_' . $event . '_' . md5( $ip ), MINUTE_IN_SECONDS, 'evt_blocked_all', self::LOG_BUDGET, MINUTE_IN_SECONDS );
+		if ( ! empty( $rule['id'] ) ) {
+			$this->count_hit( (int) $rule['id'], $logged );
+		}
+		if ( $logged ) {
 			$this->events->log(
 				$event,
 				array(

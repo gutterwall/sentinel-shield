@@ -99,6 +99,49 @@ jobs:
         run: bin/install-wp-tests.sh wordpress_test root root 127.0.0.1:3306 ${{ matrix.wp }} /tmp/wp-tests
       - run: vendor/bin/phpunit --testsuite integration
 
+  object-cache:
+    name: Integration with a persistent object cache (Redis)
+    runs-on: ubuntu-24.04
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: wordpress_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -proot"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      WP_TESTS_DIR: /tmp/wp-tests/tests-lib
+    steps:
+      - uses: actions/checkout@v5
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, sodium, redis
+          tools: composer
+          coverage: none
+      - run: composer install --no-progress --no-interaction
+      - name: Install WordPress and its test library
+        run: bin/install-wp-tests.sh wordpress_test root root 127.0.0.1:3306 latest /tmp/wp-tests
+      - name: Add the Redis object cache drop-in
+        run: |
+          curl -fsSL https://downloads.wordpress.org/plugin/redis-cache.latest-stable.zip -o /tmp/redis-cache.zip
+          unzip -q /tmp/redis-cache.zip -d /tmp
+          cp /tmp/redis-cache/includes/object-cache.php /tmp/wp-tests/wordpress/wp-content/object-cache.php
+          echo "define( 'WP_REDIS_HOST', '127.0.0.1' );" >> /tmp/wp-tests/tests-lib/wp-tests-config.php
+      - name: Integration tests with the cache active
+        run: |
+          php -r 'require "/tmp/wp-tests/tests-lib/wp-tests-config.php"; echo "config ok\n";'
+          vendor/bin/phpunit --testsuite integration
+
   smoke:
     name: Smoke test (real site over HTTP)
     runs-on: ubuntu-24.04
@@ -125,14 +168,15 @@ jobs:
           # The official tarball: wp core download can cut paths over 100 characters on some systems.
           mkdir -p /tmp/site && curl -fsSL https://wordpress.org/latest.tar.gz | tar -xz -C /tmp/site --strip-components=1
           wp config create --path=/tmp/site --dbname=wordpress --dbuser=root --dbpass=root --dbhost=127.0.0.1:3306 \
-            --extra-php <<< "define( 'WP_DEBUG', true ); define( 'WP_DEBUG_DISPLAY', true );"
+            --extra-php <<< "define( 'WP_DEBUG', true ); define( 'WP_DEBUG_DISPLAY', true ); define( 'WP_ENVIRONMENT_TYPE', 'local' );"
           wp core install --path=/tmp/site --url=http://127.0.0.1:8099 --title=Smoke --admin_user=admin \
             --admin_password="$(openssl rand -hex 16)" --admin_email=admin@example.org --skip-email
           ln -s "$GITHUB_WORKSPACE" /tmp/site/wp-content/plugins/sentinel-shield
           wp plugin activate sentinel-shield --path=/tmp/site
       - name: Start PHP's web server
         run: |
-          (cd /tmp/site && php -S 127.0.0.1:8099 -t . > /tmp/server.log 2>&1 &)
+          # Several workers, so the smoke test can send simultaneous requests.
+          (cd /tmp/site && PHP_CLI_SERVER_WORKERS=8 php -S 127.0.0.1:8099 -t . > /tmp/server.log 2>&1 &)
           for i in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:8099/ && exit 0; sleep 1; done
           cat /tmp/server.log; exit 1
       - run: bin/smoke-test.sh /tmp/site http://127.0.0.1:8099

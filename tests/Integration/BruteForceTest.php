@@ -173,6 +173,19 @@ final class BruteForceTest extends \WP_UnitTestCase {
 	}
 
 	/**
+	 * A request that passed the firewall before a parallel request locked its IP
+	 * out cannot keep guessing on the reset counter.
+	 */
+	public function test_ip_locked_out_by_a_parallel_request_is_refused(): void {
+		self::factory()->user->create( array( 'user_login' => 'parallel', 'user_pass' => 'right' ) );
+		$this->guard();
+		$this->assertInstanceOf( \WP_User::class, $this->login( 'parallel', 'right' ) );
+		// Another worker locks the IP out (block rule written, counter reset); this request's lists are stale.
+		Plugin::instance()->container()->get( BlockRepository::class )->add( 'block', \SentinelShield\Net\Cidr::parse( $this->ip ), 'lockout', 'lockout', time() + 900 );
+		$this->assertSame( BruteForceGuard::ERROR_CODE, $this->login( 'parallel', 'right' )->get_error_code() );
+	}
+
+	/**
 	 * Review 2 finding 3: a refused login is refused before WordPress hashes the
 	 * password, and the password checks come back for the next login.
 	 */

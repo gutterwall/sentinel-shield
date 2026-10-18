@@ -256,7 +256,7 @@ final class GeoUpdater {
 	 *
 	 * @param string $dir Folder.
 	 */
-	private static function protect_dir( string $dir ): void {
+	public static function protect_dir( string $dir ): void {
 		$files = array(
 			'index.php' => "<?php\n// Silence is golden.\n",
 			'.htaccess' => "Require all denied\n",

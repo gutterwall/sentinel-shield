@@ -11,11 +11,13 @@ namespace SentinelShield\Admin;
 
 use SentinelShield\Container;
 use SentinelShield\Lockdown\AdminRegistry;
+use SentinelShield\Login\AppPasswordPolicy;
 use SentinelShield\Login\BruteForceGuard;
 use SentinelShield\Repository\LoginAttemptRepository;
 use SentinelShield\Settings;
 use SentinelShield\TwoFactor\TwoFactorLogin;
 use SentinelShield\TwoFactor\UserTwoFactor;
+use SentinelShield\Support\Cached;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -50,11 +52,11 @@ final class LoginSecurityPanel {
 		if ( ! $settings->is_module_enabled( 'lockout' ) ) {
 			echo '<div class="notice notice-warning inline"><p>' . esc_html__( 'The Progressive lockouts module is off: IPs over the limit cannot log in until their failures age out, but they are not blocked from the rest of the site.', 'sentinel-shield' ) . '</p></div>';
 		}
-		$total = $attempts->count_since( $since );
+		$total = (int) Cached::remember( 'login_total', MINUTE_IN_SECONDS, fn(): int => $attempts->count_since( $since ) );
 		/* translators: 1: number of failed logins, 2: failures per IP, 3: minutes. */
 		echo '<p class="ss-big">' . esc_html( sprintf( __( '%1$s failed logins in the last 24 hours. Limit: %2$d per IP within %3$d minutes.', 'sentinel-shield' ), number_format_i18n( $total ), $guard->max_failures(), $guard->window_minutes() ) ) . '</p>';
 
-		$ips = $attempts->top_ips( $since );
+		$ips = (array) Cached::remember( 'login_top_ips', MINUTE_IN_SECONDS, fn(): array => $attempts->top_ips( $since ) );
 		if ( $ips ) {
 			echo '<h3>' . esc_html__( 'IPs with the most failed logins (24 hours)', 'sentinel-shield' ) . '</h3><table class="widefat striped ss-narrow"><thead><tr><th>' . esc_html__( 'IP', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Failures', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Accounts tried', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Last', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Login now', 'sentinel-shield' ) . '</th></tr></thead><tbody>';
 			foreach ( $ips as $row ) {
@@ -62,9 +64,9 @@ final class LoginSecurityPanel {
 				echo '<tr><td><code>' . esc_html( $row['ip'] ) . '</code></td><td>' . esc_html( (string) $row['failures'] ) . '</td><td>' . esc_html( (string) $row['accounts'] ) . '</td><td>' . esc_html( View::time( $row['last'] ) ) . '</td><td>' . View::pill( $check['allowed'] ? __( 'Allowed', 'sentinel-shield' ) : __( 'Refused', 'sentinel-shield' ), $check['allowed'] ? 'ok' : 'bad' ) . '</td></tr>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.
 			}
 			echo '</tbody></table>';
-			echo '<p class="description">' . esc_html__( 'IPs that were locked out appear on the IP Rules page; their count here restarts after each lockout.', 'sentinel-shield' ) . '</p>';
+			echo '<p class="description">' . esc_html__( 'IPs that were locked out appear on the IP Rules page. A lockout restarts the IP\'s own limit, but its failures still count against the accounts it tried. Figures here may be up to a minute old.', 'sentinel-shield' ) . '</p>';
 		}
-		$accounts = $attempts->top_accounts( $since );
+		$accounts = (array) Cached::remember( 'login_top_accounts', MINUTE_IN_SECONDS, fn(): array => $attempts->top_accounts( $since ) );
 		if ( $accounts ) {
 			$account_max = (int) $settings->get( 'login.account_max_failures', 20 );
 			$window      = $attempts->top_accounts( time() - $guard->window_minutes() * MINUTE_IN_SECONDS, 100 );
@@ -85,6 +87,44 @@ final class LoginSecurityPanel {
 		echo '</div>';
 
 		$this->two_factor( $settings );
+		$this->app_passwords( $settings );
+	}
+
+	/**
+	 * Application passwords of privileged accounts, with their policy status.
+	 *
+	 * @param Settings $settings Settings.
+	 */
+	private function app_passwords( Settings $settings ): void {
+		if ( ! class_exists( '\WP_Application_Passwords' ) ) {
+			return;
+		}
+		$labels = array(
+			'ok'      => array( __( 'Active', 'sentinel-shield' ), 'ok' ),
+			'expired' => array( __( 'Expired', 'sentinel-shield' ), 'info' ),
+			'unused'  => array( __( 'Retired (unused)', 'sentinel-shield' ), 'info' ),
+			'blocked' => array( __( 'Blocked by policy', 'sentinel-shield' ), 'info' ),
+		);
+		$mode   = (string) $settings->get( 'login.app_passwords', 'all' );
+		$rows   = '';
+		foreach ( $this->c->get( AdminRegistry::class )->privileged_users() as $row ) {
+			$user = get_userdata( (int) $row['id'] );
+			if ( ! $user instanceof \WP_User ) {
+				continue;
+			}
+			foreach ( \WP_Application_Passwords::get_user_application_passwords( $user->ID ) as $item ) {
+				$state = 'all' !== $mode ? 'blocked' : AppPasswordPolicy::status( $item, $settings );
+				$used  = empty( $item['last_used'] ) ? __( 'never', 'sentinel-shield' ) : wp_date( 'Y-m-d', (int) $item['last_used'] ) . ( empty( $item['last_ip'] ) ? '' : ' (' . $item['last_ip'] . ')' );
+				$rows .= '<tr><td>' . esc_html( $user->user_login ) . '</td><td>' . esc_html( (string) $item['name'] ) . '</td><td>' . esc_html( wp_date( 'Y-m-d', (int) $item['created'] ) ) . '</td><td>' . esc_html( $used ) . '</td><td>' . View::pill( $labels[ $state ][0], $labels[ $state ][1] ) . '</td></tr>';
+			}
+		}
+		echo '<div class="ss-card"><h2>' . esc_html__( 'Application passwords of administrator-level accounts', 'sentinel-shield' ) . '</h2>';
+		echo '<p>' . esc_html__( 'These skip two-factor authentication by design. Delete any nobody recognizes from the account\'s profile, and use the policy settings above to retire old or unused ones automatically.', 'sentinel-shield' ) . '</p>';
+		if ( '' === $rows ) {
+			echo '<p class="description">' . esc_html__( 'None.', 'sentinel-shield' ) . '</p></div>';
+			return;
+		}
+		echo '<table class="widefat striped ss-narrow"><thead><tr><th>' . esc_html__( 'Account', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Name', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Created', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Last used', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Status', 'sentinel-shield' ) . '</th></tr></thead><tbody>' . $rows . '</tbody></table></div>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Rows escaped above; pill() escapes.
 	}
 
 	/**

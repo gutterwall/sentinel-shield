@@ -368,7 +368,7 @@ final class IntegrityScanner {
 					. ( $known ? ' ' . __( 'This looks like the Wordfence firewall loader, which is expected if you use Wordfence.', 'sentinel-shield' ) : '' )
 					. ' ' . __( 'To remove a malicious loader safely, first replace the target file with an empty PHP file, then remove the line, then restart PHP: PHP caches this setting, and deleting the file first breaks the whole site.', 'sentinel-shield' ),
 				'prepend:' . $target,
-				md5( ( $exists ? (string) sha1_file( $target ) : '' ) . '|' . implode( '|', $sources ) )
+				md5( ( $exists ? self::fingerprint( $target ) : '' ) . '|' . implode( '|', $sources ) )
 			);
 		}
 	}
@@ -426,7 +426,7 @@ final class IntegrityScanner {
 					. ( in_array( $file, $active, true ) ? __( 'It is active.', 'sentinel-shield' ) . ' ' : '' )
 					. __( 'Some code removes it from the list (all_plugins filter). Managed hosts sometimes hide their own plugins; otherwise this is how SC hides.', 'sentinel-shield' ) . ' ' . self::reasons_text( $reasons ),
 				'plugin:' . $file,
-				is_file( $path ) ? (string) sha1_file( $path ) : md5( $file )
+				is_file( $path ) ? self::fingerprint( $path ) : md5( $file )
 			);
 		}
 		$labels = array(
@@ -672,7 +672,7 @@ final class IntegrityScanner {
 				sprintf( __( 'Randomly named ZIP file: %s', 'sentinel-shield' ), CronInspector::relative( $path ) ),
 				__( 'SC keeps a ZIP restore bundle with a random hex name in wp-content, uploads or a theme folder.', 'sentinel-shield' ),
 				'file:' . $path,
-				(string) sha1_file( $path )
+				self::fingerprint( $path )
 			);
 		}
 	}
@@ -806,7 +806,7 @@ final class IntegrityScanner {
 						/* translators: 1: file, 2: line, 3: origin, 4: explanation. */
 						sprintf( __( 'Defined in %1$s line %2$d (%3$s). %4$s', 'sentinel-shield' ), '' !== $file ? $file : '?', $info['line'], $info['source'], $why ),
 						'hook:' . $hook . '|' . $info['name'] . '|' . $file,
-						md5( $hook . '|' . $info['name'] . '|' . ( '' !== $abs && is_file( $abs ) ? (string) sha1_file( $abs ) : $file ) )
+						md5( $hook . '|' . $info['name'] . '|' . ( '' !== $abs && is_file( $abs ) ? self::fingerprint( $abs ) : $file ) )
 					);
 				}
 			}
@@ -882,7 +882,7 @@ final class IntegrityScanner {
 				: sprintf( __( '%s: not reviewed yet', 'sentinel-shield' ), $rel ),
 			trim( $detail . ' ' . self::reasons_text( $reasons ) ),
 			'file:' . $path,
-			(string) sha1_file( $path )
+			self::fingerprint( $path )
 		);
 	}
 
@@ -1023,6 +1023,33 @@ final class IntegrityScanner {
 		if ( count( $this->coverage[ $kind ] ) < 50 && ! in_array( $rel, $this->coverage[ $kind ], true ) ) {
 			$this->coverage[ $kind ][] = $rel;
 		}
+	}
+
+	/**
+	 * Content fingerprint used for approvals: SHA-1 of the whole file up to
+	 * 8 MB; for larger files, of their size, modification time and first and
+	 * last megabyte (appending or prepending code still changes it), so a huge
+	 * log or archive does not cost a full read on every scan.
+	 *
+	 * @param string $path File.
+	 */
+	public static function fingerprint( string $path ): string {
+		$size = @filesize( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Vanished file: empty fingerprint.
+		if ( false === $size ) {
+			return '';
+		}
+		if ( $size <= 8 * MB_IN_BYTES ) {
+			return (string) @sha1_file( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Unreadable: empty fingerprint.
+		}
+		$h = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Local file inspection.
+		if ( false === $h ) {
+			return '';
+		}
+		$head = (string) fread( $h, MB_IN_BYTES ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Local file inspection.
+		fseek( $h, -MB_IN_BYTES, SEEK_END );
+		$tail = (string) fread( $h, MB_IN_BYTES ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- Local file inspection.
+		fclose( $h ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Local file inspection.
+		return 'big:' . sha1( $size . '|' . (int) @filemtime( $path ) . '|' . $head . '|' . $tail ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- See above.
 	}
 
 	/**

@@ -70,7 +70,8 @@ $sentinel_shield_dir = trailingslashit( wp_upload_dir( null, false )['basedir'] 
 if ( is_multisite() ) {
 	restore_current_blog();
 }
-foreach ( array( 'geo-country.bin', 'geo-country.bin.new', 'geo-country.bin.new.tmp', 'index.php', '.htaccess' ) as $sentinel_shield_file ) {
+$sentinel_shield_files = array_merge( array( 'geo-country.bin', 'geo-country.bin.new', 'geo-country.bin.new.tmp', 'index.php', '.htaccess' ), array_map( 'basename', (array) glob( "$sentinel_shield_dir/feeds-*" ) ) );
+foreach ( $sentinel_shield_files as $sentinel_shield_file ) {
 	if ( is_file( "$sentinel_shield_dir/$sentinel_shield_file" ) ) {
 		wp_delete_file( "$sentinel_shield_dir/$sentinel_shield_file" );
 	}
@@ -80,5 +81,6 @@ if ( is_dir( $sentinel_shield_dir ) ) {
 }
 
 wp_cache_delete( 'rules_block', 'sentinel_shield' );
+wp_cache_delete( 'rules_allow_login', 'sentinel_shield' );
 wp_cache_delete( 'rules_allow', 'sentinel_shield' );
 wp_cache_delete( 'feed_set', 'sentinel_shield' );

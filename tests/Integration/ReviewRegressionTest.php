@@ -179,7 +179,16 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 		$tokens  = $c->get( TokenRepository::class );
 		$method  = new \ReflectionMethod( UnlockService::class, 'request_locked' );
 		$method->setAccessible( true );
-		$request = static fn( string $ip, string $email ): string => (string) $method->invoke( $service, $ip, $email, 'generic' );
+		$mail    = new \ReflectionMethod( UnlockService::class, 'mail_link' );
+		$mail->setAccessible( true );
+		// What handle_request() does: decide under the lock, send after it.
+		$request = static function ( string $ip, string $email ) use ( $method, $mail, $service ): string {
+			$out = (array) $method->invoke( $service, $ip, $email, 'generic' );
+			if ( isset( $out['user'], $out['url'] ) ) {
+				$mail->invoke( $service, $out['user'], $ip, $out['url'] );
+			}
+			return (string) $out['message'];
+		};
 		$admin   = self::create_admin_user();
 		reset_phpmailer_instance();
 

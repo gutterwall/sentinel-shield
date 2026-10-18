@@ -11,6 +11,8 @@ namespace SentinelShield\Modules;
 
 use SentinelShield\Container;
 use SentinelShield\Login\BruteForceGuard;
+use SentinelShield\Login\AppPasswordPolicy;
+use SentinelShield\Settings;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -33,5 +35,6 @@ final class LoginGuardModule implements ModuleInterface {
 	 */
 	public function register( Container $container ): void {
 		$container->get( BruteForceGuard::class )->register();
+		( new AppPasswordPolicy( $container->get( Settings::class ) ) )->register();
 	}
 }
