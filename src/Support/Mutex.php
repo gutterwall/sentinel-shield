@@ -52,6 +52,13 @@ final class Mutex {
 	private static array $rows = array();
 
 	/**
+	 * Locking modes already recorded by this process.
+	 *
+	 * @var array<string, bool>
+	 */
+	private static array $noted = array();
+
+	/**
 	 * Takes a lock, waiting up to $timeout seconds.
 	 *
 	 * @param string $name    Lock name (any length).
@@ -143,12 +150,11 @@ final class Mutex {
 	 * @param string $error Database error, if any.
 	 */
 	private static function health( string $mode, string $error = '' ): void {
-		static $noted = array();
-		if ( isset( $noted[ $mode ] ) || ! function_exists( 'get_site_option' ) ) {
+		if ( isset( self::$noted[ $mode ] ) || ! function_exists( 'get_site_option' ) ) {
 			return;
 		}
-		$noted[ $mode ] = true;
-		$stored         = get_site_option( self::HEALTH_OPTION );
+		self::$noted[ $mode ] = true;
+		$stored               = get_site_option( self::HEALTH_OPTION );
 		if ( is_array( $stored ) && ( $stored['mode'] ?? '' ) === $mode && 'failed' !== $mode ) {
 			return;
 		}
@@ -242,7 +248,9 @@ final class Mutex {
 	}
 
 	/**
-	 * Whether this request holds a lock.
+	 * Whether this request holds a lock (acquire() and release() change it).
+	 *
+	 * @phpstan-impure
 	 *
 	 * @param string $name Lock name.
 	 */

@@ -53,9 +53,9 @@ final class TwoFactorLogin {
 	public const MAX_CHALLENGES      = 3;
 
 	/**
-	 * Redirects and stops: fn( string $url ): never.
+	 * Redirects and stops.
 	 *
-	 * @var \Closure
+	 * @var \Closure(string): never
 	 */
 	private \Closure $redirect;
 
@@ -127,6 +127,14 @@ final class TwoFactorLogin {
 	 */
 	public function email_allowed(): bool {
 		return (bool) $this->settings->get( 'twofa.email', true );
+	}
+
+	/**
+	 * Passkey user verification at login: preferred (a touch is enough after
+	 * the password) or required (fingerprint, face or PIN).
+	 */
+	public function passkey_uv(): string {
+		return WebAuthn::uv( (string) $this->settings->get( 'twofa.passkey_uv', WebAuthn::UV_PREFERRED ) );
 	}
 
 	/**
@@ -548,7 +556,7 @@ final class TwoFactorLogin {
 			$pending['webauthn'] = WebAuthn::challenge();
 			$this->save_pending( (int) $user->ID, $pending );
 		}
-		return WebAuthn::for_site()->request_options( (string) $pending['webauthn'], array_map( 'strval', array_keys( $this->users->passkeys( (int) $user->ID ) ) ) );
+		return WebAuthn::for_site()->request_options( (string) $pending['webauthn'], array_map( 'strval', array_keys( $this->users->passkeys( (int) $user->ID ) ) ), $this->passkey_uv() );
 	}
 
 	/**
@@ -589,7 +597,7 @@ final class TwoFactorLogin {
 				$cred                = is_array( $data ) ? (string) ( $data['id'] ?? '' ) : '';
 				if ( '' !== $challenge && isset( $keys[ $cred ] ) ) {
 					try {
-						$count = WebAuthn::for_site()->verify_assertion( $keys[ $cred ], WebAuthn::unb64u( (string) ( $data['client'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['auth'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['signature'] ?? '' ) ), $challenge );
+						$count = WebAuthn::for_site()->verify_assertion( $keys[ $cred ], WebAuthn::unb64u( (string) ( $data['client'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['auth'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['signature'] ?? '' ) ), $challenge, $this->passkey_uv() );
 						$this->users->touch_passkey( $id, $cred, $count, $now );
 						$this->drop_pending( $id );
 						return array(

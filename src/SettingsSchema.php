@@ -127,6 +127,26 @@ final class SettingsSchema {
 				'recommended' => 30,
 			),
 			array(
+				'key'         => 'general.event_max_rows',
+				'tab'         => 'general',
+				'type'        => 'number',
+				'min'         => 10000,
+				'max'         => 10000000,
+				'label'       => __( 'Keep at most this many security events', 'sentinel-shield' ),
+				'help'        => __( 'A cap on the event log during a long attack: past it, the oldest events are pruned hourly even if they are younger than the days above. Events still waiting for the remote audit log are kept by their own limits (Alerts & Audit Log tab).', 'sentinel-shield' ),
+				'recommended' => 250000,
+			),
+			array(
+				'key'         => 'general.maintenance_seconds',
+				'tab'         => 'general',
+				'type'        => 'number',
+				'min'         => 5,
+				'max'         => 120,
+				'label'       => __( 'Housekeeping time per run (seconds)', 'sentinel-shield' ),
+				'help'        => __( 'The most time the hourly housekeeping (pruning, imports, deliveries) spends in one run. Work left over continues in a follow-up run five minutes later, so a large backlog never ties up a PHP worker for long.', 'sentinel-shield' ),
+				'recommended' => 20,
+			),
+			array(
 				'key'         => 'general.admin_bar',
 				'tab'         => 'general',
 				'type'        => 'checkbox',
@@ -309,6 +329,26 @@ final class SettingsSchema {
 			'recommended' => 20,
 		);
 		$fields[] = array(
+			'key'         => 'login.history_days',
+			'tab'         => 'login',
+			'type'        => 'number',
+			'min'         => 1,
+			'max'         => 90,
+			'label'       => __( 'Keep the login attempt history for (days)', 'sentinel-shield' ),
+			'help'        => __( 'Detailed failed logins for the Login Security overview. The counters that enforce the limits are kept separately for as long as the counting window needs them, whatever this says.', 'sentinel-shield' ),
+			'recommended' => 7,
+		);
+		$fields[] = array(
+			'key'         => 'login.history_max_rows',
+			'tab'         => 'login',
+			'type'        => 'number',
+			'min'         => 10000,
+			'max'         => 10000000,
+			'label'       => __( 'Keep at most this many login attempts', 'sentinel-shield' ),
+			'help'        => __( 'A cap on the detailed history during a long attack; the oldest attempts are pruned first. Attempts inside the counting window are never pruned, and the limits do not depend on this history.', 'sentinel-shield' ),
+			'recommended' => 500000,
+		);
+		$fields[] = array(
 			'key'         => 'login.instant_usernames',
 			'tab'         => 'login',
 			'type'        => 'textarea',
@@ -394,6 +434,19 @@ final class SettingsSchema {
 			'max'         => 90,
 			'label'       => __( 'Offer "Trust this browser" for (days)', 'sentinel-shield' ),
 			'help'        => __( 'Shows a "Trust this browser" box on the code screen; a trusted browser is not asked for a code again for this many days (the password is still needed). Users can forget all their trusted browsers on their Two-Factor Authentication page, and resetting an account\'s two-factor forgets them too. 0 asks for a code at every login.', 'sentinel-shield' ),
+			'recommended' => null,
+		);
+
+		$fields[] = array(
+			'key'         => 'twofa.passkey_uv',
+			'tab'         => 'login',
+			'type'        => 'select',
+			'options'     => array(
+				'preferred' => __( 'After the password, a touch is enough (security keys without a PIN work)', 'sentinel-shield' ),
+				'required'  => __( 'Always require fingerprint, face or PIN on the passkey', 'sentinel-shield' ),
+			),
+			'label'       => __( 'Passkey user verification', 'sentinel-shield' ),
+			'help'        => __( 'At login a passkey is the second step after the password, so a security key that only checks that someone touched it (possession) is accepted by default. "Always require" makes the browser ask for a fingerprint, face or PIN and refuses any passkey response without it, at login and when adding a passkey; keys that cannot verify the user can then no longer be used or added. Confirming identity on the Two-Factor Authentication page with a passkey alone (no password) always requires it.', 'sentinel-shield' ),
 			'recommended' => null,
 		);
 
@@ -520,6 +573,26 @@ final class SettingsSchema {
 			'label'       => __( 'Heartbeat URL', 'sentinel-shield' ),
 			'help'        => __( 'Pinged every hour by the maintenance job, for a monitoring service that alerts you when the pings stop (for example healthchecks.io or Uptime Kuma push monitors). Silence means the site is down, Sentinel Shield was switched off, or scheduled jobs stopped: all things an attacker might cause.', 'sentinel-shield' ),
 			'recommended' => null,
+		);
+		$fields[] = array(
+			'key'         => 'audit.max_unsent_days',
+			'tab'         => 'alerts',
+			'type'        => 'number',
+			'min'         => 1,
+			'max'         => 365,
+			'label'       => __( 'Keep undelivered events for (days)', 'sentinel-shield' ),
+			'help'        => __( 'While the webhook cannot be reached, events wait for it this long at most (even past the normal retention); older ones are pruned and the gap is shown here and sent with the next delivery.', 'sentinel-shield' ),
+			'recommended' => 90,
+		);
+		$fields[] = array(
+			'key'         => 'audit.max_unsent_rows',
+			'tab'         => 'alerts',
+			'type'        => 'number',
+			'min'         => 1000,
+			'max'         => 10000000,
+			'label'       => __( 'Keep at most this many undelivered events', 'sentinel-shield' ),
+			'help'        => __( 'A cap on the waiting events during a long outage of the webhook together with an attack; past it, the oldest waiting events are pruned and counted as a gap.', 'sentinel-shield' ),
+			'recommended' => 100000,
 		);
 		$fields[] = array(
 			'key'         => 'firewall.early_gate',

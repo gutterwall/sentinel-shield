@@ -16,9 +16,13 @@
             <directory suffix="Test.php">./tests/Integration</directory>
         </testsuite>
     </testsuites>
+    <!-- bin/coverage.sh: the early firewall is measured in the HTTP tests' own
+         servers too; uninstall.php runs only in bin/lifecycle-test.sh. -->
     <coverage>
         <include>
             <directory suffix=".php">./src</directory>
+            <file>./sentinel-shield.php</file>
+            <file>./early-gate.php</file>
         </include>
     </coverage>
 </phpunit>

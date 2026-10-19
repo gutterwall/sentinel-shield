@@ -91,6 +91,23 @@ final class FeedSnapshot implements RangeLookup {
 	}
 
 	/**
+	 * Whether a range file is present and whole (header and size), read
+	 * afresh: no handle or count is cached, so a file deleted or cut short
+	 * since is noticed.
+	 *
+	 * @param string $path File.
+	 */
+	public static function is_complete( string $path ): bool {
+		clearstatcache( true, $path );
+		$head = is_file( $path ) && is_readable( $path ) ? (string) file_get_contents( $path, false, null, 0, self::HEADER ) : ''; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Our own binary file.
+		if ( self::HEADER !== strlen( $head ) || self::MAGIC !== substr( $head, 0, 8 ) ) {
+			return false;
+		}
+		$n = (array) unpack( 'Nv4/Nv6', substr( $head, 8, 8 ) );
+		return (int) filesize( $path ) === self::HEADER + 8 * (int) $n['v4'] + 32 * (int) $n['v6'];
+	}
+
+	/**
 	 * Writes a snapshot. Returns false when the folder is not writable.
 	 *
 	 * @param IpRangeSet $set  Ranges.
@@ -109,19 +126,25 @@ final class FeedSnapshot implements RangeLookup {
 		if ( false === $out ) {
 			return false;
 		}
-		fwrite( $out, self::MAGIC . pack( 'NN', count( $v4 ), count( $v6 ) ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Binary snapshot.
+		// Every write must be complete (a full disk or a quota cuts it short).
+		$put = static fn( string $bytes ): bool => '' === $bytes || strlen( $bytes ) === @fwrite( $out, $bytes ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Binary snapshot.
+		$ok  = $put( self::MAGIC . pack( 'NN', count( $v4 ), count( $v6 ) ) );
 		foreach ( array( $v4, $v6 ) as $pairs ) {
 			$buffer = '';
 			foreach ( $pairs as $pair ) {
 				$buffer .= $pair[0] . $pair[1];
 				if ( strlen( $buffer ) > 65536 ) {
-					fwrite( $out, $buffer ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Binary snapshot.
+					$ok     = $ok && $put( $buffer );
 					$buffer = '';
 				}
 			}
-			fwrite( $out, $buffer ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- Binary snapshot.
+			$ok = $ok && $put( $buffer );
 		}
-		fclose( $out ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Binary snapshot.
+		$ok = fclose( $out ) && $ok; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Binary snapshot.
+		if ( ! $ok ) {
+			wp_delete_file( $tmp );
+			return false;
+		}
 		self::close( $path );
 		if ( ! @rename( $tmp, $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.rename_rename -- Atomic replace.
 			wp_delete_file( $tmp );

@@ -1,0 +1,60 @@
+{
+    "_about": "Coverage floors checked by bin/coverage-check.php (CI coverage job). Floors are what the suite reaches now and may only go up (--update raises them). Goals are the targets from the fifth review; reported, not yet enforced. Excluded: uninstall.php (runs only in the lifecycle test, out of process), bin/ and tests/.",
+    "goals": {
+        "overall_lines": 90,
+        "security_branches": 95
+    },
+    "groups": {
+        "overall": {
+            "paths": [
+                "src/",
+                "sentinel-shield.php",
+                "early-gate.php"
+            ],
+            "lines": 81,
+            "branches": 54.5
+        },
+        "authentication": {
+            "paths": [
+                "src/TwoFactor/",
+                "src/Login/",
+                "src/Geo/LoginGeoGuard.php"
+            ],
+            "lines": 86,
+            "branches": 62.5
+        },
+        "authorization": {
+            "paths": [
+                "src/Admin/Actions.php",
+                "src/Admin/View.php",
+                "src/Admin/TwoFactorPage.php",
+                "src/Admin/RulesPage.php",
+                "src/Lockdown/Hardening.php",
+                "src/Lockdown/AdminRegistry.php"
+            ],
+            "lines": 72.5,
+            "branches": 48
+        },
+        "recovery": {
+            "paths": [
+                "src/Unlock/",
+                "src/Lockout/",
+                "src/Repository/TokenRepository.php",
+                "src/Safety/"
+            ],
+            "lines": 80.5,
+            "branches": 54.5
+        },
+        "policy publication": {
+            "paths": [
+                "src/Firewall/",
+                "src/Net/",
+                "src/Support/DataDir.php",
+                "src/Support/Mutex.php",
+                "early-gate.php"
+            ],
+            "lines": 86.5,
+            "branches": 64
+        }
+    }
+}

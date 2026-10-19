@@ -487,7 +487,7 @@ final class Actions {
 		$back       = Admin::url( 'sentinel-shield-settings', array( 'tab' => 'server' ) );
 		switch ( $op ) {
 			case 'rebuild':
-				$state = $this->c->get( EarlyGate::class )->rebuild();
+				$state = $this->c->get( EarlyGate::class )->rebuild( EarlyGate::EXPLICIT_WAIT );
 				$this->audit( 'early_gate_rebuild' );
 				View::flash( empty( $state['error'] ) ? 'success' : 'error', empty( $state['error'] ) ? __( 'Snapshot rebuilt.', 'sentinel-shield' ) : (string) $state['error'] );
 				$back .= '#ss-early';
@@ -496,7 +496,7 @@ final class Actions {
 				$private = DataDir::recheck();
 				View::flash( true === $private ? 'success' : 'error', true === $private ? __( 'The private folder is confirmed private.', 'sentinel-shield' ) : DataDir::problem() );
 				if ( true === $private ) {
-					$this->c->get( EarlyGate::class )->rebuild();
+					$this->c->get( EarlyGate::class )->rebuild( EarlyGate::EXPLICIT_WAIT );
 				}
 				$back .= '#ss-private';
 				break;

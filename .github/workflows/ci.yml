@@ -1,6 +1,17 @@
-# Security regression CI: coding standards, unit tests on every supported PHP
-# version, integration tests on the oldest and newest supported WordPress (single
-# site and multisite), and an end-to-end smoke test of a real site over HTTP.
+# Security regression CI.
+#
+# Every push and pull request: coding standards, static analysis, dependency
+# audit and secret scan; unit tests on every supported PHP version;
+# integration tests (oldest and newest WordPress, single site and multisite,
+# MySQL and MariaDB, with Redis); coverage with floors; mutation testing; a
+# real site behind PHP's server (smoke, Plugin Check, upgrades and the
+# install/uninstall lifecycle); and the same site behind nginx and Apache with
+# PHP-FPM (concurrency, crash and live server-configuration tests).
+#
+# Nightly (and on demand): branch coverage, long fuzzing, other site layouts,
+# HTTPS behind a proxy with passkeys in two browsers, and the performance
+# budgets. Tags: the release zip is built, tested and given a provenance
+# attestation here, and that zip is what gets published.
 name: CI
 
 on:
@@ -9,23 +20,27 @@ on:
     tags: ['v*']
   pull_request:
   schedule:
-    # Weekly, so a new WordPress release that breaks something is noticed.
-    - cron: '17 4 * * 1'
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
+
+env:
+  WP_CLI_VERSION: 2.12.0
 
 jobs:
   lint:
-    name: Coding standards, docs and build
+    name: Coding standards, static analysis, audit, secrets and build
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
@@ -34,6 +49,18 @@ jobs:
       - run: composer install --no-progress --no-interaction
       - name: Coding standards (WordPress + PHP 8.1 compatibility)
         run: vendor/bin/phpcs -q
+      - name: Static analysis (PHPStan level 6)
+        run: vendor/bin/phpstan analyse --no-progress --memory-limit=1G
+      - name: Known vulnerabilities in dependencies
+        run: composer audit
+      - name: Secret scan (whole history)
+        run: |
+          V=8.21.2
+          curl -fsSL --retry 5 -o /tmp/gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v$V/gitleaks_${V}_linux_x64.tar.gz"
+          curl -fsSL --retry 5 -o /tmp/gitleaks.sums "https://github.com/gitleaks/gitleaks/releases/download/v$V/gitleaks_${V}_checksums.txt"
+          (cd /tmp && grep "gitleaks_${V}_linux_x64.tar.gz" gitleaks.sums | sed 's#gitleaks_.*#gitleaks.tgz#' | sha256sum -c -)
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+          /tmp/gitleaks git --no-banner --redact --config .gitleaks.toml .
       - name: Settings reference (docs/SETTINGS.md) is current
         run: php bin/settings-docs.php --check
       - name: Release build (versions agree, zip and checksums)
@@ -42,7 +69,7 @@ jobs:
         with:
           name: sentinel-shield-zip
           path: dist/sentinel-shield-*.zip*
-          retention-days: 14
+          retention-days: 30
 
   unit:
     name: Unit tests (PHP ${{ matrix.php }})
@@ -62,26 +89,29 @@ jobs:
       - run: vendor/bin/phpunit --testsuite unit
 
   integration:
-    name: Integration (PHP ${{ matrix.php }}, WP ${{ matrix.wp }}${{ matrix.multisite == '1' && ', multisite' || '' }})
+    name: Integration (PHP ${{ matrix.php }}, WP ${{ matrix.wp }}, ${{ matrix.db }}${{ matrix.multisite == '1' && ', multisite' || '' }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { php: '8.1', wp: '6.4.5', multisite: '0' }
-          - { php: '8.1', wp: '6.4.5', multisite: '1' }
-          - { php: '8.3', wp: 'latest', multisite: '0' }
-          - { php: '8.3', wp: 'latest', multisite: '1' }
-          - { php: '8.4', wp: 'latest', multisite: '0' }
+          - { php: '8.1', wp: '6.4.5', multisite: '0', db: 'mysql:8.0' }
+          - { php: '8.1', wp: '6.4.5', multisite: '1', db: 'mysql:8.0' }
+          - { php: '8.3', wp: 'latest', multisite: '0', db: 'mysql:8.0' }
+          - { php: '8.3', wp: 'latest', multisite: '1', db: 'mysql:8.0' }
+          - { php: '8.4', wp: 'latest', multisite: '0', db: 'mysql:8.0' }
+          - { php: '8.3', wp: 'latest', multisite: '0', db: 'mariadb:11.4' }
+          - { php: '8.3', wp: 'latest', multisite: '1', db: 'mariadb:11.4' }
     services:
-      mysql:
-        image: mysql:8.0
+      db:
+        image: ${{ matrix.db }}
         env:
           MYSQL_ROOT_PASSWORD: root
+          MARIADB_ROOT_PASSWORD: root
           MYSQL_DATABASE: wordpress_test
         ports: ['3306:3306']
         options: >-
-          --health-cmd="mysqladmin ping -proot"
+          --health-cmd="mysqladmin ping -proot || mariadb-admin ping -proot"
           --health-interval=5s --health-timeout=5s --health-retries=20
     env:
       WP_TESTS_DIR: /tmp/wp-tests/tests-lib
@@ -137,13 +167,75 @@ jobs:
           unzip -q /tmp/redis-cache.zip -d /tmp
           cp /tmp/redis-cache/includes/object-cache.php /tmp/wp-tests/wordpress/wp-content/object-cache.php
           echo "define( 'WP_REDIS_HOST', '127.0.0.1' );" >> /tmp/wp-tests/tests-lib/wp-tests-config.php
-      - name: Integration tests with the cache active
-        run: |
-          php -r 'require "/tmp/wp-tests/tests-lib/wp-tests-config.php"; echo "config ok\n";'
-          vendor/bin/phpunit --testsuite integration
+      - name: Integration tests with the cache active (eviction and stale-cache tests included)
+        run: vendor/bin/phpunit --testsuite integration
+
+  coverage:
+    name: Coverage (line floors; HTML and Clover reports)
+    runs-on: ubuntu-24.04
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: wordpress_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -proot"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      WP_TESTS_DIR: /tmp/wp-tests/tests-lib
+    steps:
+      - uses: actions/checkout@v5
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, sodium
+          tools: composer
+          coverage: pcov
+      - run: composer install --no-progress --no-interaction
+      - run: bin/install-wp-tests.sh wordpress_test root root 127.0.0.1:3306 latest /tmp/wp-tests
+      - name: Unit, integration (single site and multisite) and HTTP tests with coverage
+        run: COVERAGE_SUMMARY=$GITHUB_STEP_SUMMARY bin/coverage.sh build/coverage
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: coverage-report
+          path: |
+            build/coverage/html
+            build/coverage/*.xml
+            build/coverage/*.txt
+          retention-days: 30
+
+  mutation:
+    name: Mutation tests (deliberate defects must be caught)
+    runs-on: ubuntu-24.04
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: wordpress_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -proot"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      WP_TESTS_DIR: /tmp/wp-tests/tests-lib
+    steps:
+      - uses: actions/checkout@v5
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, sodium
+          tools: composer
+          coverage: none
+      - run: composer install --no-progress --no-interaction
+      - run: bin/install-wp-tests.sh wordpress_test root root 127.0.0.1:3306 latest /tmp/wp-tests
+      - run: php bin/mutation-test.php
 
   smoke:
-    name: Smoke test (real site over HTTP)
+    name: Real site (PHP server), Plugin Check, upgrades and lifecycle
     runs-on: ubuntu-24.04
     services:
       mysql:
@@ -165,8 +257,7 @@ jobs:
       # Pinned and checksum-verified; setup-php's tool download failed once (run 39165610025).
       - name: Install WP-CLI
         run: |
-          V=2.12.0
-          URL=https://github.com/wp-cli/wp-cli/releases/download/v$V/wp-cli-$V.phar
+          URL=https://github.com/wp-cli/wp-cli/releases/download/v$WP_CLI_VERSION/wp-cli-$WP_CLI_VERSION.phar
           curl -fsSL --retry 5 --retry-delay 5 -o /tmp/wp.phar "$URL"
           curl -fsSL --retry 5 --retry-delay 5 -o /tmp/wp.sha512 "$URL.sha512"
           echo "$(cat /tmp/wp.sha512)  /tmp/wp.phar" | sha512sum -c -
@@ -193,16 +284,21 @@ jobs:
       - run: bin/smoke-test.sh /tmp/site http://127.0.0.1:8099
         env:
           SMOKE_EARLY_GATE: '1'
-      - name: Passkeys in a real browser (Chrome with a virtual authenticator)
+      - name: Passkeys in a real browser (Chrome with virtual authenticators)
         run: |
           # WebAuthn needs a host name, not an IP address: serve the same site as localhost.
           wp option update siteurl http://localhost:8099 --path=/tmp/site
           wp option update home http://localhost:8099 --path=/tmp/site
           wp user create pk_user pk@example.org --role=administrator --user_pass=Pk-pass-12345 --path=/tmp/site
-          PASSKEY_USER=pk_user PASSKEY_PASS=Pk-pass-12345 python3 bin/passkey-e2e.py http://localhost:8099
+          WP_PATH=/tmp/site PASSKEY_USER=pk_user PASSKEY_PASS=Pk-pass-12345 python3 bin/passkey-e2e.py http://localhost:8099
+          wp option update siteurl http://127.0.0.1:8099 --path=/tmp/site
+          wp option update home http://127.0.0.1:8099 --path=/tmp/site
+      - uses: actions/download-artifact@v5
+        with:
+          name: sentinel-shield-zip
+          path: dist
       - name: Plugin Check on the release zip
         run: |
-          bin/build.sh --skip-tests --allow-dirty
           wp plugin deactivate sentinel-shield --path=/tmp/site
           rm /tmp/site/wp-content/plugins/sentinel-shield
           unzip -q dist/sentinel-shield-*.zip -d /tmp/site/wp-content/plugins
@@ -210,14 +306,203 @@ jobs:
           wp plugin activate sentinel-shield --path=/tmp/site
           wp plugin check sentinel-shield --path=/tmp/site --format=csv --fields=file,line,type,code,message | tee /tmp/plugin-check.csv
           if grep -q ',\(ERROR\|WARNING\),' /tmp/plugin-check.csv; then echo "Plugin Check reported problems"; exit 1; fi
-      - name: Upgrade from the 0.8.0 release (legacy files in public uploads)
+          wp plugin deactivate plugin-check --path=/tmp/site
+      - name: Earlier releases (checksum-verified)
         run: |
-          BASE=https://github.com/gutterwall/sentinel-shield/releases/download/v0.8.0
           mkdir -p /tmp/old && cd /tmp/old
-          curl -fsSL --retry 5 -O "$BASE/sentinel-shield-0.8.0.zip" -O "$BASE/sentinel-shield-0.8.0.zip.sha256"
-          sha256sum -c sentinel-shield-0.8.0.zip.sha256
-          cd "$GITHUB_WORKSPACE"
-          bin/upgrade-test.sh /tmp/site http://127.0.0.1:8099 /tmp/old/sentinel-shield-0.8.0.zip "$(ls dist/sentinel-shield-*.zip)"
+          for v in 0.8.0 0.8.1 0.8.2; do
+            BASE=https://github.com/gutterwall/sentinel-shield/releases/download/v$v
+            curl -fsSL --retry 5 -O "$BASE/sentinel-shield-$v.zip" -O "$BASE/sentinel-shield-$v.zip.sha256"
+            sha256sum -c sentinel-shield-$v.zip.sha256
+          done
+      - name: Upgrade from the 0.8.0 release (legacy files in public uploads)
+        run: bin/upgrade-test.sh /tmp/site http://127.0.0.1:8099 /tmp/old/sentinel-shield-0.8.0.zip "$(ls dist/sentinel-shield-*.zip)"
+      - name: Install, deactivate, reactivate, uninstall and upgrade matrix (the release zip)
+        run: bin/lifecycle-test.sh /tmp/site http://127.0.0.1:8099 "$(ls dist/sentinel-shield-*.zip)" /tmp/old/sentinel-shield-0.8.0.zip /tmp/old/sentinel-shield-0.8.1.zip /tmp/old/sentinel-shield-0.8.2.zip
       - name: Server log
         if: failure()
         run: tail -100 /tmp/server.log
+    needs: lint
+
+  stack:
+    name: ${{ matrix.server }} + PHP-FPM (concurrency, crashes, server files${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && ', HTTPS, performance' || '' }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        server: [nginx, apache]
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: wordpress
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -proot"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      SITE: /tmp/site
+      STACK_DIR: /tmp/stack
+    steps:
+      - uses: actions/checkout@v5
+      - name: nginx, Apache and PHP 8.3 with PHP-FPM from Ubuntu
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq nginx apache2 php8.3-fpm php8.3-cli php8.3-mysql php8.3-curl php8.3-mbstring php8.3-xml php8.3-zip php8.3-intl
+          sudo systemctl stop nginx apache2 php8.3-fpm || true
+          sudo update-alternatives --set php /usr/bin/php8.3
+          php -v; nginx -v; apache2 -v
+      - name: Install WP-CLI
+        run: |
+          URL=https://github.com/wp-cli/wp-cli/releases/download/v$WP_CLI_VERSION/wp-cli-$WP_CLI_VERSION.phar
+          curl -fsSL --retry 5 --retry-delay 5 -o /tmp/wp.phar "$URL"
+          curl -fsSL --retry 5 --retry-delay 5 -o /tmp/wp.sha512 "$URL.sha512"
+          echo "$(cat /tmp/wp.sha512)  /tmp/wp.phar" | sha512sum -c -
+          sudo install -m 755 /tmp/wp.phar /usr/local/bin/wp
+      - name: Create a throwaway site with the plugin active
+        run: |
+          mkdir -p $SITE && curl -fsSL https://wordpress.org/latest.tar.gz | tar -xz -C $SITE --strip-components=1
+          wp config create --path=$SITE --dbname=wordpress --dbuser=root --dbpass=root --dbhost=127.0.0.1:3306 \
+            --extra-php <<< "define( 'WP_DEBUG', true ); define( 'WP_DEBUG_DISPLAY', true ); define( 'WP_ENVIRONMENT_TYPE', 'local' );
+          if ( isset( \$_SERVER['HTTP_X_FORWARDED_PROTO'] ) && 'https' === \$_SERVER['HTTP_X_FORWARDED_PROTO'] ) { \$_SERVER['HTTPS'] = 'on'; }"
+          wp core install --path=$SITE --url=http://127.0.0.1:8098 --title=Stack --admin_user=admin \
+            --admin_password="$(openssl rand -hex 16)" --admin_email=admin@example.org --skip-email
+          ln -s "$GITHUB_WORKSPACE" $SITE/wp-content/plugins/sentinel-shield
+          wp plugin activate sentinel-shield --path=$SITE
+          wp sentinel settings-set firewall.early_gate prepend --path=$SITE
+      - name: Start ${{ matrix.server }} with PHP-FPM
+        run: |
+          mkdir -p $STACK_DIR
+          (bin/serve-stack.sh ${{ matrix.server }} $SITE 8098 ${{ matrix.server == 'nginx' && '8443' || '' }} > /tmp/stack.log 2>&1 &)
+          for i in $(seq 1 60); do grep -q ready /tmp/stack.log && break; sleep 0.5; done
+          cat /tmp/stack.log; curl -sf -o /dev/null http://127.0.0.1:8098/
+      - name: Smoke test
+        run: SMOKE_EARLY_GATE=1 bin/smoke-test.sh $SITE http://127.0.0.1:8098
+      - name: Simultaneous requests racing for single-use secrets
+        run: php bin/race-test.php $SITE http://127.0.0.1:8098 10
+      - name: Workers killed mid-publication, mid-sync and holding locks; a full disk
+        run: bin/fault-test.sh $SITE http://127.0.0.1:8098
+      - name: Generated server files in live nginx and Apache
+        run: bin/server-config-test.sh $SITE
+      - name: Passkeys over HTTPS behind a TLS proxy, in two browsers
+        if: matrix.server == 'nginx' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        run: |
+          wp option update siteurl https://localhost:8443 --path=$SITE
+          wp option update home https://localhost:8443 --path=$SITE
+          wp user create pk_user pk@example.org --role=administrator --user_pass=Pk-pass-12345 --path=$SITE
+          SPKI=$(openssl x509 -in $STACK_DIR/cert.pem -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64)
+          CHROME_SPKI=$SPKI WP_PATH=$SITE PASSKEY_USER=pk_user PASSKEY_PASS=Pk-pass-12345 python3 bin/passkey-e2e.py https://localhost:8443
+          curl -sk -D - -o /dev/null -b 'wordpress_test_cookie=WP%20Cookie%20check' --data 'log=pk_user&pwd=Pk-pass-12345&testcookie=1' https://localhost:8443/wp-login.php \
+            | grep -i '^set-cookie: sentinel_shield_2fa=.*; secure'
+          wp option update siteurl http://127.0.0.1:8098 --path=$SITE
+          wp option update home http://127.0.0.1:8098 --path=$SITE
+      - name: Performance budgets
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: php bin/bench-site.php $SITE http://127.0.0.1:8098 --report=/tmp/bench-${{ matrix.server }}.json
+      - uses: actions/upload-artifact@v5
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        with:
+          name: performance-${{ matrix.server }}
+          path: /tmp/bench-${{ matrix.server }}.json
+          if-no-files-found: ignore
+      - name: Logs
+        if: failure()
+        run: tail -50 /tmp/stack.log $STACK_DIR/*.log || true
+
+  layouts:
+    name: Site layout (${{ matrix.layout }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        layout: [subdirectory, content-dir, multisite-mapped]
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: layout
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -proot"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, sodium
+          coverage: none
+      - name: Install WP-CLI
+        run: |
+          URL=https://github.com/wp-cli/wp-cli/releases/download/v$WP_CLI_VERSION/wp-cli-$WP_CLI_VERSION.phar
+          curl -fsSL --retry 5 --retry-delay 5 -o /tmp/wp.phar "$URL"
+          curl -fsSL --retry 5 --retry-delay 5 -o /tmp/wp.sha512 "$URL.sha512"
+          echo "$(cat /tmp/wp.sha512)  /tmp/wp.phar" | sha512sum -c -
+          sudo install -m 755 /tmp/wp.phar /usr/local/bin/wp
+      - run: mkdir -p /tmp/wordpress && curl -fsSL https://wordpress.org/latest.tar.gz | tar -xz -C /tmp/wordpress --strip-components=1
+      - run: bin/layout-test.sh ${{ matrix.layout }} /tmp/wordpress /tmp/layouts 8201 layout root root 127.0.0.1:3306
+
+  nightly-depth:
+    name: Branch coverage and long fuzzing
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: wordpress_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -proot"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      WP_TESTS_DIR: /tmp/wp-tests/tests-lib
+    steps:
+      - uses: actions/checkout@v5
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, sodium
+          tools: composer
+          coverage: xdebug
+      - run: composer install --no-progress --no-interaction
+      - run: bin/install-wp-tests.sh wordpress_test root root 127.0.0.1:3306 latest /tmp/wp-tests
+      - name: Long fuzzing and property tests (20000 rounds each)
+        run: |
+          FUZZ_ITERATIONS=20000 php -d xdebug.mode=off vendor/bin/phpunit --testsuite unit --filter RangePolicyPropertyTest
+          FUZZ_ITERATIONS=20000 php -d xdebug.mode=off vendor/bin/phpunit --testsuite integration --filter FuzzTest
+      - name: Line and branch coverage (Xdebug)
+        run: BRANCHES=1 COVERAGE_SUMMARY=$GITHUB_STEP_SUMMARY bin/coverage.sh build/coverage
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: coverage-with-branches
+          path: build/coverage
+          retention-days: 30
+
+  provenance:
+    name: Release zip provenance (tags)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, unit, integration, object-cache, coverage, mutation, smoke, stack]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: sentinel-shield-zip
+          path: dist
+      - name: The zip was built from this tag's commit
+        run: |
+          unzip -p dist/sentinel-shield-*.zip sentinel-shield/build.json | tee /tmp/build.json
+          grep -q "\"commit\": *\"$GITHUB_SHA\"" /tmp/build.json
+          (cd dist && sha256sum -c sentinel-shield-*.zip.sha256)
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/sentinel-shield-*.zip

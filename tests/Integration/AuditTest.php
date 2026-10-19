@@ -35,7 +35,7 @@ final class AuditTest extends \WP_UnitTestCase {
 		$c = Plugin::instance()->container();
 		// The plugin's own exporter would send real requests.
 		remove_action( 'sentinel_shield_event_logged', array( $c->get( AuditExporter::class ), 'on_event' ) );
-		remove_action( AuditExporter::CRON, array( $c->get( AuditExporter::class ), 'run' ) );
+		remove_action( AuditExporter::CRON, array( $c->get( AuditExporter::class ), 'cron' ) );
 		global $wpdb;
 		$wpdb->query( $wpdb->prepare( 'DELETE FROM %i', $c->get( EventRepository::class )->table() ) );
 		foreach ( array( AuditExporter::STATE, AuditExporter::SECRET, Mailer::HEALTH ) as $option ) {
@@ -51,7 +51,7 @@ final class AuditTest extends \WP_UnitTestCase {
 
 	public function tear_down(): void {
 		if ( null !== $this->exporter ) {
-			remove_action( AuditExporter::CRON, array( $this->exporter, 'run' ) );
+			remove_action( AuditExporter::CRON, array( $this->exporter, 'cron' ) );
 			remove_action( 'sentinel_shield_event_logged', array( $this->exporter, 'on_event' ) );
 			remove_action( 'shutdown', array( $this->exporter, 'on_shutdown' ) );
 		}

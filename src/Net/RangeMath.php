@@ -95,6 +95,7 @@ final class RangeMath {
 		$guard = 0;
 		while ( strcmp( $start, $end ) <= 0 && $guard++ < 300 ) {
 			// The largest aligned block at $start that does not pass $end.
+			$last = $start;
 			for ( $host = self::trailing_zeros( $start, $bits ); $host >= 0; $host-- ) {
 				$last = self::fill( $start, $host );
 				if ( strcmp( $last, $end ) <= 0 ) {

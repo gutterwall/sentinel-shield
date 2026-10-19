@@ -304,7 +304,7 @@ final class TwoFactorPage {
 					if ( ! is_array( $reg ) || (int) ( $reg['expires'] ?? 0 ) < time() || ! is_array( $data ) ) {
 						throw new \RuntimeException( __( 'The request expired. Try again.', 'sentinel-shield' ) );
 					}
-					$cred = WebAuthn::for_site()->verify_registration( WebAuthn::unb64u( (string) ( $data['client'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['attestation'] ?? '' ) ), (string) $reg['challenge'] );
+					$cred = WebAuthn::for_site()->verify_registration( WebAuthn::unb64u( (string) ( $data['client'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['attestation'] ?? '' ) ), (string) $reg['challenge'], $this->login_uv() );
 					if ( isset( $users->passkeys( $id )[ $cred['id'] ] ) ) {
 						throw new \RuntimeException( __( 'This passkey is already registered.', 'sentinel-shield' ) );
 					}
@@ -547,7 +547,9 @@ final class TwoFactorPage {
 		// phpcs:disable WordPress.Security.NonceVerification.Missing -- handle() checked the nonce.
 		$id = (int) $user->ID;
 		if ( ! empty( $_POST['passkey'] ) ) {
-			// A passkey checks possession and the user (fingerprint, face or PIN) at once.
+			// A passkey alone stands in for the password and the code here, so it
+			// must check possession and the user (fingerprint, face or PIN) at once:
+			// a response without user verification is refused.
 			$stored = get_user_meta( $id, UserTwoFactor::META . 'reauth_challenge', true );
 			delete_user_meta( $id, UserTwoFactor::META . 'reauth_challenge' );
 			$challenge = is_array( $stored ) && (int) ( $stored['expires'] ?? 0 ) >= time() ? (string) $stored['challenge'] : '';
@@ -558,7 +560,7 @@ final class TwoFactorPage {
 				return false;
 			}
 			try {
-				$count = WebAuthn::for_site()->verify_assertion( $keys[ $cred ], WebAuthn::unb64u( (string) ( $data['client'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['auth'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['signature'] ?? '' ) ), $challenge );
+				$count = WebAuthn::for_site()->verify_assertion( $keys[ $cred ], WebAuthn::unb64u( (string) ( $data['client'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['auth'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['signature'] ?? '' ) ), $challenge, WebAuthn::UV_REQUIRED );
 			} catch ( \RuntimeException $e ) {
 				return false;
 			}
@@ -623,9 +625,9 @@ final class TwoFactorPage {
 					'expires'   => time() + 5 * MINUTE_IN_SECONDS,
 				)
 			);
-			$options = WebAuthn::for_site()->request_options( $challenge, array_map( 'strval', array_keys( $keys ) ) );
+			$options = WebAuthn::for_site()->request_options( $challenge, array_map( 'strval', array_keys( $keys ) ), WebAuthn::UV_REQUIRED );
 			$this->form_open( 'reauth' );
-			echo '<input type="hidden" name="passkey" value=""> <button type="button" class="button" data-ss-passkey="get" data-field="passkey" data-options="' . esc_attr( (string) wp_json_encode( $options ) ) . '">' . esc_html__( 'Use a passkey instead', 'sentinel-shield' ) . '</button> <span class="ss-passkey-error description"></span></form>';
+			echo '<input type="hidden" name="passkey" value=""> <button type="button" class="button" data-ss-passkey="get" data-field="passkey" data-options="' . esc_attr( (string) wp_json_encode( $options ) ) . '">' . esc_html__( 'Use a passkey instead', 'sentinel-shield' ) . '</button> <span class="description">' . esc_html__( '(needs your fingerprint, face or PIN on the passkey; a security key that is only touched cannot confirm on its own)', 'sentinel-shield' ) . '</span> <span class="ss-passkey-error description"></span></form>';
 		}
 		echo '</div>';
 	}
@@ -640,7 +642,11 @@ final class TwoFactorPage {
 		$id   = (int) $user->ID;
 		$keys = $this->users()->passkeys( $id );
 		echo '<div class="ss-card" id="ss-passkeys"><h2>' . esc_html__( 'Passkeys and security keys', 'sentinel-shield' ) . '</h2>';
-		echo '<p>' . esc_html__( 'The strongest method: your phone, computer (Windows Hello, Touch ID) or a security key (such as a YubiKey) confirms the login with a fingerprint, face or PIN. Passkeys only work on this site, so they cannot be phished.', 'sentinel-shield' ) . '</p>';
+		if ( WebAuthn::UV_REQUIRED === $this->login_uv() ) {
+			echo '<p>' . esc_html__( 'The strongest method: your phone, computer (Windows Hello, Touch ID) or a security key (such as a YubiKey) confirms the login with a fingerprint, face or PIN. This site requires that check, so a key without a PIN or fingerprint reader cannot be added. Passkeys only work on this site, so they cannot be phished.', 'sentinel-shield' ) . '</p>';
+		} else {
+			echo '<p>' . esc_html__( 'The strongest method: after your password, your phone, computer (Windows Hello, Touch ID) or a security key (such as a YubiKey) confirms the login. Phones and computers check your fingerprint, face or PIN; a simple security key may only need a touch. Passkeys only work on this site, so they cannot be phished.', 'sentinel-shield' ) . '</p>';
+		}
 		if ( $keys ) {
 			echo '<table class="widefat striped ss-narrow"><thead><tr><th>' . esc_html__( 'Name', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Added', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Last used', 'sentinel-shield' ) . '</th><th></th></tr></thead><tbody>';
 			foreach ( $keys as $key_id => $key ) {
@@ -668,7 +674,7 @@ final class TwoFactorPage {
 				'expires'   => time() + 5 * MINUTE_IN_SECONDS,
 			)
 		);
-		$options = WebAuthn::for_site()->creation_options( $user, $this->users()->webauthn_handle( $id ), $challenge, array_map( 'strval', array_keys( $keys ) ) );
+		$options = WebAuthn::for_site()->creation_options( $user, $this->users()->webauthn_handle( $id ), $challenge, array_map( 'strval', array_keys( $keys ) ), $this->login_uv() );
 		$this->form_open( 'passkey_add' );
 		echo '<p><label>' . esc_html__( 'Name (so you can tell your passkeys apart):', 'sentinel-shield' ) . ' <input type="text" name="name" maxlength="60" placeholder="' . esc_attr__( 'e.g. Phone, Laptop, YubiKey', 'sentinel-shield' ) . '"></label> ';
 		echo '<input type="hidden" name="passkey" value=""><button type="button" class="button button-primary" data-ss-passkey="create" data-field="passkey" data-options="' . esc_attr( (string) wp_json_encode( $options ) ) . '">' . esc_html__( 'Add a passkey', 'sentinel-shield' ) . '</button></p>';
@@ -708,6 +714,13 @@ final class TwoFactorPage {
 				),
 			)
 		);
+	}
+
+	/**
+	 * Passkey user verification for login and adding keys (the setting).
+	 */
+	private function login_uv(): string {
+		return WebAuthn::uv( (string) $this->settings()->get( 'twofa.passkey_uv', WebAuthn::UV_PREFERRED ) );
 	}
 
 	/**

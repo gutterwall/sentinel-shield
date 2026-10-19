@@ -18,6 +18,13 @@ defined( 'ABSPATH' ) || exit;
  * ES256 (P-256), RS256 and EdDSA (Ed25519) keys. Attestation is not requested
  * ("none"): the key is trusted because a logged-in, freshly re-authenticated
  * user registered it, not because of who made the authenticator.
+ *
+ * User verification (fingerprint, face or PIN on the authenticator) is either
+ * preferred or required. Preferred accepts a security key that only checks
+ * presence (a touch): a possession factor, which is enough after a password.
+ * Required asks the browser for verification and refuses any response whose
+ * authenticator data lacks the UV flag; use it wherever a passkey stands in for
+ * the password as well (confirming identity), or when the site requires it.
  */
 final class WebAuthn {
 
@@ -28,6 +35,9 @@ final class WebAuthn {
 	private const FLAG_UP = 0x01;
 	private const FLAG_UV = 0x04;
 	private const FLAG_AT = 0x40;
+
+	public const UV_PREFERRED = 'preferred';
+	public const UV_REQUIRED  = 'required';
 
 	/**
 	 * Constructor.
@@ -88,9 +98,10 @@ final class WebAuthn {
 	 * @param string       $handle    The account's WebAuthn user handle (base64url).
 	 * @param string       $challenge Challenge (base64url).
 	 * @param list<string> $exclude   IDs of keys already registered (base64url).
+	 * @param string       $uv        UV_PREFERRED or UV_REQUIRED.
 	 * @return array<string, mixed>
 	 */
-	public function creation_options( \WP_User $user, string $handle, string $challenge, array $exclude ): array {
+	public function creation_options( \WP_User $user, string $handle, string $challenge, array $exclude, string $uv = self::UV_PREFERRED ): array {
 		return array(
 			'rp'                     => array(
 				'id'   => $this->rp_id,
@@ -102,19 +113,13 @@ final class WebAuthn {
 				'displayName' => '' === (string) $user->display_name ? $user->user_login : (string) $user->display_name,
 			),
 			'challenge'              => $challenge,
-			'pubKeyCredParams'       => array(
-				array(
+			// Only kinds of key this server can check later.
+			'pubKeyCredParams'       => array_map(
+				static fn( int $alg ): array => array(
 					'type' => 'public-key',
-					'alg'  => self::ALG_ES256,
+					'alg'  => $alg,
 				),
-				array(
-					'type' => 'public-key',
-					'alg'  => self::ALG_EDDSA,
-				),
-				array(
-					'type' => 'public-key',
-					'alg'  => self::ALG_RS256,
-				),
+				self::algorithms()
 			),
 			'timeout'                => 120000,
 			'attestation'            => 'none',
@@ -127,7 +132,7 @@ final class WebAuthn {
 			),
 			'authenticatorSelection' => array(
 				'residentKey'      => 'preferred',
-				'userVerification' => 'preferred',
+				'userVerification' => self::uv( $uv ),
 			),
 		);
 	}
@@ -137,14 +142,15 @@ final class WebAuthn {
 	 *
 	 * @param string       $challenge Challenge (base64url).
 	 * @param list<string> $allow     IDs of the account's keys (base64url).
+	 * @param string       $uv        UV_PREFERRED or UV_REQUIRED.
 	 * @return array<string, mixed>
 	 */
-	public function request_options( string $challenge, array $allow ): array {
+	public function request_options( string $challenge, array $allow, string $uv = self::UV_PREFERRED ): array {
 		return array(
 			'challenge'        => $challenge,
 			'rpId'             => $this->rp_id,
 			'timeout'          => 120000,
-			'userVerification' => 'preferred',
+			'userVerification' => self::uv( $uv ),
 			'allowCredentials' => array_map(
 				static fn( string $id ): array => array(
 					'type' => 'public-key',
@@ -161,10 +167,11 @@ final class WebAuthn {
 	 * @param string $client_json       clientDataJSON (raw bytes).
 	 * @param string $attestation       attestationObject (raw bytes).
 	 * @param string $expect_challenge  The challenge that was issued (base64url).
+	 * @param string $uv                UV_REQUIRED refuses a key that did not verify the user.
 	 * @return array{id:string, alg:int, key:string, count:int, aaguid:string, uv:bool}
 	 * @throws \RuntimeException When anything does not check out.
 	 */
-	public function verify_registration( string $client_json, string $attestation, string $expect_challenge ): array {
+	public function verify_registration( string $client_json, string $attestation, string $expect_challenge, string $uv = self::UV_PREFERRED ): array {
 		$this->check_client( $client_json, 'webauthn.create', $expect_challenge );
 		try {
 			$object = Cbor::decode( $attestation );
@@ -174,11 +181,14 @@ final class WebAuthn {
 		if ( ! is_array( $object ) || ! isset( $object['authData'] ) || ! is_string( $object['authData'] ) ) {
 			throw new \RuntimeException( 'The attestation object has no authenticator data.' );
 		}
-		$auth = $this->parse_auth_data( $object['authData'] );
+		$auth = $this->parse_auth_data( $object['authData'], $uv );
 		if ( ! ( $auth['flags'] & self::FLAG_AT ) || ! isset( $auth['credential'] ) ) {
 			throw new \RuntimeException( 'No credential was created.' );
 		}
 		$cred = $auth['credential'];
+		if ( ! in_array( $cred['alg'], self::algorithms(), true ) ) {
+			throw new \RuntimeException( 'This server cannot check this kind of key (the PHP OpenSSL extension is missing). Use a passkey that supports Ed25519, or ask the host to enable OpenSSL.' );
+		}
 		return array(
 			'id'     => self::b64u( $cred['id'] ),
 			'alg'    => $cred['alg'],
@@ -197,12 +207,13 @@ final class WebAuthn {
 	 * @param string                                $auth_data       authenticatorData (raw bytes).
 	 * @param string                                $signature       Signature (raw bytes).
 	 * @param string                                $expect_challenge The challenge that was issued (base64url).
+	 * @param string                                $uv              UV_REQUIRED refuses a response without user verification.
 	 * @return int The new signature counter.
 	 * @throws \RuntimeException When anything does not check out.
 	 */
-	public function verify_assertion( array $stored, string $client_json, string $auth_data, string $signature, string $expect_challenge ): int {
+	public function verify_assertion( array $stored, string $client_json, string $auth_data, string $signature, string $expect_challenge, string $uv = self::UV_PREFERRED ): int {
 		$this->check_client( $client_json, 'webauthn.get', $expect_challenge );
-		$auth = $this->parse_auth_data( $auth_data );
+		$auth = $this->parse_auth_data( $auth_data, $uv );
 		if ( ! self::verify_signature( (int) $stored['alg'], (string) $stored['key'], $auth_data . hash( 'sha256', $client_json, true ), $signature ) ) {
 			throw new \RuntimeException( 'The signature is not valid.' );
 		}
@@ -244,10 +255,11 @@ final class WebAuthn {
 	 * Parses authenticator data.
 	 *
 	 * @param string $data Raw bytes.
+	 * @param string $uv   UV_REQUIRED also requires the user-verified flag.
 	 * @return array{flags:int, count:int, credential?:array{aaguid:string, id:string, alg:int, key:string}}
 	 * @throws \RuntimeException When malformed or for another site.
 	 */
-	private function parse_auth_data( string $data ): array {
+	private function parse_auth_data( string $data, string $uv = self::UV_PREFERRED ): array {
 		if ( strlen( $data ) < 37 ) {
 			throw new \RuntimeException( 'The authenticator data is too short.' );
 		}
@@ -257,6 +269,9 @@ final class WebAuthn {
 		$flags = ord( $data[32] );
 		if ( ! ( $flags & self::FLAG_UP ) ) {
 			throw new \RuntimeException( 'The user was not present.' );
+		}
+		if ( self::UV_REQUIRED === self::uv( $uv ) && ! ( $flags & self::FLAG_UV ) ) {
+			throw new \RuntimeException( 'The authenticator did not verify the user (fingerprint, face or PIN).' );
 		}
 		$out = array(
 			'flags' => $flags,
@@ -349,11 +364,48 @@ final class WebAuthn {
 		if ( self::ALG_EDDSA === $alg ) {
 			return 64 === strlen( $signature ) && 32 === strlen( $key ) && sodium_crypto_sign_verify_detached( $signature, $data, $key );
 		}
-		if ( self::ALG_ES256 === $alg || self::ALG_RS256 === $alg ) {
+		if ( ( self::ALG_ES256 === $alg || self::ALG_RS256 === $alg ) && self::openssl() ) {
 			$public = openssl_pkey_get_public( $key );
 			return false !== $public && 1 === openssl_verify( $data, $signature, $public, OPENSSL_ALGO_SHA256 );
 		}
 		return false;
+	}
+
+	/**
+	 * Algorithms this server can verify, most preferred first: ES256 and
+	 * RS256 need PHP's OpenSSL extension; EdDSA works with sodium (built into
+	 * PHP, or WordPress's own sodium_compat).
+	 *
+	 * @return list<int>
+	 */
+	public static function algorithms(): array {
+		$out = array();
+		if ( self::openssl() ) {
+			$out[] = self::ALG_ES256;
+		}
+		if ( function_exists( 'sodium_crypto_sign_verify_detached' ) ) {
+			$out[] = self::ALG_EDDSA;
+		}
+		if ( self::openssl() ) {
+			$out[] = self::ALG_RS256;
+		}
+		return $out;
+	}
+
+	/**
+	 * Whether PHP's OpenSSL functions for signature checks are available.
+	 */
+	public static function openssl(): bool {
+		return function_exists( 'openssl_verify' ) && function_exists( 'openssl_pkey_get_public' );
+	}
+
+	/**
+	 * A user verification policy: required, or preferred for anything else.
+	 *
+	 * @param string $uv Policy.
+	 */
+	public static function uv( string $uv ): string {
+		return self::UV_REQUIRED === $uv ? self::UV_REQUIRED : self::UV_PREFERRED;
 	}
 
 	/**

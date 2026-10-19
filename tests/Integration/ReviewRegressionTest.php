@@ -386,6 +386,81 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 	}
 
 	/**
+	 * Review 5: an explicit rebuild (Rebuild now, WP-CLI, a settings save)
+	 * waits for a build already running instead of silently doing nothing,
+	 * and says so if that build does not finish; a background build gives way.
+	 */
+	public function test_an_explicit_rebuild_waits_for_a_running_build_and_says_so(): void {
+		$gate  = Plugin::instance()->container()->get( \SentinelShield\Firewall\EarlyGate::class );
+		$other = self::other_connection();
+		$lock  = self::lock_name( 'early_gate_build' );
+		try {
+			$this->assertSame( '1', (string) $other->get_var( $other->prepare( 'SELECT GET_LOCK(%s, 0)', $lock ) ) );
+			$before = (array) get_site_option( \SentinelShield\Firewall\EarlyGate::STATE, array() );
+			$this->assertSame( (string) ( $before['error'] ?? '' ), (string) ( $gate->rebuild()['error'] ?? '' ), 'a background build gives way quietly' );
+			$t0    = microtime( true );
+			$state = $gate->rebuild( 1 );
+			$this->assertGreaterThanOrEqual( 0.9, microtime( true ) - $t0, 'it waited' );
+			$this->assertStringContainsString( 'still running', (string) $state['error'] );
+		} finally {
+			$other->query( $other->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
+			$other->close();
+		}
+	}
+
+	/**
+	 * Review 5: confirming identity with a passkey alone (no password) always
+	 * requires user verification, whatever the login setting says.
+	 */
+	public function test_identity_confirmation_with_a_passkey_requires_user_verification(): void {
+		$user = self::factory()->user->create_and_get( array( 'user_pass' => 'right-pass' ) );
+		wp_set_current_user( $user->ID );
+		$users   = Plugin::instance()->container()->get( UserTwoFactor::class );
+		$rp      = \SentinelShield\TwoFactor\WebAuthn::for_site();
+		$key     = new SoftAuthenticator( \SentinelShield\TwoFactor\WebAuthn::ALG_ES256, $rp->rp_id(), \SentinelShield\TwoFactor\WebAuthn::origin_of( site_url( '/' ) ) );
+		$key->uv = false;
+		$reg     = \SentinelShield\TwoFactor\WebAuthn::challenge();
+		$resp    = $key->register( $reg );
+		$users->add_passkey( $user->ID, $rp->verify_registration( \SentinelShield\TwoFactor\WebAuthn::unb64u( $resp['client'] ), \SentinelShield\TwoFactor\WebAuthn::unb64u( $resp['attestation'] ), $reg ), 'Key', time() );
+		$page    = new \SentinelShield\Admin\TwoFactorPage( Plugin::instance()->container() );
+		$confirm = new \ReflectionMethod( $page, 'confirm_identity' );
+		$confirm->setAccessible( true );
+		$try = static function ( int $expires = 300 ) use ( $confirm, $page, $user, $key ): bool {
+			$challenge = \SentinelShield\TwoFactor\WebAuthn::challenge();
+			update_user_meta(
+				$user->ID,
+				UserTwoFactor::META . 'reauth_challenge',
+				array(
+					'challenge' => $challenge,
+					'expires'   => time() + $expires,
+				)
+			);
+			$_POST = array( 'passkey' => wp_slash( (string) wp_json_encode( $key->sign( $challenge ) ) ) );
+			try {
+				return (bool) $confirm->invoke( $page, get_userdata( $user->ID ) );
+			} finally {
+				$_POST = array();
+			}
+		};
+		try {
+			$this->assertFalse( $try(), 'a touch alone does not confirm identity' );
+			$key->uv = true;
+			$this->assertFalse( $try( -1 ), 'not with an expired challenge' );
+			$this->assertTrue( $try(), 'fingerprint, face or PIN does' );
+
+			// The confirmation card asks the browser for verification too.
+			ob_start();
+			$card = new \ReflectionMethod( $page, 'reauth_card' );
+			$card->setAccessible( true );
+			$card->invoke( $page, get_userdata( $user->ID ) );
+			$html = (string) ob_get_clean();
+			$this->assertStringContainsString( '&quot;userVerification&quot;:&quot;required&quot;', $html );
+		} finally {
+			wp_set_current_user( 0 );
+		}
+	}
+
+	/**
 	 * Review 4 finding 4: identity confirmation runs under the account's
 	 * two-factor lock and re-reads the failure count after taking it.
 	 */

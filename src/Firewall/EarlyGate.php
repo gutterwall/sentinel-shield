@@ -50,7 +50,20 @@ final class EarlyGate {
 	public const EXPIRY_HOOK = 'sentinel_shield_gate_expiry';
 	public const DEBOUNCE    = 10;
 	public const RETRY_AFTER = 300;
-	public const LEGACY      = 'sentinel_shield_legacy_files';
+
+	/**
+	 * Seconds after which unpublished changes count as overdue (WP-Cron is
+	 * not running): a visitor request then publishes them after its response
+	 * is sent, and the health screen warns after OVERDUE.
+	 */
+	public const FALLBACK_AFTER = 120;
+	public const OVERDUE        = 360;
+
+	/**
+	 * Seconds an explicit build waits for one already running.
+	 */
+	public const EXPLICIT_WAIT = 15;
+	public const LEGACY        = 'sentinel_shield_legacy_files';
 
 	/**
 	 * Files 0.8.0 kept in uploads/sentinel-shield that must not stay there.
@@ -92,8 +105,15 @@ final class EarlyGate {
 		add_action( 'sentinel_shield_rules_changed', array( $this, 'mark_dirty' ) );
 		add_action( 'sentinel_shield_feeds_changed', array( $this, 'mark_dirty' ) );
 		add_action( 'sentinel_shield_settings_saved', array( $this, 'settings_saved' ) );
-		add_action( self::EXPIRY_HOOK, array( $this, 'rebuild' ) );
+		add_action( self::EXPIRY_HOOK, array( $this, 'scheduled_rebuild' ) );
 		add_action( 'init', array( self::class, 'maybe_clean_legacy' ) );
+	}
+
+	/**
+	 * Scheduled build (an action callback returns nothing).
+	 */
+	public function scheduled_rebuild(): void {
+		$this->rebuild();
 	}
 
 	/**
@@ -128,17 +148,119 @@ final class EarlyGate {
 	}
 
 	/**
-	 * Notes that the snapshot must be rebuilt; it is, once, when the request ends.
+	 * Notes that the published policy is behind (a durable marker: the change
+	 * is published even if this request dies). Administrators, WP-CLI and
+	 * cron publish when their request ends; visitor requests (a lockout at the
+	 * login form) leave it to a background WP-Cron run, so policy builds stay
+	 * off the requests of visitors. WordPress enforces the change at once
+	 * either way.
 	 */
 	public function mark_dirty(): void {
 		if ( ! $this->wanted() ) {
 			return;
 		}
-		update_site_option( self::DIRTY, time() );
-		if ( ! $this->pending ) {
-			$this->pending = true;
-			add_action( 'shutdown', array( $this, 'rebuild_if_dirty' ) );
+		self::flag_dirty();
+		if ( $this->pending ) {
+			return;
 		}
+		$this->pending = true;
+		if ( ( is_admin() && ! wp_doing_ajax() ) || wp_doing_cron() || ( defined( 'WP_CLI' ) && WP_CLI ) ) {
+			add_action( 'shutdown', array( $this, 'rebuild_if_dirty' ) );
+			return;
+		}
+		$state = (array) get_site_option( self::STATE, array() );
+		$at    = max( time(), (int) ( $state['built'] ?? 0 ) + self::DEBOUNCE );
+		$next  = wp_next_scheduled( self::EXPIRY_HOOK );
+		if ( ! $next || $next > $at ) {
+			wp_clear_scheduled_hook( self::EXPIRY_HOOK );
+			wp_schedule_single_event( $at, self::EXPIRY_HOOK );
+		}
+		add_action( 'shutdown', array( $this, 'publish_if_overdue' ) );
+	}
+
+	/**
+	 * Records an unpublished change: since (the oldest unpublished change) and
+	 * last (this one, so a build can tell whether more came in meanwhile).
+	 */
+	private static function flag_dirty(): void {
+		$now   = microtime( true );
+		$dirty = self::dirty();
+		update_site_option(
+			self::DIRTY,
+			array(
+				'since' => null !== $dirty ? $dirty['since'] : $now,
+				'last'  => $now,
+			)
+		);
+	}
+
+	/**
+	 * The unpublished-change marker, read from the database (another request
+	 * may have changed it since this one loaded its options), or null.
+	 *
+	 * @return array{since:float, last:float}|null
+	 */
+	private static function dirty(): ?array {
+		global $wpdb;
+		$raw = is_multisite()
+			? $wpdb->get_var( $wpdb->prepare( 'SELECT meta_value FROM %i WHERE site_id = %d AND meta_key = %s', $wpdb->sitemeta, get_current_network_id(), self::DIRTY ) ) // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Must bypass the options cache.
+			: $wpdb->get_var( $wpdb->prepare( 'SELECT option_value FROM %i WHERE option_name = %s', $wpdb->options, self::DIRTY ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Must bypass the options cache.
+		if ( null === $raw ) {
+			return null;
+		}
+		$value = maybe_unserialize( $raw );
+		if ( is_array( $value ) && isset( $value['since'], $value['last'] ) ) {
+			return array(
+				'since' => (float) $value['since'],
+				'last'  => (float) $value['last'],
+			);
+		}
+		// Older versions stored the time of the change.
+		return array(
+			'since' => (float) $value,
+			'last'  => (float) $value,
+		);
+	}
+
+	/**
+	 * Publication status for the health screen: whether changes are waiting,
+	 * since when, and whether that is overdue (background jobs not running).
+	 *
+	 * @return array{pending:bool, since:int, overdue:bool, next:int}
+	 */
+	public function publication(): array {
+		$dirty = $this->wanted() ? self::dirty() : null;
+		$since = null === $dirty ? 0 : (int) $dirty['since'];
+		return array(
+			'pending' => null !== $dirty,
+			'since'   => $since,
+			'overdue' => null !== $dirty && $since > 0 && $since < time() - self::OVERDUE,
+			'next'    => (int) wp_next_scheduled( self::EXPIRY_HOOK ),
+		);
+	}
+
+	/**
+	 * Shutdown of a visitor request that changed the policy: when unpublished
+	 * changes are older than FALLBACK_AFTER (WP-Cron is not running), publishes
+	 * them after the response has been sent. Otherwise nudges WP-Cron.
+	 */
+	public function publish_if_overdue(): void {
+		$dirty = self::dirty();
+		if ( null === $dirty ) {
+			return;
+		}
+		if ( $dirty['since'] > time() - self::FALLBACK_AFTER ) {
+			if ( ! ( defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON ) && function_exists( 'spawn_cron' ) ) {
+				spawn_cron();
+			}
+			return;
+		}
+		if ( function_exists( 'fastcgi_finish_request' ) ) {
+			fastcgi_finish_request();
+		} elseif ( function_exists( 'litespeed_finish_request' ) ) {
+			litespeed_finish_request();
+		}
+		$this->rebuild_if_dirty();
 	}
 
 	/**
@@ -148,7 +270,7 @@ final class EarlyGate {
 		$this->settings->refresh();
 		$this->sync_loader();
 		if ( $this->wanted() ) {
-			$this->rebuild();
+			$this->rebuild( self::EXPLICIT_WAIT );
 		} else {
 			self::delete_files();
 		}
@@ -163,7 +285,7 @@ final class EarlyGate {
 		}
 		$state = get_site_option( self::STATE );
 		$stale = ! is_array( $state ) || (int) ( $state['valid_until'] ?? 0 ) < time() + 2 * HOUR_IN_SECONDS;
-		if ( ! get_site_option( self::DIRTY ) && ! $stale ) {
+		if ( null === self::dirty() && ! $stale ) {
 			return;
 		}
 		// During a burst of lockouts, publish at most every DEBOUNCE seconds;
@@ -182,14 +304,25 @@ final class EarlyGate {
 	/**
 	 * Writes the snapshot (and server files) now, if the private folder is ready.
 	 *
+	 * Background builds give way to one already running (it, or the retry its
+	 * marker causes, publishes the change). An explicit build (Rebuild now,
+	 * WP-CLI, a settings save) waits for it, and says so if it cannot.
+	 *
+	 * @param int $wait Seconds to wait for a build already running.
 	 * @return array<string, mixed> The new state: built, valid_until, generation, counts, error.
 	 */
-	public function rebuild(): array {
-		if ( ! Mutex::acquire( 'early_gate_build', 0 ) ) {
-			return (array) get_site_option( self::STATE, array() );
+	public function rebuild( int $wait = 0 ): array {
+		if ( ! Mutex::acquire( 'early_gate_build', $wait ) ) {
+			$state = (array) get_site_option( self::STATE, array() );
+			if ( $wait > 0 ) {
+				$state['error'] = __( 'Another build of the snapshot is still running; it was not rebuilt now. Try again in a minute.', 'sentinel-shield' );
+			}
+			return $state;
 		}
 		try {
-			delete_site_option( self::DIRTY );
+			// Cleared only once this build is recorded, and only if no change
+			// came in meanwhile: a build that dies half-way is redone.
+			$dirty  = self::dirty();
 			$data   = $this->compile();
 			$dir    = DataDir::path();
 			$old    = (array) get_site_option( self::STATE, array() );
@@ -239,7 +372,11 @@ final class EarlyGate {
 				'files'             => $files,
 				'error'             => implode( ' ', array_filter( $errors ) ),
 			);
+			do_action( 'sentinel_shield_checkpoint', 'gate:before_state' );
 			update_site_option( self::STATE, $state );
+			if ( null !== $dirty && self::dirty() === $dirty ) {
+				delete_site_option( self::DIRTY );
+			}
 			// Rebuild again when the next rule expires, so short lockouts end in
 			// every layer soon after (WP-Cron can run late; WordPress itself
 			// checks expiry on every request).
@@ -247,7 +384,7 @@ final class EarlyGate {
 			$next = $state['valid_until'] < time() + self::MAX_LIFE ? $state['valid_until'] + 1 : 0;
 			if ( $pub !== $gen && true === DataDir::is_private() ) {
 				// A failed publication is retried; the previous snapshot stays in use meanwhile.
-				update_site_option( self::DIRTY, time() );
+				self::flag_dirty();
 				$next = $next ? min( $next, time() + self::RETRY_AFTER ) : time() + self::RETRY_AFTER;
 			}
 			if ( $next ) {
@@ -311,8 +448,16 @@ final class EarlyGate {
 			'allow_file' => $allow,
 		);
 		$ok    = FeedSnapshot::write( $data['block_set'], $block ) && self::verify( $block, $data['block_set'] )
-			&& FeedSnapshot::write( $data['allow_set'], $allow ) && self::verify( $allow, $data['allow_set'] )
-			&& self::write_atomic( self::path(), (string) wp_json_encode( $snap ) );
+			&& FeedSnapshot::write( $data['allow_set'], $allow ) && self::verify( $allow, $data['allow_set'] );
+		/**
+		 * Fault-injection point for tests (a worker killed at a step of the
+		 * build); has no other use.
+		 *
+		 * @param string $step Step reached.
+		 */
+		do_action( 'sentinel_shield_checkpoint', 'gate:ranges_written' );
+		$ok = $ok && self::write_atomic( self::path(), (string) wp_json_encode( $snap ) );
+		do_action( 'sentinel_shield_checkpoint', 'gate:manifest_replaced' );
 		if ( ! $ok ) {
 			foreach ( array( $block, $allow ) as $file ) {
 				if ( is_file( $file ) ) {
@@ -324,7 +469,9 @@ final class EarlyGate {
 		$old  = (array) ( ( (array) get_site_option( self::STATE, array() ) )['files'] ?? array() );
 		$keep = array_merge( array( $block, $allow ), array_values( array_map( 'strval', $old ) ) );
 		foreach ( self::snapshot_files( $dir ) as $file ) {
-			if ( str_ends_with( $file, '.bin' ) && ! in_array( $file, $keep, true ) ) {
+			// Older range files, and temporary files a killed build left behind.
+			$stray = str_ends_with( $file, '.tmp' ) && (int) @filemtime( $file ) < time() - 10 * MINUTE_IN_SECONDS; // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Vanished meanwhile.
+			if ( $stray || ( str_ends_with( $file, '.bin' ) && ! in_array( $file, $keep, true ) ) ) {
 				wp_delete_file( $file );
 			}
 		}
@@ -761,7 +908,11 @@ final class EarlyGate {
 	 */
 	private static function write_atomic( string $path, string $content ): bool {
 		$tmp = $path . '.' . bin2hex( random_bytes( 4 ) ) . '.tmp';
-		if ( false === @file_put_contents( $tmp, $content ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Our own generated file.
+		// A short write (disk full, quota) leaves the old file in place.
+		if ( strlen( $content ) !== @file_put_contents( $tmp, $content ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Our own generated file.
+			if ( is_file( $tmp ) ) {
+				wp_delete_file( $tmp );
+			}
 			return false;
 		}
 		if ( ! @rename( $tmp, $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.rename_rename -- Atomic replace.

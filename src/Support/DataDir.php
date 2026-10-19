@@ -82,7 +82,8 @@ final class DataDir {
 	 * Whether the folder is confirmed private: true, false (downloadable) or
 	 * null (not confirmed). Remembered; evidence from an HTTP test expires after
 	 * a day, a negative or unknown result is looked at again after an hour, and
-	 * a changed document root always means a new check.
+	 * a changed document root, or a folder that now resolves to another place
+	 * (a symlink), always means a new check.
 	 */
 	public static function is_private(): ?bool {
 		$path   = self::path();
@@ -92,7 +93,8 @@ final class DataDir {
 			$method = (string) ( $stored['method'] ?? '' );
 			$fresh  = match ( true ) {
 				true !== $stored['private'] => $age < self::RETRY,
-				'outside' === $method       => ( $stored['root'] ?? '' ) === self::document_root(),
+				// Re-checked when the folder now resolves elsewhere (replaced by a symlink).
+				'outside' === $method       => ( $stored['root'] ?? '' ) === self::document_root() && ( $stored['real'] ?? '' ) === (string) realpath( $path ),
 				'probe' === $method         => $age < self::PROBE_LIFE,
 				default                     => false,
 			};
@@ -117,6 +119,7 @@ final class DataDir {
 				'method'  => $result['method'],
 				'reason'  => $result['reason'],
 				'root'    => self::document_root(),
+				'real'    => (string) realpath( $path ),
 				'checked' => time(),
 			)
 		);

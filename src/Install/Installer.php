@@ -100,6 +100,7 @@ final class Installer {
 		foreach ( array_merge( MaintenanceModule::CRON_HOOKS, LockdownModule::CRON_HOOKS, array( FeedUpdater::CRON_HOOK, GeoUpdater::CRON_HOOK ) ) as $hook ) {
 			wp_clear_scheduled_hook( $hook );
 			wp_clear_scheduled_hook( $hook, array( 'soon' ) );
+			wp_clear_scheduled_hook( $hook, array( 'more' ) );
 		}
 	}
 

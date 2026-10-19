@@ -1,0 +1,22 @@
+# Static analysis: vendor/bin/phpstan analyse (CI runs it on every push).
+parameters:
+	level: 6
+	phpVersion: 80100
+	paths:
+		- src
+		- sentinel-shield.php
+		- early-gate.php
+		- uninstall.php
+	scanFiles:
+		- vendor/php-stubs/wp-cli-stubs/wp-cli-stubs.php
+	bootstrapFiles:
+		- tests/phpstan-bootstrap.php
+	# Set in wp-config.php or by WordPress at run time.
+	dynamicConstantNames:
+		- WP_CLI
+		- SENTINEL_SHIELD_DISABLE
+		- SENTINEL_SHIELD_DATA_DIR
+		- DISABLE_WP_CRON
+		- XMLRPC_REQUEST
+		- REST_REQUEST
+	treatPhpDocTypesAsCertain: false

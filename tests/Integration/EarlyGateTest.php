@@ -75,8 +75,7 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 		}
 		EarlyGate::delete_files();
 		EarlyGate::remove_loader();
-		array_map( 'unlink', (array) glob( $this->data . '/*' ) );
-		@rmdir( $this->data ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		exec( 'rm -rf ' . escapeshellarg( $this->data ) ); // Dot files (.htaccess) included.
 		remove_filter( 'sentinel_shield_data_dir', array( $this, 'private_dir' ) );
 		unset( $_SERVER['DOCUMENT_ROOT'] );
 		delete_site_option( DataDir::OPTION );
@@ -127,8 +126,14 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 			$name  = (string) stream_socket_get_name( $probe, false );
 			fclose( $probe );
 			$this->port   = (int) substr( $name, strrpos( $name, ':' ) + 1 );
-			$cmd          = array( PHP_BINARY, '-S', '127.0.0.1:' . $this->port, '-t', $this->docroot, '-d', 'auto_prepend_file=' . EarlyGate::gate_file() );
-			$env          = array( 'SENTINEL_SHIELD_GATE_CONFIG' => EarlyGate::path() );
+			// Coverage runs measure the gate in these servers too (tests/coverage/subprocess-collector.php).
+			$covered      = (string) getenv( 'SENTINEL_SHIELD_SUBPROCESS_COVERAGE' );
+			$prepend      = '' !== $covered ? dirname( __DIR__ ) . '/coverage/subprocess-collector.php' : EarlyGate::gate_file();
+			$cmd          = array_merge( array( PHP_BINARY ), self::coverage_ini(), array( '-S', '127.0.0.1:' . $this->port, '-t', $this->docroot, '-d', 'auto_prepend_file=' . $prepend ) );
+			$env          = array(
+				'SENTINEL_SHIELD_GATE_CONFIG'         => EarlyGate::path(),
+				'SENTINEL_SHIELD_SUBPROCESS_COVERAGE' => $covered,
+			);
 			$this->server = proc_open( $cmd, array( 1 => array( 'file', '/dev/null', 'w' ), 2 => array( 'file', '/dev/null', 'w' ) ), $pipes, null, $env );
 			for ( $i = 0; $i < 50; $i++ ) {
 				$sock = @fsockopen( '127.0.0.1', $this->port ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
@@ -142,6 +147,24 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 			proc_close( $this->server );
 		}
 		$this->fail( 'PHP server did not start' );
+	}
+
+	/**
+	 * The coverage extension this process runs with, for the servers it starts.
+	 *
+	 * @return list<string>
+	 */
+	private static function coverage_ini(): array {
+		if ( '' === (string) getenv( 'SENTINEL_SHIELD_SUBPROCESS_COVERAGE' ) ) {
+			return array();
+		}
+		// An extension loaded on the command line (not in php.ini) must be named again.
+		$load = (string) getenv( 'SENTINEL_SHIELD_COVERAGE_EXTENSION' );
+		$load = '' !== $load ? array( '-d', ( str_contains( $load, 'xdebug' ) ? 'zend_extension=' : 'extension=' ) . $load ) : array();
+		if ( extension_loaded( 'pcov' ) ) {
+			return array_merge( $load, array( '-d', 'pcov.enabled=1', '-d', 'pcov.directory=' . dirname( __DIR__, 2 ) ) );
+		}
+		return extension_loaded( 'xdebug' ) ? array_merge( $load, array( '-d', 'xdebug.mode=coverage' ) ) : array();
 	}
 
 	/**
@@ -239,6 +262,203 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 		// Damaged: not used either.
 		file_put_contents( EarlyGate::path(), '{broken' );
 		$this->assertSame( 200, $this->fetch( '203.0.113.50' )[0] );
+	}
+
+	/**
+	 * Writes a hand-made snapshot (range files and gate.json) so the early
+	 * firewall's own decisions can be tested apart from how WordPress builds
+	 * the policy (which already leaves allowlisted addresses out).
+	 *
+	 * @param array<string, list<string>> $ranges  block, allow, feeds, server, trusted: CIDR lists.
+	 */
+	private function crafted_snapshot( array $ranges ): void {
+		wp_mkdir_p( $this->data );
+		$files = array();
+		foreach ( array( 'block', 'allow', 'feeds' ) as $kind ) {
+			$files[ $kind ] = $this->data . "/crafted-$kind.bin";
+			FeedSnapshot::write( IpRangeSet::from_strings( $ranges[ $kind ] ?? array() ), $files[ $kind ] );
+		}
+		$packed = static fn( array $cidrs ): array => \SentinelShield\Net\PackedRangeSet::from_set( IpRangeSet::from_strings( $cidrs ) )->to_storage();
+		file_put_contents(
+			EarlyGate::path(),
+			(string) wp_json_encode(
+				array(
+					'v'           => 2,
+					'built'       => time(),
+					'valid_until' => time() + 600,
+					'enabled'     => true,
+					'status'      => 403,
+					'page'        => 'Blocked %%IP%% (%%REASON%%)',
+					'reason_rule' => 'rule',
+					'reason_feed' => 'feed',
+					'proxy'       => array(
+						'mode'    => 'custom',
+						'header'  => 'X-Forwarded-For',
+						'trusted' => $packed( $ranges['trusted'] ?? array() ),
+					),
+					'server'      => $packed( $ranges['server'] ?? array() ),
+					'feeds'       => $files['feeds'],
+					'log_max'     => 0,
+					'block_file'  => $files['block'],
+					'allow_file'  => $files['allow'],
+				)
+			)
+		);
+	}
+
+	/**
+	 * Review 5 (mutation testing): the early firewall's own checks, each of
+	 * which the normal policy build alone would not reveal.
+	 */
+	public function test_the_gate_decides_correctly_from_a_crafted_snapshot(): void {
+		$base = array(
+			'block' => array( '203.0.113.0/24' ),
+			'allow' => array( '192.0.2.9', '127.0.0.1' ),
+			'feeds' => array( '192.0.2.0/24', '127.0.0.0/8' ),
+		);
+		// The peer (127.0.0.1) is not a trusted proxy: its forwarding header is ignored.
+		$this->crafted_snapshot( $base + array( 'trusted' => array( '10.0.0.0/8' ) ) );
+		$this->start_server();
+		$this->assertSame( 200, $this->fetch( '203.0.113.50' )[0], 'a forwarding header from an untrusted peer does not choose the visitor\'s address' );
+
+		$this->crafted_snapshot( $base + array( 'trusted' => array( '127.0.0.1' ) ) );
+		$this->assertSame( 403, $this->fetch( '203.0.113.0' )[0], 'first address of a blocked range' );
+		$this->assertSame( 403, $this->fetch( '203.0.113.255' )[0], 'last address of a blocked range' );
+		$this->assertSame( 200, $this->fetch( '203.0.112.255' )[0], 'just below' );
+		$this->assertSame( 200, $this->fetch( '203.0.114.0' )[0], 'just above' );
+		$this->assertSame( 200, $this->fetch( '192.0.2.9' )[0], 'an allowlisted address inside a blocklist feed range' );
+		[ $code, $body ] = $this->fetch( '192.0.2.10' );
+		$this->assertSame( array( 403, 'Blocked 192.0.2.10 (feed)' ), array( $code, $body ) );
+		// No usable visitor address: the request falls back to the proxy's own
+		// address, which keeps no allowlist privileges.
+		$this->assertSame( 403, $this->fetch( 'unknown' )[0], 'a fallback to the proxy\'s address does not inherit its allowlist entry' );
+		$this->assertSame( 403, $this->fetch( null )[0] );
+	}
+
+	/**
+	 * Review 5 (filesystem failures): a full disk cuts the range files short.
+	 * The short write is noticed, nothing partial is published, the previous
+	 * generation stays in use and the failure is reported.
+	 */
+	public function test_a_full_disk_never_publishes_a_partial_policy(): void {
+		if ( ! function_exists( 'posix_setrlimit' ) || ! function_exists( 'pcntl_signal' ) || ! defined( 'POSIX_RLIMIT_FSIZE' ) ) {
+			$this->markTestSkipped( 'Needs the posix and pcntl extensions.' );
+		}
+		$repo = Plugin::instance()->container()->get( BlockRepository::class );
+		$repo->add( 'block', Cidr::parse( '203.0.113.5' ), 'manual', 'manual' );
+		$gate  = $this->gate( array( 'firewall' => array( 'early_gate' => 'mu_plugin' ) ) );
+		$first = $gate->rebuild();
+		$json  = (string) file_get_contents( EarlyGate::path() );
+		// Room for the manifest (gate.json) but not for the range file: only
+		// the range file is cut short.
+		$limit = strlen( $json ) + 1024;
+		for ( $i = 0; $i < intdiv( $limit, 8 ) + 100; $i++ ) {
+			$repo->add( 'block', Cidr::parse( '10.' . intdiv( $i, 250 ) . '.' . ( $i % 250 ) . '.0/24' ), 'manual', 'manual' );
+		}
+		// Writing past the limit fails as on a full disk.
+		pcntl_signal( SIGXFSZ, SIG_IGN );
+		$limits = posix_getrlimit();
+		posix_setrlimit( POSIX_RLIMIT_FSIZE, $limit, 'unlimited' === $limits['hard filesize'] ? POSIX_RLIMIT_INFINITY : (int) $limits['hard filesize'] );
+		try {
+			$state = $gate->rebuild();
+		} finally {
+			posix_setrlimit( POSIX_RLIMIT_FSIZE, 'unlimited' === $limits['soft filesize'] ? POSIX_RLIMIT_INFINITY : (int) $limits['soft filesize'], 'unlimited' === $limits['hard filesize'] ? POSIX_RLIMIT_INFINITY : (int) $limits['hard filesize'] );
+			pcntl_signal( SIGXFSZ, SIG_DFL );
+		}
+		$this->assertSame( $first['published'], $state['published'], 'the cut-short generation was not published' );
+		$this->assertStringContainsString( 'previous one', $state['error'] );
+		$this->assertSame( $json, (string) file_get_contents( EarlyGate::path() ) );
+		$this->assertSame( array(), glob( $this->data . '/*.tmp' ), 'no partial files are left behind' );
+		foreach ( (array) glob( $this->data . '/gate-*.bin' ) as $file ) {
+			$this->assertNotNull( FeedSnapshot::read_set( (string) $file ), basename( (string) $file ) . ' is complete' );
+		}
+		$after = $gate->rebuild();
+		$this->assertSame( $after['generation'], $after['published'], 'published once there is room again' );
+		$this->assertTrue( FeedSnapshot::read_set( $after['files']['block'] )->contains( (string) inet_pton( '10.0.99.1' ) ) );
+	}
+
+	/**
+	 * Review 5: a change made in a visitor's request (a lockout at the login
+	 * form) is published by a background job, not in that request; the
+	 * marker survives a build that dies half-way, and overdue publication
+	 * shows on the health screen.
+	 */
+	public function test_publication_is_durable_and_off_visitor_requests(): void {
+		$repo = Plugin::instance()->container()->get( BlockRepository::class );
+		$gate = $this->gate( array( 'firewall' => array( 'early_gate' => 'mu_plugin' ) ) );
+		$gate->rebuild();
+		$built = (int) get_site_option( EarlyGate::STATE )['built'];
+		set_current_screen( 'front' );
+		$repo->add( 'block', Cidr::parse( '198.51.100.44' ), 'lockout', 'lockout', time() + 600 );
+		$visitor = new EarlyGate( ...self::gate_parts() );
+		$visitor->mark_dirty();
+		$this->assertFalse( has_action( 'shutdown', array( $visitor, 'rebuild_if_dirty' ) ), 'no build at the end of a visitor request' );
+		$this->assertNotFalse( has_action( 'shutdown', array( $visitor, 'publish_if_overdue' ) ) );
+		$this->assertLessThanOrEqual( max( time(), $built + EarlyGate::DEBOUNCE ), (int) wp_next_scheduled( EarlyGate::EXPIRY_HOOK ), 'a background build is due within the debounce' );
+		$this->assertTrue( $gate->publication()['pending'] );
+		$this->assertFalse( $gate->publication()['overdue'] );
+
+		// The build dies after publishing, before recording it: the change stays pending.
+		$die = static function ( string $step ): void {
+			if ( 'gate:before_state' === $step ) {
+				throw new \RuntimeException( 'worker killed' );
+			}
+		};
+		add_action( 'sentinel_shield_checkpoint', $die );
+		try {
+			$gate->rebuild();
+			$this->fail( 'the build should have died' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertSame( 'worker killed', $e->getMessage() );
+		} finally {
+			remove_action( 'sentinel_shield_checkpoint', $die );
+		}
+		$this->assertTrue( $gate->publication()['pending'], 'still pending: nothing claims it was published' );
+		$this->assertTrue( \SentinelShield\Support\Mutex::acquire( 'early_gate_build', 0 ), 'the build lock was released' );
+		\SentinelShield\Support\Mutex::release( 'early_gate_build' );
+
+		// Overdue (background jobs not running): the health screen says so.
+		update_site_option( EarlyGate::DIRTY, array( 'since' => time() - EarlyGate::OVERDUE - 60, 'last' => time() - EarlyGate::OVERDUE - 60 ) );
+		$this->assertTrue( $gate->publication()['overdue'] );
+		$health = ( new \SentinelShield\Safety\Health( Plugin::instance()->container() ) )->checks();
+		$this->assertContains( 'publication', array_column( $health, 'id' ) );
+
+		// A change during a build keeps the marker; a clean build clears it.
+		$late = static function ( string $step ): void {
+			if ( 'gate:ranges_written' === $step ) {
+				usleep( 1000 );
+				( new \ReflectionMethod( EarlyGate::class, 'flag_dirty' ) )->invoke( null );
+			}
+		};
+		add_action( 'sentinel_shield_checkpoint', $late );
+		try {
+			$gate->rebuild();
+		} finally {
+			remove_action( 'sentinel_shield_checkpoint', $late );
+		}
+		$this->assertTrue( $gate->publication()['pending'], 'a change that came in during the build is not lost' );
+		$state = $gate->rebuild();
+		$this->assertFalse( $gate->publication()['pending'] );
+		$this->assertSame( $state['generation'], $state['published'] );
+		$this->assertTrue( FeedSnapshot::read_set( $state['files']['block'] )->contains( (string) inet_pton( '198.51.100.44' ) ) );
+	}
+
+	/**
+	 * The constructor arguments of the container's EarlyGate.
+	 *
+	 * @return list<object>
+	 */
+	private static function gate_parts(): array {
+		$c = Plugin::instance()->container();
+		return array(
+			$c->get( Settings::class ),
+			$c->get( BlockRepository::class ),
+			$c->get( RuleCache::class ),
+			$c->get( \SentinelShield\Firewall\Gate::class ),
+			$c->get( \SentinelShield\Safety\SafetyGuard::class ),
+			$c->get( \SentinelShield\Net\ClientIpFactory::class ),
+			$c->get( EventRepository::class ),
+		);
 	}
 
 	public function test_the_gate_blocks_blocklist_feed_ips(): void {
@@ -373,7 +593,8 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 			remove_filter( 'pre_http_request', $offline );
 			unset( $_SERVER['DOCUMENT_ROOT'] );
 			remove_filter( 'sentinel_shield_data_dir', $filter, 20 );
-			@rmdir( $public ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			// Whatever was written (a broken build, a mutation run) goes too.
+			exec( 'rm -rf ' . escapeshellarg( $public ) );
 			DataDir::recheck();
 		}
 	}
@@ -782,7 +1003,7 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 		$this->assertSame( $json, (string) file_get_contents( EarlyGate::path() ), 'the manifest is untouched' );
 		$snap = json_decode( $json, true );
 		$this->assertFileExists( $snap['block_file'], 'and still points at files that exist' );
-		$this->assertNotFalse( get_site_option( EarlyGate::DIRTY ) );
+		$this->assertTrue( $gate->publication()['pending'] );
 		$this->assertLessThanOrEqual( time() + EarlyGate::RETRY_AFTER, (int) wp_next_scheduled( EarlyGate::EXPIRY_HOOK ), 'retried' );
 		$this->assertNull( $gate->published_policy(), 'Cloudflare does not mirror a generation that was not published' );
 

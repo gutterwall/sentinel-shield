@@ -73,7 +73,14 @@ final class AuditExporter {
 	 */
 	public function register(): void {
 		add_action( 'sentinel_shield_event_logged', array( $this, 'on_event' ), 10, 3 );
-		add_action( self::CRON, array( $this, 'run' ) );
+		add_action( self::CRON, array( $this, 'cron' ) );
+	}
+
+	/**
+	 * Scheduled delivery (an action callback returns nothing).
+	 */
+	public function cron(): void {
+		$this->run();
 	}
 
 	/**
@@ -227,9 +234,23 @@ final class AuditExporter {
 
 	/**
 	 * Undelivered events older than this many days are pruned anyway (and
-	 * counted as a delivery gap).
+	 * counted as a delivery gap) unless the setting says otherwise.
 	 */
 	public const KEEP_UNSENT_DAYS = 90;
+
+	/**
+	 * Days undelivered events are kept (setting; KEEP_UNSENT_DAYS by default).
+	 */
+	public function unsent_days(): int {
+		return max( 1, (int) $this->settings->get( 'audit.max_unsent_days', self::KEEP_UNSENT_DAYS ) );
+	}
+
+	/**
+	 * Undelivered events kept at most (setting).
+	 */
+	public function unsent_rows(): int {
+		return max( 1000, (int) $this->settings->get( 'audit.max_unsent_rows', 100000 ) );
+	}
 
 	/**
 	 * The last delivered event ID while a webhook is set (retention pruning
@@ -252,7 +273,8 @@ final class AuditExporter {
 		if ( null === $cursor ) {
 			return;
 		}
-		$n = $this->events->count_undelivered_older( $cursor, self::KEEP_UNSENT_DAYS );
+		// Too old, or too many waiting: both are pruned (see MaintenanceModule).
+		$n = max( $this->events->count_undelivered_older( $cursor, $this->unsent_days() ), $this->events->count_undelivered_over( $cursor, $this->unsent_rows() ) );
 		if ( $n > 0 ) {
 			$state            = self::state();
 			$state['dropped'] = (int) ( $state['dropped'] ?? 0 ) + $n;

@@ -485,6 +485,9 @@ final class Command {
 	public function settings_get( array $args, array $assoc_args ): void {
 		unset( $assoc_args );
 		$all = $this->c->get( Settings::class )->network_settings();
+		if ( isset( $args[0] ) && ! Settings::has_path( $all, $args[0] ) ) {
+			WP_CLI::error( "Unknown setting '{$args[0]}'. Run: wp sentinel settings-keys" );
+		}
 		$out = isset( $args[0] ) ? Settings::get_path( $all, $args[0] ) : $all;
 		WP_CLI::log( (string) wp_json_encode( $out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) );
 	}
@@ -1138,7 +1141,7 @@ final class Command {
 			if ( ! $gate->wanted() ) {
 				WP_CLI::error( 'Nothing uses the snapshot: the early firewall, server files and Cloudflare sync are all off.' );
 			}
-			$state = $gate->rebuild();
+			$state = $gate->rebuild( EarlyGate::EXPLICIT_WAIT );
 			if ( ! empty( $state['error'] ) ) {
 				WP_CLI::error( (string) $state['error'] );
 			}

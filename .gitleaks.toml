@@ -1,0 +1,8 @@
+# Secret scan (CI lint job): gitleaks' default rules, minus the fake secrets
+# the privacy test plants on purpose to check that none of them leak.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Planted test secrets"
+paths = ['''tests/Integration/PrivacyTest\.php''']

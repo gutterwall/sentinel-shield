@@ -22,6 +22,17 @@ final class SoftAuthenticator {
 	public int $count = 0;
 
 	/**
+	 * Whether it verifies the user (fingerprint, face or PIN) or only checks
+	 * presence, like a security key without a PIN.
+	 */
+	public bool $uv = true;
+
+	/**
+	 * Whether it reports user presence (the UP flag); off only to test refusal.
+	 */
+	public bool $up = true;
+
+	/**
 	 * Private key (OpenSSL) or Ed25519 secret key.
 	 *
 	 * @var mixed
@@ -100,7 +111,7 @@ final class SoftAuthenticator {
 				'origin'    => $this->origin,
 			)
 		);
-		$auth   = hash( 'sha256', $this->rp_id, true ) . chr( 0x41 | 0x04 ) . pack( 'N', $this->count ) . str_repeat( "\0", 16 ) . pack( 'n', strlen( $this->id ) ) . $this->id . self::cbor( $this->cose );
+		$auth   = hash( 'sha256', $this->rp_id, true ) . chr( 0x40 | ( $this->up ? 0x01 : 0 ) | ( $this->uv ? 0x04 : 0 ) ) . pack( 'N', $this->count ) . str_repeat( "\0", 16 ) . pack( 'n', strlen( $this->id ) ) . $this->id . self::cbor( $this->cose );
 		return array(
 			'client'      => WebAuthn::b64u( $client ),
 			'attestation' => WebAuthn::b64u(
@@ -131,7 +142,7 @@ final class SoftAuthenticator {
 				'origin'    => $this->origin,
 			)
 		);
-		$auth         = hash( 'sha256', $this->rp_id, true ) . chr( 0x05 ) . pack( 'N', $this->count );
+		$auth         = hash( 'sha256', $this->rp_id, true ) . chr( ( $this->up ? 0x01 : 0 ) | ( $this->uv ? 0x04 : 0 ) ) . pack( 'N', $this->count );
 		$data         = $auth . hash( 'sha256', $client, true );
 		if ( WebAuthn::ALG_EDDSA === $this->alg ) {
 			$signature = sodium_crypto_sign_detached( $data, $this->private );

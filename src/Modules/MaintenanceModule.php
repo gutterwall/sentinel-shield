@@ -31,6 +31,7 @@ final class MaintenanceModule implements ModuleInterface {
 
 	public const CRON_HOOKS = array( 'sentinel_shield_maintenance', 'sentinel_shield_cf_refresh' );
 	public const LAST_RUN   = 'sentinel_shield_maintenance_last';
+	public const REPORT     = 'sentinel_shield_maintenance_report';
 
 	/**
 	 * {@inheritDoc}
@@ -78,21 +79,33 @@ final class MaintenanceModule implements ModuleInterface {
 	/**
 	 * Runs housekeeping now.
 	 *
-	 * @param Container $container Services.
+	 * @param Container  $container Services.
+	 * @param float|null $budget    Seconds (default: the setting). Every
+	 *                              table still gets at least one batch.
 	 * @return array<string, int> Rows removed per table.
 	 */
-	public static function run( Container $container ): array {
+	public static function run( Container $container, ?float $budget = null ): array {
 		$settings = $container->get( Settings::class );
 		$audit    = $container->get( AuditExporter::class );
-		// Events not yet delivered to the remote audit log are kept (up to 90 days).
+		$events   = $container->get( EventRepository::class );
+		$logins   = $container->get( LoginAttemptRepository::class );
+		// One time budget for the whole run (storage budgets: review 5).
+		$until = microtime( true ) + ( $budget ?? max( 5, (int) $settings->get( 'general.maintenance_seconds', 20 ) ) );
+		$left  = static fn(): float => max( 0.0, $until - microtime( true ) );
+		// Events not yet delivered to the remote audit log are kept, within their own limits.
 		$audit->note_dropped();
+		$window = (int) $settings->get( 'login.window_minutes', 15 ) * MINUTE_IN_SECONDS;
+		$keep   = $audit->retention_cursor();
 		$result = array(
 			'rules'    => $container->get( BlockRepository::class )->purge_expired(),
-			'events'   => $container->get( EventRepository::class )->prune( (int) $settings->get( 'general.event_retention_days', 30 ), $audit->retention_cursor(), AuditExporter::KEEP_UNSENT_DAYS ),
+			'events'   => $events->prune( (int) $settings->get( 'general.event_retention_days', 30 ), $keep, $audit->unsent_days(), $left() )
+				+ $events->trim( (int) $settings->get( 'general.event_max_rows', 250000 ), $keep, $audit->unsent_rows(), $left() ),
 			'offenses' => $container->get( OffenseRepository::class )->prune( time() - $settings->lockout_window() ),
 			'tokens'   => $container->get( TokenRepository::class )->prune(),
-			// Kept a week for the Login Security overview; limits use far shorter windows.
-			'logins'   => $container->get( LoginAttemptRepository::class )->prune( time() - max( WEEK_IN_SECONDS, (int) $settings->get( 'login.window_minutes', 15 ) * MINUTE_IN_SECONDS ) ),
+			// The detailed history for the Login Security overview; the limits use the
+			// counters, which are kept for the counting window whatever the history setting.
+			'logins'   => $logins->prune( time() - max( (int) $settings->get( 'login.history_days', 7 ) * DAY_IN_SECONDS, $window ), $left() )
+				+ $logins->trim( (int) $settings->get( 'login.history_max_rows', 500000 ), time() - $window, $left() ),
 		);
 		if ( $result['rules'] > 0 ) {
 			$container->get( RuleCache::class )->flush();
@@ -102,8 +115,14 @@ final class MaintenanceModule implements ModuleInterface {
 		EarlyGate::maybe_clean_legacy();
 		$gate->rebuild_if_dirty();
 		$audit->heartbeat();
-		$audit->run();
+		$audit->run( min( 15.0, max( 1.0, $left() ) ) );
+		// Out of time with work left: continue soon rather than in an hour.
+		$result['unfinished'] = 0 === (int) ceil( $left() ) ? 1 : 0;
+		if ( $result['unfinished'] && ! wp_next_scheduled( 'sentinel_shield_maintenance', array( 'more' ) ) ) {
+			wp_schedule_single_event( time() + 5 * MINUTE_IN_SECONDS, 'sentinel_shield_maintenance', array( 'more' ) );
+		}
 		update_site_option( self::LAST_RUN, time() );
+		update_site_option( self::REPORT, $result + array( 'time' => time() ) );
 		return $result;
 	}
 }

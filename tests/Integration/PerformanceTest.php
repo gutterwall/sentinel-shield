@@ -209,4 +209,33 @@ final class PerformanceTest extends \WP_UnitTestCase {
 		clearstatcache();
 		$this->assertNotSame( $first, IntegrityScanner::fingerprint( $big ), 'appended code changes it' );
 	}
+
+	/**
+	 * Review 5 (repeated database work): the options every request reads are
+	 * fetched in one query; reading them afterwards costs none, and options
+	 * that do not exist are remembered as missing.
+	 */
+	public function test_per_request_options_are_primed_in_one_query(): void {
+		global $wpdb;
+		update_site_option( 'sentinel_shield_prime_a', array( 'x' => 1 ) );
+		update_site_option( 'sentinel_shield_prime_b', 'two' );
+		delete_site_option( 'sentinel_shield_prime_missing' );
+		$names = array( 'sentinel_shield_prime_a', 'sentinel_shield_prime_b', 'sentinel_shield_prime_missing' );
+		wp_cache_flush();
+		wp_load_alloptions(); // As in any request, before the plugin loads.
+		$before = $wpdb->num_queries;
+		\SentinelShield\Support\OptionPrimer::prime( $names );
+		$this->assertLessThanOrEqual( 1, $wpdb->num_queries - $before, 'one query (none when cached)' );
+		$before = $wpdb->num_queries;
+		$this->assertSame( array( 'x' => 1 ), get_site_option( 'sentinel_shield_prime_a' ) );
+		$this->assertSame( 'two', get_site_option( 'sentinel_shield_prime_b' ) );
+		$this->assertFalse( get_site_option( 'sentinel_shield_prime_missing' ) );
+		$this->assertSame( 0, $wpdb->num_queries - $before, 'then read from the cache' );
+		\SentinelShield\Support\OptionPrimer::prime( array() );
+		update_site_option( 'sentinel_shield_prime_missing', 'now here' );
+		$this->assertSame( 'now here', get_site_option( 'sentinel_shield_prime_missing' ), 'a missing one added later is seen' );
+		foreach ( $names as $name ) {
+			delete_site_option( $name );
+		}
+	}
 }

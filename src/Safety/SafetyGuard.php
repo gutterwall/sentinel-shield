@@ -89,7 +89,7 @@ final class SafetyGuard {
 	 */
 	public function is_cron_path( string $uri ): bool {
 		$path = wp_parse_url( $uri, PHP_URL_PATH );
-		return ( is_string( $path ) && 'wp-cron.php' === basename( $path ) ) || ( defined( 'DOING_CRON' ) && DOING_CRON );
+		return ( is_string( $path ) && 'wp-cron.php' === basename( $path ) ) || wp_doing_cron();
 	}
 
 	/**

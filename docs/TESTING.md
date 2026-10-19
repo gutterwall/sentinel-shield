@@ -147,35 +147,95 @@ wp sentinel settings-import backup.json
 
 ## Automated tests and CI
 
-Every push and pull request runs `.github/workflows/ci.yml` (and it runs weekly, so a new WordPress release that breaks something is noticed):
+`.github/workflows/ci.yml` runs on every push and pull request; the expensive combinations run nightly (and on demand from the Actions tab).
+
+### Every push and pull request
 
 | Job | What it checks |
 |---|---|
-| Coding standards, docs and build | phpcs (WordPress standards, PHP 8.1 compatibility), the readme settings reference, and a release build (version numbers agree; the zip is kept as an artifact) |
+| Coding standards, static analysis, audit, secrets and build | phpcs (WordPress standards, PHP 8.1 compatibility); PHPStan level 6 with WordPress and WP-CLI stubs, no baseline; `composer audit`; gitleaks over the whole git history; the settings reference; a release build whose zip every later job tests |
 | Unit tests | PHP 8.1, 8.2, 8.3 and 8.4 |
-| Integration | The WordPress test suite on the oldest supported WordPress (6.4) and the latest, each as a single site and as multisite, on PHP 8.1 to 8.4 |
-| Smoke test | A throwaway site with the plugin active, exercised over HTTP: firewall lockout and unblock, identical login errors, REST application passwords, 20 simultaneous logins against a multi-worker server, the early firewall running as auto_prepend_file, the two-factor step, a required account without any method, health, the malware scan, WordPress.org checksum verification, and every admin page without PHP errors |
-| Passkeys | Headless Chrome with a virtual authenticator: confirm identity, add a passkey, log in with it, and refuse a login without it (`bin/passkey-e2e.py`) |
-| Object cache | The integration tests again with a Redis persistent object cache |
+| Integration | WordPress 6.4 and latest, single site and multisite, PHP 8.1 to 8.4, MySQL 8 and MariaDB 11.4 (which also exercises the row-lock fallback path in tests that force it) |
+| Object cache | The integration tests with Redis as persistent object cache, including the eviction, stale-cache and "cache never answers" tests |
+| Coverage | Line coverage with PCOV: unit and integration tests (single site and multisite) in-process, and the early firewall inside the PHP servers its HTTP tests start, reported separately and combined. HTML and Clover reports are kept as artifacts; `bin/coverage-check.php` fails the job when any area drops below its floor in `tests/coverage-baseline.json` |
+| Mutation tests | `bin/mutation-test.php` applies 53 deliberate defects from `tests/mutations.php` (weakened comparisons, expiry checks, capability and nonce checks, replay guards, lock checks, removed verification) one at a time; the tests must fail for every one |
+| Real site (PHP server) | The smoke test, passkeys in Chrome (registration, login, a passkey synchronized to a second browser profile, a touch-only key under both verification policies, password-manager hints), Plugin Check on the release zip, the 0.8.0 legacy-file upgrade, and the install/deactivate/reactivate/uninstall/upgrade matrix (`bin/lifecycle-test.sh`, upgrades from 0.8.0, 0.8.1 and 0.8.2, checksum-verified) |
+| nginx + PHP-FPM, Apache + PHP-FPM | The smoke test; `bin/race-test.php` (ten synchronized requests for one backup code, authenticator code, signed passkey response or identity confirmation: exactly one wins; simultaneous wrong passwords never check more than the limit); `bin/fault-test.sh` (workers killed with SIGKILL at each step of a publication, after a Cloudflare upload and while holding a lock; a full disk); `bin/server-config-test.sh` (the generated files loaded by real nginx and Apache, a blocked address refused, an allowlisted address inside a blocked range let through, and a reload after unblocking or disabling ends enforcement) |
 
-Run the same locally:
+### Nightly
+
+| Job | What it checks |
+|---|---|
+| Site layouts | `bin/layout-test.sh`: WordPress in a subdirectory and with a moved content folder (full smoke test each), and a multisite subsite on its own domain (firewall, lockouts across domains, two-factor redirects and passkey relying party on the mapped domain) |
+| HTTPS behind a proxy | nginx terminates TLS and proxies to the site; the passkey browser test runs over https:// and the pending-login cookie must be `secure` |
+| Performance budgets | `bin/bench-site.php` on nginx and Apache with PHP-FPM, compared with `tests/perf-budgets.json` (below) |
+| Branch coverage and long fuzzing | Branch coverage with Xdebug for all of `src/` (collected once per run by `tests/coverage/branch-collector.php`; PHPUnit's own path coverage would take hours), and the fuzz and property tests with 20,000 rounds each |
+
+### Tags
+
+The release zip built by the lint job is the one tested by the later jobs. On a tag, after every job has passed, its build commit is checked against the tag and it gets a GitHub build-provenance attestation (`gh attestation verify sentinel-shield-<version>.zip --repo gutterwall/sentinel-shield`). That zip is what the release publishes.
+
+### Coverage: where it stands
+
+Measured for 0.8.3 (lines on every push; branches nightly, counting each way out of every branch point):
+
+| Area | Lines | Branches | Goal |
+|---|---|---|---|
+| Overall | 81.7% (from 60.6% in 0.8.2) | 55.4% | 90% of lines |
+| Authentication (two-factor, passkeys, login) | 86.5% | 63.3% | 95% of branches |
+| Authorization (admin actions and pages that change data, plugin protection) | 73.1% | 48.8% | 95% of branches |
+| Recovery (unlock, lockouts, safety, tokens) | 81.1% | 55.4% | 95% of branches |
+| Policy publication (firewalls, ranges, private folder, locks) | 87.2%; the early firewall itself 91% over HTTP | 64.7% | 95% of branches |
+
+Branch coverage is well short of its goal: many branches are error and edge paths (unreadable files, database errors, unusual proxy headers) that no test reaches yet. The 53 mutants, chosen at the security decisions themselves, are all caught, which says more about those decisions than the percentage does, but closing this gap is the next step.
+
+The goals are engineering targets, not WordPress.org requirements, and even 100% coverage would not prove the code secure; mutation testing is the stronger check that tests actually look at results. Not counted: `uninstall.php` (it deletes the tables the test suite runs on; `bin/lifecycle-test.sh` covers it over a real site), code that runs while the test bootstrap loads WordPress (before coverage starts), and the HTTP-only paths of the smoke, race and crash tests, which are not instrumented. The largest gaps left are the two-factor login screen's HTML (exercised over HTTP), admin page rendering, and the lockdown module's scheduled scans.
+
+### Performance budgets
+
+Typical results on nginx with PHP-FPM (12 workers), uncached pages:
+
+* Added per page: about 2 ms at p50, 1 ms at p95, 0.8 ms CPU, 0.2 MB memory, one database query, no writes.
+* A blocked flood is refused by the early firewall (about 21,000 requests a second on one CI-sized machine) and never reaches WordPress; legitimate visitors' p95 stays within a few percent.
+* 900 invalid logins from 300 addresses cost 23 password hashes: once an account's limit is reached, attempts are refused without hashing.
+* A 20,000-range policy builds in 0.14 s with about 22 MB of memory; rule changes under traffic do not affect visitors' latency.
+
+Counts (queries, writes, hashes, errors) are exact and held to their budgets strictly; time budgets are loose on purpose, since shared CI runners are noisy, and catch only large regressions. For trustworthy timings run `bin/bench-site.php` on a dedicated, idle machine: baseline and plugin runs alternate in random order after a warm-up, and medians are compared.
+
+### Run it locally
 
 ```bash
 composer install
-vendor/bin/phpcs -q && vendor/bin/phpunit                      # coding standards and unit tests
+vendor/bin/phpcs -q && vendor/bin/phpstan analyse && vendor/bin/phpunit
 
 # Integration tests: installs WordPress and its test library (the database is emptied on every run).
 bin/install-wp-tests.sh wordpress_test root secret 127.0.0.1 latest /tmp/wp-tests
-WP_TESTS_DIR=/tmp/wp-tests/tests-lib vendor/bin/phpunit --testsuite integration
-WP_TESTS_DIR=/tmp/wp-tests/tests-lib WP_MULTISITE=1 vendor/bin/phpunit --testsuite integration
+export WP_TESTS_DIR=/tmp/wp-tests/tests-lib
+vendor/bin/phpunit --testsuite integration
+WP_MULTISITE=1 vendor/bin/phpunit --testsuite integration
 
-# Smoke test against a throwaway site served from 127.0.0.1 (it changes settings and creates users):
-bin/smoke-test.sh /path/to/throwaway-site http://127.0.0.1:8099
-# With the early firewall: start PHP with -d auto_prepend_file=.../early-gate.php, then
-SMOKE_EARLY_GATE=1 bin/smoke-test.sh /path/to/throwaway-site http://127.0.0.1:8099
+bin/coverage.sh                       # needs PCOV or Xdebug; BRANCHES=1 adds branch coverage (Xdebug)
+php bin/mutation-test.php             # about 4 minutes; --list, --only=3,17
 
-# Passkeys in Chrome (the site must answer on http://localhost:<port>):
-PASSKEY_USER=admin PASSKEY_PASS=secret bin/passkey-e2e.py http://localhost:8099
+# A throwaway site (these change settings, create users and block test addresses):
+bin/serve-stack.sh nginx /path/to/site 8098 8443 &     # or apache; or PHP's own server
+bin/smoke-test.sh /path/to/site http://127.0.0.1:8098
+php bin/race-test.php /path/to/site http://127.0.0.1:8098 10
+bin/fault-test.sh /path/to/site http://127.0.0.1:8098
+bin/server-config-test.sh /path/to/site
+php bin/bench-site.php /path/to/site http://127.0.0.1:8098 --quick
+WP_PATH=/path/to/site PASSKEY_USER=admin PASSKEY_PASS=secret bin/passkey-e2e.py http://localhost:8098
+bin/lifecycle-test.sh /path/to/site http://127.0.0.1:8098 dist/sentinel-shield-<version>.zip old-release.zip ...
+bin/layout-test.sh subdirectory /path/to/wordpress /tmp/layouts 8201 dbname dbuser dbpass 127.0.0.1
 ```
 
+Fuzz and property tests take `FUZZ_ITERATIONS` and `FUZZ_SEED` (a failure names its seed, so it can be replayed).
+
 Security fixes come with a regression test (see `tests/Integration/PentestRegressionTest.php` and `ReviewRegressionTest.php`), so a fix cannot quietly come undone.
+
+### Not done yet
+
+* An independent review of the WebAuthn and CBOR code by someone other than its authors.
+* PHPStan above level 6 (level 8 reports mostly `$wpdb->prepare()` nullability; no real defects were found in a review of its null-dereference findings).
+* A Redis restart in the middle of a request (the object-cache job covers eviction, stale entries and an unreachable cache, but does not restart the server mid-run).
+* Synchronized passkeys that report a signature counter of 0, as real passkey providers do: Chrome's virtual authenticator always counts, so the test syncs the counter instead.

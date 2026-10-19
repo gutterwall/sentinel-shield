@@ -22,13 +22,6 @@ final class Mailer {
 	public const HEALTH = 'sentinel_shield_mail_health';
 
 	/**
-	 * Last wp_mail_failed error during send().
-	 *
-	 * @var string
-	 */
-	private static string $error = '';
-
-	/**
 	 * Sends an email.
 	 *
 	 * @param string $to      Recipient.
@@ -37,10 +30,10 @@ final class Mailer {
 	 * @param string $kind    alert, code, unlock or test.
 	 */
 	public static function send( string $to, string $subject, string $body, string $kind ): bool {
-		self::$error = '';
-		$catch       = static function ( $error ): void {
+		$failure = '';
+		$catch   = static function ( $error ) use ( &$failure ): void {
 			if ( $error instanceof \WP_Error ) {
-				self::$error = $error->get_error_message();
+				$failure = $error->get_error_message();
 			}
 		};
 		add_action( 'wp_mail_failed', $catch );
@@ -56,7 +49,7 @@ final class Mailer {
 			$entry['last_ok'] = time();
 		} else {
 			$entry['last_fail'] = time();
-			$entry['error']     = '' === self::$error ? __( 'wp_mail() returned false without an error message.', 'sentinel-shield' ) : mb_substr( self::$error, 0, 300 );
+			$entry['error']     = '' === $failure ? __( 'wp_mail() returned false without an error message.', 'sentinel-shield' ) : mb_substr( $failure, 0, 300 );
 		}
 		$health[ $kind ] = $entry;
 		update_site_option( self::HEALTH, $health );

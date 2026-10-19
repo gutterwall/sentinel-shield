@@ -58,6 +58,8 @@ final class Settings {
 				'block_response'           => '403',
 				'block_message'            => '',
 				'event_retention_days'     => 30,
+				'event_max_rows'           => 250000,
+				'maintenance_seconds'      => 20,
 				'admin_bar'                => true,
 				'delete_data_on_uninstall' => false,
 			),
@@ -85,10 +87,12 @@ final class Settings {
 				'server_files' => false,
 			),
 			'audit'      => array(
-				'webhook_url'   => '',
-				'scope'         => 'security',
-				'syslog'        => false,
-				'heartbeat_url' => '',
+				'webhook_url'     => '',
+				'scope'           => 'security',
+				'syslog'          => false,
+				'heartbeat_url'   => '',
+				'max_unsent_days' => 90,
+				'max_unsent_rows' => 100000,
 			),
 			'cloudflare' => array(
 				'sync'       => false,
@@ -112,12 +116,15 @@ final class Settings {
 				'app_passwords'            => 'all',
 				'app_password_max_days'    => 0,
 				'app_password_unused_days' => 0,
+				'history_days'             => 7,
+				'history_max_rows'         => 500000,
 			),
 			// Two-factor authentication is optional for every account until required here.
 			'twofa'      => array(
 				'required'      => 'none',
 				'email'         => true,
 				'remember_days' => 0,
+				'passkey_uv'    => 'preferred',
 			),
 			// Login location restriction is off until a mode and countries are chosen.
 			'geo'        => array(

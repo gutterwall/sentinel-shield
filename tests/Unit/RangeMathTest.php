@@ -61,6 +61,11 @@ final class RangeMathTest extends TestCase {
 		}
 	}
 
+	/**
+	 * Skipped by the branch coverage run, where tight loops are very slow.
+	 *
+	 * @group heavy
+	 */
 	public function test_large_sets_are_subtracted_quickly(): void {
 		$block = array();
 		$allow = array();

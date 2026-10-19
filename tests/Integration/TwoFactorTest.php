@@ -499,6 +499,47 @@ final class TwoFactorTest extends \WP_UnitTestCase {
 	}
 
 	/**
+	 * Review 5: at login a touch-only security key is accepted after the
+	 * password while user verification is preferred, and refused once the
+	 * setting requires verification; the browser is asked accordingly.
+	 */
+	public function test_passkey_login_follows_the_user_verification_setting(): void {
+		$user      = self::factory()->user->create_and_get( array( 'user_pass' => 'right' ) );
+		$rp        = \SentinelShield\TwoFactor\WebAuthn::for_site();
+		$key       = new SoftAuthenticator( \SentinelShield\TwoFactor\WebAuthn::ALG_ES256, $rp->rp_id(), \SentinelShield\TwoFactor\WebAuthn::origin_of( site_url( '/' ) ) );
+		$key->uv   = false;
+		$reg       = \SentinelShield\TwoFactor\WebAuthn::challenge();
+		$resp      = $key->register( $reg );
+		$this->users->add_passkey( $user->ID, $rp->verify_registration( \SentinelShield\TwoFactor\WebAuthn::unb64u( $resp['client'] ), \SentinelShield\TwoFactor\WebAuthn::unb64u( $resp['attestation'] ), $reg ), 'Key', $this->now );
+		$this->assertFalse( current( $this->users->passkeys( $user->ID ) )['uv'], 'stored: this key did not verify the user' );
+		$try = function ( TwoFactorLogin $step ) use ( $user, $key ): array {
+			$token   = $step->begin( $user );
+			$pending = $step->pending( $user->ID, $token );
+			$options = $step->passkey_options( $user, $pending );
+			return array( $options['userVerification'], $step->attempt_passkey( $user, $token, (string) wp_json_encode( $key->sign( $options['challenge'] ) ) )['result'] );
+		};
+		$this->assertSame( array( 'preferred', 'ok' ), $try( $this->login_step() ), 'default: presence is enough after the password' );
+		$this->assertSame( array( 'required', 'wrong' ), $try( $this->login_step( array( 'passkey_uv' => 'required' ) ) ) );
+		$this->assertContains( 'twofa_failed', $this->event_types(), 'the refusal is logged' );
+		$key->uv = true;
+		$this->assertSame( array( 'required', 'ok' ), $try( $this->login_step( array( 'passkey_uv' => 'required' ) ) ) );
+	}
+
+	/**
+	 * A trusted browser ends when the account's entry for it expires, even if
+	 * the cookie claims a later date.
+	 */
+	public function test_a_trusted_browser_ends_when_its_entry_expires(): void {
+		[ $user ] = $this->app_user();
+		$step     = $this->login_step( array( 'remember_days' => 30 ) );
+		$device   = $this->users->add_device( $user->ID, $this->now + 60, 'Test browser', '198.51.100.20', $this->now );
+		$_COOKIE[ $step->trust_cookie_name( $user->ID ) ] = $step->trust_value( $user->ID, $device, $this->now + 30 * DAY_IN_SECONDS );
+		$this->assertTrue( $step->trusted_browser( $user ) );
+		$this->now += 61;
+		$this->assertFalse( $step->trusted_browser( $user ), 'expired on the account, whatever the cookie says' );
+	}
+
+	/**
 	 * Fresh authentication: a confirmation is per session and expires.
 	 */
 	public function test_recent_confirmation_is_per_session_and_expires(): void {

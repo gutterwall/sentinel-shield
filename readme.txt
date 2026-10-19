@@ -4,7 +4,7 @@ Tags: security, firewall, two-factor, brute force, login
 Requires at least: 6.4
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.8.2
+Stable tag: 0.8.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -77,7 +77,7 @@ Nothing below is contacted unless stated as a default or you switch it on.
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.8.2.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.8.3.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
@@ -199,6 +199,17 @@ No. Test mode only records what would have been blocked. Use it to validate sett
 
 == Changelog ==
 
+= 0.8.3 =
+Evidence before features: a fifth review asked for measurable testing under failure and load. Changes users notice:
+* Passkeys: a new setting, Passkey user verification. By default a security key that only checks a touch is accepted after the password; "Always require" asks for fingerprint, face or PIN at login and when adding a key, and refuses responses without it. Confirming identity with a passkey alone (no password) now always requires that check. Without PHP's OpenSSL extension only Ed25519 passkeys are offered and the health screen says so, instead of a fatal error at login.
+* Policy publication is durable and off visitors' requests: a change made by a visitor's request (a lockout at the login form) is published by a background job; the marker survives a build that dies half-way, a change that arrives during a build is not lost, and the health screen warns when publication is overdue (WP-Cron not running).
+* Writes that a full disk cuts short are detected (snapshot files, gate.json, server files); nothing partial is published and the previous policy stays in use. Stray temporary files from killed builds are removed. A private folder later replaced by a symlink is checked again, and missing or damaged range files show on the health screen.
+* Cloudflare: Retry-After on rate limiting is respected, and every list update is recorded before it is sent, so a worker killed after the upload leaves an "unknown" state that is retried and emptied when sync is switched off, never a list that is forgotten.
+* Storage budgets: caps for the event log, the waiting audit backlog (days and rows, with the gap counted) and the login history (never inside the counting window; the limits use separate counters), and a time budget per housekeeping run that continues five minutes later if work is left.
+* Uninstall with "delete data" now also removes the login counter table and per-site transients. WP-CLI settings-get reports unknown keys. Rebuild now (and wp sentinel early-gate rebuild) waits for a build already running instead of silently doing nothing.
+* One query instead of six on every page for the plugin's own options.
+Testing (not shipped; see docs/TESTING.md): line coverage 82% (from 61%), with floors per security area that a change may not lower, and branch coverage nightly; 53 deliberate defects that the tests must catch (mutation testing); an authorization matrix of every admin action by every kind of account and nonce; simultaneous HTTP requests racing for one backup code, authenticator code, passkey response or confirmation (exactly one wins); workers killed with SIGKILL during publication, Cloudflare sync and while holding locks; live nginx and Apache configuration tests; nginx and Apache with PHP-FPM; a Cloudflare API fake with timeouts, 429s, malformed answers and slow or failed operations; install, upgrade (0.8.0 to 0.8.2), deactivation and uninstall matrix; WordPress in a subdirectory, a moved content folder and a domain-mapped multisite; HTTPS behind a proxy and passkeys synchronized between two browsers; fuzzing of every parser; clock, filesystem, cache and privacy tests; PHPStan level 6, dependency audit and secret scanning; full-stack performance budgets. Release zips are built and attested in CI.
+
 = 0.8.2 =
 Fixes from a fourth code review of the new enforcement layers:
 * Private folder: a folder counts as private only on positive evidence. Outside the document root (now remembered from web requests, so WP-CLI and cron use it too), or inside it with a test file refused while a control file in uploads is served, over a verified TLS connection; that HTTP evidence is re-checked daily. A folder whose URL could not be worked out was wrongly approved before; it is now "not confirmed", and so is a challenge page that refuses everything.
@@ -289,6 +300,9 @@ Security fixes from a code review:
 * Phase 1: core framework, client IP detection, IP rules, lockout engine, lockout safety, test mode tooling, events, WP-CLI.
 
 == Upgrade Notice ==
+
+= 0.8.3 =
+New passkey verification setting, durable background policy publication, storage limits, full-disk and crash safety, and a much larger test suite. Uninstall now removes all data it should. No action needed.
 
 = 0.8.2 =
 Deletes 0.8.0 runtime files left in public uploads, confirms Cloudflare cleanup before reporting it, and approves a private folder only on positive evidence. If you included the old uploads server files in nginx or Apache, switch to the new path shown on Server & CDN.

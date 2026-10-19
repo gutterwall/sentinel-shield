@@ -36,12 +36,12 @@ final class Cbor {
 	/**
 	 * Decodes one item from the start of $data.
 	 *
-	 * @param string   $data     CBOR bytes.
-	 * @param int|null $consumed Set to the number of bytes the item used.
+	 * @param string $data     CBOR bytes.
+	 * @param int    $consumed Set to the number of bytes the item used.
 	 * @return mixed
 	 * @throws \InvalidArgumentException On malformed or unsupported input.
 	 */
-	public static function decode( string $data, ?int &$consumed = null ): mixed {
+	public static function decode( string $data, int &$consumed = 0 ): mixed {
 		$reader   = new self( $data );
 		$value    = $reader->item( 0 );
 		$consumed = $reader->pos;
@@ -125,10 +125,11 @@ final class Cbor {
 		}
 		$value = 0;
 		foreach ( str_split( $this->take( $bytes[ $info ] ) ) as $byte ) {
+			// At most 0x7fffffff: refused before the shift could pass it (or overflow, for 8-byte lengths).
+			if ( $value > 0x7fffff ) {
+				throw new \InvalidArgumentException( 'CBOR value too large' );
+			}
 			$value = ( $value << 8 ) | ord( $byte );
-		}
-		if ( $value < 0 || $value > 0x7fffffff ) {
-			throw new \InvalidArgumentException( 'CBOR value too large' );
 		}
 		return $value;
 	}

@@ -340,6 +340,7 @@ final class UserTwoFactor {
 			'created' => $now,
 			'used'    => 0,
 			'aaguid'  => (string) ( $cred['aaguid'] ?? '' ),
+			'uv'      => ! empty( $cred['uv'] ),
 		);
 		update_user_meta( $user_id, self::META . 'passkeys', $keys );
 		$this->forget_devices( $user_id );

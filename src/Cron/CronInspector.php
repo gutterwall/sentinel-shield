@@ -69,7 +69,7 @@ final class CronInspector {
 		$keys = array_flip( array_column( $scheduled, 'key' ) );
 		$out  = array_filter( CronRecorder::runs(), static fn( array $run, string $key ): bool => ! isset( $keys[ $key ] ), ARRAY_FILTER_USE_BOTH );
 		usort( $out, static fn( array $a, array $b ): int => (float) $b['last_start'] <=> (float) $a['last_start'] );
-		return array_values( $out );
+		return $out;
 	}
 
 	/**

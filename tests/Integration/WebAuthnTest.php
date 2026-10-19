@@ -119,6 +119,111 @@ final class WebAuthnTest extends \WP_UnitTestCase {
 		// A cloned authenticator: the counter does not go up.
 		$stored['count'] = 50;
 		$this->assertStringContainsString( 'cloned', (string) self::assert_with( $stored, $auth->sign( $challenge ), $challenge ) );
+		$stored['count'] = $auth->count + 1;
+		$this->assertStringContainsString( 'cloned', (string) self::assert_with( $stored, $auth->sign( $challenge ), $challenge ), 'the same counter again' );
+		$stored['count'] = $auth->count;
+		$this->assertSame( $auth->count + 1, self::assert_with( $stored, $auth->sign( $challenge ), $challenge ), 'one more is fine' );
+
+		// No user presence (nobody touched the key).
+		$auth->up = false;
+		$this->assertStringContainsString( 'not present', (string) self::assert_with( $stored, $auth->sign( $challenge ), $challenge ) );
+	}
+
+	/**
+	 * Review 5: user verification is checked whenever it is required. A key
+	 * that only checks presence passes when verification is preferred and is
+	 * refused, at registration and at sign-in, when it is required.
+	 */
+	public function test_user_verification_policy(): void {
+		$touch     = new SoftAuthenticator( WebAuthn::ALG_ES256, self::RP, self::ORIGIN );
+		$touch->uv = false;
+		$challenge = WebAuthn::challenge();
+		$response  = $touch->register( $challenge );
+		$stored    = self::rp()->verify_registration( WebAuthn::unb64u( $response['client'] ), WebAuthn::unb64u( $response['attestation'] ), $challenge );
+		$this->assertFalse( $stored['uv'], 'registered without user verification' );
+		try {
+			self::rp()->verify_registration( WebAuthn::unb64u( $response['client'] ), WebAuthn::unb64u( $response['attestation'] ), $challenge, WebAuthn::UV_REQUIRED );
+			$this->fail( 'a key that did not verify the user was registered under the required policy' );
+		} catch ( \RuntimeException $e ) {
+			$this->assertStringContainsString( 'did not verify the user', $e->getMessage() );
+		}
+
+		$sign = static function ( SoftAuthenticator $key, array $stored, string $uv ): int|string {
+			$challenge = WebAuthn::challenge();
+			$response  = $key->sign( $challenge );
+			try {
+				return self::rp()->verify_assertion( $stored, WebAuthn::unb64u( $response['client'] ), WebAuthn::unb64u( $response['auth'] ), WebAuthn::unb64u( $response['signature'] ), $challenge, $uv );
+			} catch ( \RuntimeException $e ) {
+				return $e->getMessage();
+			}
+		};
+		$this->assertIsInt( $sign( $touch, $stored, WebAuthn::UV_PREFERRED ), 'presence is enough when verification is only preferred' );
+		$this->assertStringContainsString( 'did not verify the user', (string) $sign( $touch, $stored, WebAuthn::UV_REQUIRED ) );
+		$this->assertStringContainsString( 'did not verify the user', (string) $sign( $touch, $stored, 'required' ) );
+		$this->assertIsInt( $sign( $touch, $stored, 'anything else' ), 'unknown policies mean preferred' );
+
+		[ $verified, $vstored ] = self::registered( WebAuthn::ALG_EDDSA );
+		$this->assertIsInt( $sign( $verified, $vstored, WebAuthn::UV_REQUIRED ) );
+		$this->assertIsInt( $sign( $verified, $vstored, WebAuthn::UV_PREFERRED ) );
+
+		// The browser is asked for what the server will check.
+		$user = self::factory()->user->create_and_get();
+		$this->assertSame( 'required', self::rp()->request_options( $challenge, array(), WebAuthn::UV_REQUIRED )['userVerification'] );
+		$this->assertSame( 'preferred', self::rp()->request_options( $challenge, array() )['userVerification'] );
+		$this->assertSame( 'required', self::rp()->creation_options( $user, 'h', $challenge, array(), WebAuthn::UV_REQUIRED )['authenticatorSelection']['userVerification'] );
+		$this->assertSame( 'preferred', self::rp()->creation_options( $user, 'h', $challenge, array() )['authenticatorSelection']['userVerification'] );
+	}
+
+	/**
+	 * Review 5: without PHP's OpenSSL extension, passkeys degrade with a
+	 * clear message instead of a fatal error: only Ed25519 keys are offered
+	 * and accepted, and other signatures simply do not verify.
+	 */
+	public function test_without_openssl_only_ed25519_is_offered_and_nothing_crashes(): void {
+		$es       = new SoftAuthenticator( WebAuthn::ALG_ES256, self::RP, self::ORIGIN );
+		$ed       = new SoftAuthenticator( WebAuthn::ALG_EDDSA, self::RP, self::ORIGIN );
+		$reg      = WebAuthn::challenge();
+		$cases    = array(
+			'es256'   => $es->register( $reg ),
+			'ed25519' => $ed->register( $reg ),
+		);
+		$input = get_temp_dir() . 'ss-noopenssl-' . wp_generate_password( 6, false ) . '.json';
+		file_put_contents( $input, (string) wp_json_encode( array( 'challenge' => $reg, 'cases' => $cases ) ) );
+		$script = <<<'PHP'
+<?php
+define( 'ABSPATH', sys_get_temp_dir() . '/' );
+require $argv[1] . '/vendor/autoload.php';
+use SentinelShield\TwoFactor\WebAuthn;
+$in  = json_decode( file_get_contents( $argv[2] ), true );
+$rp  = new WebAuthn( 'shop.example.test', array( 'https://shop.example.test' ), 'Shop' );
+$out = array( 'openssl' => WebAuthn::openssl(), 'algorithms' => WebAuthn::algorithms(), 'verify' => WebAuthn::verify_signature( WebAuthn::ALG_ES256, "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n", 'data', 'sig' ) );
+foreach ( $in['cases'] as $name => $case ) {
+	try {
+		$rp->verify_registration( WebAuthn::unb64u( $case['client'] ), WebAuthn::unb64u( $case['attestation'] ), $in['challenge'] );
+		$out[ $name ] = 'registered';
+	} catch ( RuntimeException $e ) {
+		$out[ $name ] = $e->getMessage();
+	}
+}
+echo json_encode( $out );
+PHP;
+		$file = get_temp_dir() . 'ss-noopenssl-' . wp_generate_password( 6, false ) . '.php';
+		file_put_contents( $file, $script );
+		try {
+			$cmd = sprintf( '%s -d disable_functions=openssl_verify,openssl_pkey_get_public %s %s %s 2>&1', escapeshellarg( PHP_BINARY ), escapeshellarg( $file ), escapeshellarg( dirname( __DIR__, 2 ) ), escapeshellarg( $input ) );
+			exec( $cmd, $lines, $code );
+		} finally {
+			wp_delete_file( $file );
+			wp_delete_file( $input );
+		}
+		$this->assertSame( 0, $code, implode( "\n", $lines ) );
+		$out = json_decode( implode( '', $lines ), true );
+		$this->assertFalse( $out['openssl'] );
+		$this->assertSame( array( WebAuthn::ALG_EDDSA ), $out['algorithms'], 'only Ed25519 is offered' );
+		$this->assertFalse( $out['verify'], 'an ES256 signature does not verify, without a fatal error' );
+		$this->assertSame( 'registered', $out['ed25519'] );
+		$this->assertStringContainsString( 'OpenSSL', $out['es256'] );
+		$this->assertSame( array( WebAuthn::ALG_ES256, WebAuthn::ALG_EDDSA, WebAuthn::ALG_RS256 ), WebAuthn::algorithms(), 'with OpenSSL: all three' );
 	}
 
 	public function test_cbor_decoder_handles_and_rejects(): void {

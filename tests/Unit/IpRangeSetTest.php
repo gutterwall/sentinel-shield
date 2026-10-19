@@ -58,6 +58,11 @@ final class IpRangeSetTest extends TestCase {
 		$this->assertSame( array( '203.0.113.7', '198.51.100.0/24', '2001:db8::/32' ), IpRangeSet::parse_lines( $text ) );
 	}
 
+	/**
+	 * Timed: skipped by the branch coverage run.
+	 *
+	 * @group heavy
+	 */
 	public function test_large_set_lookup_is_fast(): void {
 		$items = array();
 		for ( $i = 0; $i < 20000; $i++ ) {

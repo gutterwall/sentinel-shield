@@ -14,6 +14,8 @@ use SentinelShield\Cron\CronInspector;
 use SentinelShield\Feeds\FeedCatalog;
 use SentinelShield\Firewall\CloudflareSync;
 use SentinelShield\Firewall\EarlyGate;
+use SentinelShield\Firewall\FeedSnapshot;
+use SentinelShield\TwoFactor\WebAuthn;
 use SentinelShield\Feeds\FeedUpdater;
 use SentinelShield\Geo\CountryDatabase;
 use SentinelShield\Lockdown\FileIntegrity;
@@ -180,6 +182,8 @@ final class Health {
 				$issue = __( 'No snapshot yet; it is written on the next settings save or hourly.', 'sentinel-shield' );
 			} elseif ( ! empty( $snap['error'] ) ) {
 				$issue = (string) $snap['error'];
+			} elseif ( ! self::snapshot_complete() ) {
+				$issue = __( 'The snapshot names range files that are missing or damaged, so the early firewall lets everything through to WordPress. It is rebuilt within the hour; use Rebuild now on the Server & CDN tab to fix it at once.', 'sentinel-shield' );
 			} elseif ( (int) $snap['valid_until'] < time() ) {
 				$issue = __( 'The snapshot is out of date, so the early firewall lets everything through to WordPress until it is rebuilt. Check that scheduled jobs run.', 'sentinel-shield' );
 			} elseif ( 'mu_plugin' === $gate->mode() && ! EarlyGate::is_own_loader( EarlyGate::loader_path() ) ) {
@@ -188,6 +192,14 @@ final class Health {
 				$issue = 'prepend' === $gate->mode() ? __( 'Not running: add the auto_prepend_file line shown on the Server & CDN tab and restart PHP.', 'sentinel-shield' ) : __( 'Not running for this request.', 'sentinel-shield' );
 			}
 			$add( 'early', __( 'Early firewall', 'sentinel-shield' ), '' === $issue ? 'ok' : 'warn', '' === $issue ? __( 'Running with a current snapshot.', 'sentinel-shield' ) : $issue );
+		}
+		if ( $settings->is_module_enabled( 'two_factor' ) && ! WebAuthn::openssl() ) {
+			$add( 'passkeys', __( 'Passkeys', 'sentinel-shield' ), 'warn', __( 'PHP\'s OpenSSL extension is missing, so only passkeys with Ed25519 keys can be added or used; most phones and computers use other kinds, and existing ones of those are refused at login. Ask the host to enable OpenSSL.', 'sentinel-shield' ) );
+		}
+		$publication = $gate->publication();
+		if ( $publication['overdue'] ) {
+			/* translators: %s: how long ago, e.g. "12 mins". */
+			$add( 'publication', __( 'Policy publication', 'sentinel-shield' ), 'warn', sprintf( __( 'Rule changes from %s ago are not yet published to the early firewall, the server files and Cloudflare (WordPress itself enforces them already). Publication runs as a scheduled job: check that WP-Cron or a system cron runs.', 'sentinel-shield' ), human_time_diff( $publication['since'] ) ) );
 		}
 		$legacy = EarlyGate::legacy_state();
 		if ( ! empty( $legacy['failed'] ) ) {
@@ -279,6 +291,15 @@ final class Health {
 				: __( 'Not in use. Everything works; blocked-request hit counts are then approximate (at most one per IP per minute), and a cache such as Redis would take more load off the database during attacks.', 'sentinel-shield' )
 		);
 		return $rows;
+	}
+
+	/**
+	 * Whether gate.json and both range files it names are present and whole.
+	 */
+	public static function snapshot_complete(): bool {
+		$json = json_decode( (string) @file_get_contents( EarlyGate::path() ), true ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Our own file; missing is reported.
+		// Header and size only: the files can be large.
+		return is_array( $json ) && FeedSnapshot::is_complete( (string) ( $json['block_file'] ?? '' ) ) && FeedSnapshot::is_complete( (string) ( $json['allow_file'] ?? '' ) );
 	}
 
 	/**

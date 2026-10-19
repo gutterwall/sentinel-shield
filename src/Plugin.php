@@ -53,6 +53,7 @@ use SentinelShield\Repository\TokenRepository;
 use SentinelShield\Safety\AdminProtection;
 use SentinelShield\Safety\SafetyGuard;
 use SentinelShield\Support\DataDir;
+use SentinelShield\Support\OptionPrimer;
 use SentinelShield\Support\I18n;
 use SentinelShield\TwoFactor\SecretBox;
 use SentinelShield\TwoFactor\TwoFactorLogin;
@@ -312,6 +313,13 @@ final class Plugin {
 		}
 		$this->booted = true;
 
+		// What every request reads, in one query instead of one each.
+		$cached = array();
+		foreach ( array( 'rules_allow', 'rules_block', 'rules_allow_login' ) as $key ) {
+			$cached[] = '_site_transient_sentinel_shield_' . $key;
+			$cached[] = '_site_transient_timeout_sentinel_shield_' . $key;
+		}
+		OptionPrimer::prime( array_merge( array( Settings::OPTION, Schema::OPTION, DataDir::ROOT, EarlyGate::LEGACY ), wp_using_ext_object_cache() ? array() : $cached ) );
 		Schema::maybe_upgrade();
 		// WP-CLI and cron have no document root; remember the web server's.
 		DataDir::remember_document_root();

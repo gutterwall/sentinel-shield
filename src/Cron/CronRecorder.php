@@ -68,8 +68,9 @@ final class CronRecorder {
 			}
 		}
 		foreach ( array_keys( $hooks ) as $hook ) {
-			add_action( $hook, array( $recorder, 'before' ), PHP_INT_MIN, 99 );
-			add_action( $hook, array( $recorder, 'after' ), PHP_INT_MAX, 99 );
+			// As filters: they hand the first argument back, in case a hook is a filter too.
+			add_filter( $hook, array( $recorder, 'before' ), PHP_INT_MIN, 99 );
+			add_filter( $hook, array( $recorder, 'after' ), PHP_INT_MAX, 99 );
 		}
 		register_shutdown_function( array( $recorder, 'shutdown' ) );
 	}

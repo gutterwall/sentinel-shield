@@ -227,13 +227,30 @@ final class LoginAttemptRepository {
 	}
 
 	/**
-	 * Deletes failures older than a time.
+	 * Deletes failures and counters older than a time.
 	 *
-	 * @param int $before Unix time.
-	 * @return int Rows deleted.
+	 * @param int   $before Unix time.
+	 * @param float $budget Seconds (per table).
+	 * @return int Attempts deleted.
 	 */
-	public function prune( int $before ): int {
-		$this->db->query( $this->db->prepare( 'DELETE FROM %i WHERE bucket < %d', $this->counters_table(), intdiv( $before, 60 ) ) );
-		return Batch::delete( $this->db, $this->db->prepare( 'DELETE FROM %i WHERE created_at < %s', $this->table(), gmdate( 'Y-m-d H:i:s', $before ) ) );
+	public function prune( int $before, float $budget = Batch::BUDGET ): int {
+		Batch::delete( $this->db, $this->db->prepare( 'DELETE FROM %i WHERE bucket < %d', $this->counters_table(), intdiv( $before, 60 ) ), $budget );
+		return Batch::delete( $this->db, $this->db->prepare( 'DELETE FROM %i WHERE created_at < %s', $this->table(), gmdate( 'Y-m-d H:i:s', $before ) ), $budget );
+	}
+
+	/**
+	 * Caps the detailed history at about $max_rows attempts, oldest first,
+	 * never touching attempts since $keep_since (the counting window) or the
+	 * counters the limits use.
+	 *
+	 * @param int   $max_rows   Attempts to keep.
+	 * @param int   $keep_since Unix time; newer attempts always stay.
+	 * @param float $budget     Seconds.
+	 * @return int Rows removed.
+	 */
+	public function trim( int $max_rows, int $keep_since, float $budget = Batch::BUDGET ): int {
+		$top = (int) $this->db->get_var( $this->db->prepare( 'SELECT COALESCE(MAX(id), 0) FROM %i', $this->table() ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Live value.
+		$cap = $top - max( 1, $max_rows );
+		return $cap > 0 ? Batch::delete( $this->db, $this->db->prepare( 'DELETE FROM %i WHERE id <= %d AND created_at < %s', $this->table(), $cap, gmdate( 'Y-m-d H:i:s', $keep_since ) ), $budget ) : 0;
 	}
 }

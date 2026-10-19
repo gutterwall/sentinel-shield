@@ -14,13 +14,13 @@ if ( ! is_array( $sentinel_shield_settings ) || empty( $sentinel_shield_settings
 
 global $wpdb;
 
-foreach ( array( 'sentinel_ip_rules', 'sentinel_events', 'sentinel_offenses', 'sentinel_unlock_tokens', 'sentinel_feed_ranges', 'sentinel_login_attempts' ) as $sentinel_shield_table ) {
+foreach ( array( 'sentinel_ip_rules', 'sentinel_events', 'sentinel_offenses', 'sentinel_unlock_tokens', 'sentinel_feed_ranges', 'sentinel_login_attempts', 'sentinel_login_counters' ) as $sentinel_shield_table ) {
 	$wpdb->query( $wpdb->prepare( 'DROP TABLE IF EXISTS %i', $wpdb->base_prefix . $sentinel_shield_table ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.SchemaChange -- Uninstall cleanup.
 }
 
 // Read before the options are deleted below.
 $sentinel_shield_data = get_site_option( 'sentinel_shield_data_dir' );
-foreach ( array( 'sentinel_shield_settings', 'sentinel_shield_db_version', 'sentinel_shield_secret', 'sentinel_shield_cloudflare_ranges', 'sentinel_shield_welcome', 'sentinel_shield_feeds_state', 'sentinel_shield_admin_approvals', 'sentinel_shield_scan_report', 'sentinel_shield_scan_baseline', 'sentinel_shield_scan_uploads', 'sentinel_shield_integrity_state', 'sentinel_shield_integrity_report', 'sentinel_shield_gate_state', 'sentinel_shield_data_dir', 'sentinel_shield_audit_state', 'sentinel_shield_audit_secret', 'sentinel_shield_mail_health', 'sentinel_shield_gate_dirty', 'sentinel_shield_cf_token', 'sentinel_shield_cf_state', 'sentinel_shield_lock_health', 'sentinel_shield_maintenance_last', 'sentinel_shield_report_gen', 'sentinel_shield_geo_db', 'sentinel_shield_document_root', 'sentinel_shield_legacy_files' ) as $sentinel_shield_option ) {
+foreach ( array( 'sentinel_shield_settings', 'sentinel_shield_db_version', 'sentinel_shield_secret', 'sentinel_shield_cloudflare_ranges', 'sentinel_shield_welcome', 'sentinel_shield_feeds_state', 'sentinel_shield_admin_approvals', 'sentinel_shield_scan_report', 'sentinel_shield_scan_baseline', 'sentinel_shield_scan_uploads', 'sentinel_shield_integrity_state', 'sentinel_shield_integrity_report', 'sentinel_shield_gate_state', 'sentinel_shield_data_dir', 'sentinel_shield_audit_state', 'sentinel_shield_audit_secret', 'sentinel_shield_mail_health', 'sentinel_shield_gate_dirty', 'sentinel_shield_cf_token', 'sentinel_shield_cf_state', 'sentinel_shield_lock_health', 'sentinel_shield_maintenance_last', 'sentinel_shield_maintenance_report', 'sentinel_shield_report_gen', 'sentinel_shield_geo_db', 'sentinel_shield_document_root', 'sentinel_shield_legacy_files' ) as $sentinel_shield_option ) {
 	delete_site_option( $sentinel_shield_option );
 }
 
@@ -30,6 +30,9 @@ $wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE meta_key LIKE %s OR meta_key
 // Transients (single site: options table; multisite: sitemeta).
 $sentinel_shield_like  = $wpdb->esc_like( '_site_transient_sentinel_shield_' ) . '%';
 $sentinel_shield_tlike = $wpdb->esc_like( '_site_transient_timeout_sentinel_shield_' ) . '%';
+// Per-site transients (rate limits and notices).
+$sentinel_shield_slike  = $wpdb->esc_like( '_transient_sentinel_shield_' ) . '%';
+$sentinel_shield_stlike = $wpdb->esc_like( '_transient_timeout_sentinel_shield_' ) . '%';
 if ( is_multisite() ) {
 	$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE meta_key LIKE %s OR meta_key LIKE %s', $wpdb->sitemeta, $sentinel_shield_like, $sentinel_shield_tlike ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 	foreach ( get_sites(
@@ -39,10 +42,12 @@ if ( is_multisite() ) {
 		)
 	) as $sentinel_shield_site_id ) {
 		switch_to_blog( (int) $sentinel_shield_site_id );
+		$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE option_name LIKE %s OR option_name LIKE %s', $wpdb->options, $sentinel_shield_slike, $sentinel_shield_stlike ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 		delete_option( 'sentinel_shield_site_overrides' );
 		delete_option( 'sentinel_shield_cron_runs' );
 		delete_option( 'sentinel_shield_cron_paused' );
 		wp_clear_scheduled_hook( 'sentinel_shield_maintenance' );
+		wp_clear_scheduled_hook( 'sentinel_shield_maintenance', array( 'more' ) );
 		wp_clear_scheduled_hook( 'sentinel_shield_cf_refresh' );
 		wp_clear_scheduled_hook( 'sentinel_shield_feeds_tick' );
 		wp_clear_scheduled_hook( 'sentinel_shield_feeds_tick', array( 'soon' ) );
@@ -52,8 +57,9 @@ if ( is_multisite() ) {
 		restore_current_blog();
 	}
 } else {
-	$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE option_name LIKE %s OR option_name LIKE %s', $wpdb->options, $sentinel_shield_like, $sentinel_shield_tlike ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+	$wpdb->query( $wpdb->prepare( 'DELETE FROM %i WHERE option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s', $wpdb->options, $sentinel_shield_like, $sentinel_shield_tlike, $sentinel_shield_slike, $sentinel_shield_stlike ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 	wp_clear_scheduled_hook( 'sentinel_shield_maintenance' );
+	wp_clear_scheduled_hook( 'sentinel_shield_maintenance', array( 'more' ) );
 	wp_clear_scheduled_hook( 'sentinel_shield_cf_refresh' );
 	wp_clear_scheduled_hook( 'sentinel_shield_feeds_tick' );
 	wp_clear_scheduled_hook( 'sentinel_shield_feeds_tick', array( 'soon' ) );

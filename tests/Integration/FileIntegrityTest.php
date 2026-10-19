@@ -374,4 +374,57 @@ final class FileIntegrityTest extends \WP_UnitTestCase {
 		// Unlimited (WP-CLI): one run covers everything.
 		$this->assertTrue( $scanner->run( true )['complete'] );
 	}
+
+	/**
+	 * Review 5 (P1): files added, removed, renamed and changed while a sliced
+	 * uploads scan is under way. Files ahead of the cursor are found in this
+	 * cycle, files behind it in the next; removals cause no errors; and new
+	 * files keep arriving without the scan restarting or never finishing.
+	 */
+	public function test_uploads_scan_resumes_correctly_while_files_change(): void {
+		$uploads = wp_get_upload_dir()['basedir'] . '/ss-churn';
+		for ( $i = 0; $i < 20; $i++ ) {
+			$this->put( sprintf( '%s/m%02d/file.php', $uploads, $i ), '<?php echo ' . $i . ';' );
+		}
+		$c       = Plugin::instance()->container();
+		$scanner = new IntegrityScanner( $c->get( AdminRegistry::class ), $c->get( EventRepository::class ), $c->get( Settings::class ), 4 );
+		$title   = static fn( string $path ): string => wp_normalize_path( str_replace( ABSPATH, '', $path ) ) . ': not reviewed yet';
+		$report  = $scanner->run();
+		$this->assertFalse( $report['complete'] );
+		$cursor = (string) ( $report['coverage']['uploads']['cursor'] ?? '' );
+		$this->assertNotSame( '', $cursor );
+
+		$behind  = $this->put( $uploads . '/a00/behind.php', '<?php // added behind the cursor' );
+		$ahead   = $this->put( $uploads . '/z99/ahead.php', '<?php // added ahead of the cursor' );
+		$renamed = $uploads . '/m19/renamed.php';
+		rename( $uploads . '/m19/file.php', $renamed );
+		$this->created[] = $renamed;
+		wp_delete_file( $uploads . '/m18/file.php' ); // Removed before the scan reached it.
+		file_put_contents( $uploads . '/m00/file.php', '<?php // changed after it was scanned' );
+
+		$runs = 1;
+		$n    = 0;
+		do {
+			// Someone keeps uploading while the scan runs.
+			$this->put( sprintf( '%s/n%03d/late.php', $uploads, $n++ ), '<?php // late' );
+			$report = $scanner->run();
+			++$runs;
+		} while ( ! $report['complete'] && $runs < 60 );
+		$this->assertTrue( $report['complete'], 'the cycle finishes despite the steady stream of new files' );
+		$this->assertLessThan( 30, $runs, 'without restarting from the beginning' );
+		$titles = array_column( $report['findings'], 'title' );
+		$this->assertContains( $title( $ahead ), $titles, 'a file added ahead of the cursor is found in this cycle' );
+		$this->assertContains( $title( $renamed ), $titles, 'a renamed file is found under its new name' );
+		$this->assertNotContains( $title( $uploads . '/m18/file.php' ), $titles, 'a removed file is not reported' );
+		$this->assertSame( count( $titles ), count( array_unique( array_column( $report['findings'], 'id' ) ) ), 'nothing reported twice' );
+
+		// The next cycle covers what was added behind the cursor.
+		do {
+			$report = $scanner->run();
+			++$runs;
+		} while ( ! $report['complete'] && $runs < 120 );
+		$titles = array_column( $report['findings'], 'title' );
+		$this->assertContains( $title( $behind ), $titles, 'a file added behind the cursor is found in the next cycle' );
+		$this->assertContains( $title( $uploads . '/m00/file.php' ), $titles );
+	}
 }

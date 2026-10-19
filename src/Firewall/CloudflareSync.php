@@ -52,9 +52,23 @@ final class CloudflareSync {
 	 */
 	public function register(): void {
 		add_action( 'sentinel_shield_blocklist_changed', array( $this, 'schedule' ) );
-		add_action( self::CRON, array( $this, 'sync' ) );
-		add_action( self::CHECK, array( $this, 'check_operation' ) );
+		add_action( self::CRON, array( $this, 'cron_sync' ) );
+		add_action( self::CHECK, array( $this, 'cron_check' ) );
 		add_action( 'sentinel_shield_settings_saved', array( $this, 'settings_saved' ) );
+	}
+
+	/**
+	 * Scheduled sync (an action callback returns nothing).
+	 */
+	public function cron_sync(): void {
+		$this->sync();
+	}
+
+	/**
+	 * Scheduled confirmation check.
+	 */
+	public function cron_check(): void {
+		$this->check_operation();
 	}
 
 	/**
@@ -194,6 +208,8 @@ final class CloudflareSync {
 			$wait = 0;
 			if ( 'applying' === $status ) {
 				$wait = 30;
+			} elseif ( time() < (int) ( $prior['retry_at'] ?? 0 ) ) {
+				$wait = (int) $prior['retry_at'] - time(); // Cloudflare asked us to slow down.
 			} elseif ( ! $empty && ! empty( $prior['ok'] ) && time() < (int) ( $prior['time'] ?? 0 ) + self::INTERVAL ) {
 				$wait = (int) $prior['time'] + self::INTERVAL - time();
 			}
@@ -204,7 +220,9 @@ final class CloudflareSync {
 				return $prior;
 			}
 		}
-		$sent  = $this->send( $dest, $conv['items'] );
+		$this->intend( $dest, $empty ? 'empty' : 'policy' );
+		$sent = $this->send( $dest, $conv['items'] );
+		do_action( 'sentinel_shield_checkpoint', 'cloudflare:sent' );
 		$state = array(
 			'time'       => time(),
 			'ok'         => $sent['ok'],
@@ -219,6 +237,7 @@ final class CloudflareSync {
 			'checks'     => 0,
 			'items'      => $sent['ok'] ? $hash : '',
 			'error'      => $sent['error'],
+			'retry_at'   => $sent['retry_at'],
 			'retired'    => (array) ( $prior['retired'] ?? array() ),
 		);
 		update_site_option( self::STATE, $state );
@@ -269,6 +288,7 @@ final class CloudflareSync {
 		if ( '' === $this->token() || '' === (string) ( $dest['account'] ?? '' ) || '' === (string) ( $dest['list'] ?? '' ) || ! $this->manages_items() ) {
 			return ! $this->manages_items();
 		}
+		$this->intend( $dest, 'empty' );
 		$sent  = $this->send( $dest, array() );
 		$state = array_merge(
 			$state,
@@ -343,6 +363,42 @@ final class CloudflareSync {
 	}
 
 	/**
+	 * Records, before a request that changes a list, that its content is not
+	 * known until Cloudflare answers. A worker that dies after the upload
+	 * thus leaves "unknown" (retried, and emptied when sync is switched off)
+	 * instead of a state that says the list holds nothing.
+	 *
+	 * @param array<string, string> $dest account, list.
+	 * @param string                $want policy or empty.
+	 */
+	private function intend( array $dest, string $want ): void {
+		update_site_option(
+			self::STATE,
+			array_merge(
+				self::state(),
+				array(
+					'dest'      => $dest,
+					'want'      => $want,
+					'status'    => 'unknown',
+					'operation' => '',
+					'items'     => '',
+					'error'     => __( 'An update of the Cloudflare list was interrupted before Cloudflare answered; it is sent again.', 'sentinel-shield' ),
+				)
+			)
+		);
+		$this->fallback();
+	}
+
+	/**
+	 * A sync later on, in case this request never finishes its own follow-up.
+	 */
+	private function fallback(): void {
+		if ( ! wp_next_scheduled( self::CRON ) ) {
+			wp_schedule_single_event( time() + self::INTERVAL, self::CRON );
+		}
+	}
+
+	/**
 	 * Empties a list the settings no longer point at, and remembers it until
 	 * Cloudflare confirms it is empty (or keeps retrying).
 	 *
@@ -352,6 +408,27 @@ final class CloudflareSync {
 	private function retire( array $dest, array $prior ): void {
 		$retired = (array) ( $prior['retired'] ?? array() );
 		if ( ! empty( $prior['count'] ) || 'empty' !== ( $prior['status'] ?? '' ) ) {
+			// Remembered before the request, so a crash cannot forget the list.
+			update_site_option(
+				self::STATE,
+				array(
+					'retired' => array_merge(
+						$retired,
+						array(
+							array(
+								'account'   => (string) ( $dest['account'] ?? '' ),
+								'list'      => (string) ( $dest['list'] ?? '' ),
+								'status'    => 'unknown',
+								'operation' => '',
+								'checks'    => 0,
+								'time'      => time(),
+								'error'     => '',
+							),
+						)
+					),
+				)
+			);
+			$this->fallback();
 			$sent      = $this->send( $dest, array() );
 			$retired[] = array(
 				'account'   => (string) ( $dest['account'] ?? '' ),
@@ -379,11 +456,11 @@ final class CloudflareSync {
 		$state   = self::state();
 		$changed = false;
 		foreach ( (array) ( $state['retired'] ?? array() ) as $i => $old ) {
-			if ( in_array( $old['status'] ?? '', array( 'failed', 'unknown' ), true ) && time() >= (int) ( $old['time'] ?? 0 ) + self::INTERVAL ) {
+			if ( in_array( $old['status'] ?? '', array( 'failed', 'unknown' ), true ) && time() >= max( (int) ( $old['time'] ?? 0 ) + self::INTERVAL, (int) ( $old['retry_at'] ?? 0 ) ) ) {
 				$sent                   = $this->send( $old, array() );
 				$state['retired'][ $i ] = array_merge(
 					$old,
-					array_intersect_key( $sent, array_flip( array( 'status', 'operation', 'error' ) ) ),
+					array_intersect_key( $sent, array_flip( array( 'status', 'operation', 'error', 'retry_at' ) ) ),
 					array(
 						'checks' => 0,
 						'time'   => time(),
@@ -404,7 +481,7 @@ final class CloudflareSync {
 	 *
 	 * @param array<string, string> $dest  account, list.
 	 * @param list<string>          $items Items.
-	 * @return array{ok:bool, status:string, operation:string, error:string}
+	 * @return array{ok:bool, status:string, operation:string, error:string, retry_at:int}
 	 */
 	private function send( array $dest, array $items ): array {
 		$body   = array_map(
@@ -416,15 +493,18 @@ final class CloudflareSync {
 		);
 		$result = $this->request( 'PUT', '/items', $body, '', $dest );
 		if ( is_wp_error( $result ) ) {
+			$data = $result->get_error_data();
 			return array(
 				'ok'        => false,
 				'status'    => 'failed',
 				'operation' => '',
 				'error'     => $result->get_error_message(),
+				'retry_at'  => is_array( $data ) && ! empty( $data['retry_after'] ) ? time() + (int) $data['retry_after'] : 0,
 			);
 		}
 		$operation = (string) ( $result['result']['operation_id'] ?? '' );
 		return array(
+			'retry_at'  => 0,
 			'ok'        => true,
 			// Without an operation ID Cloudflare applied the change synchronously.
 			'status'    => '' !== $operation ? 'applying' : ( $items ? 'active' : 'empty' ),
@@ -482,8 +562,14 @@ final class CloudflareSync {
 		if ( in_array( 'applying', $statuses, true ) && ! wp_next_scheduled( self::CHECK ) ) {
 			wp_schedule_single_event( time() + 15, self::CHECK );
 		}
-		if ( array_intersect( array( 'failed', 'unknown' ), $statuses ) && ! wp_next_scheduled( self::CRON ) ) {
-			wp_schedule_single_event( time() + self::INTERVAL, self::CRON );
+		if ( array_intersect( array( 'failed', 'unknown' ), $statuses ) ) {
+			$at   = max( time() + self::INTERVAL, (int) ( $state['retry_at'] ?? 0 ) );
+			$next = wp_next_scheduled( self::CRON );
+			// Not before Cloudflare's Retry-After (an earlier fallback sync is moved).
+			if ( ! $next || ( ! empty( $state['retry_at'] ) && $next < $at ) ) {
+				wp_clear_scheduled_hook( self::CRON );
+				wp_schedule_single_event( $at, self::CRON );
+			}
 		}
 	}
 
@@ -582,12 +668,19 @@ final class CloudflareSync {
 		if ( is_wp_error( $response ) ) {
 			return $response;
 		}
+		$code = (int) wp_remote_retrieve_response_code( $response );
+		if ( 429 === $code ) {
+			// Rate limited: wait as long as Cloudflare asks (within reason), at least INTERVAL.
+			$wait = max( self::INTERVAL, min( DAY_IN_SECONDS, (int) wp_remote_retrieve_header( $response, 'retry-after' ) ) );
+			/* translators: %d: seconds. */
+			return new \WP_Error( 'sentinel_shield_cf_rate', sprintf( __( 'Cloudflare is limiting the rate of requests; trying again in %d seconds.', 'sentinel-shield' ), $wait ), array( 'retry_after' => $wait ) );
+		}
 		$data = json_decode( (string) wp_remote_retrieve_body( $response ), true );
 		if ( ! is_array( $data ) || empty( $data['success'] ) ) {
 			$errors  = is_array( $data ) ? (array) ( $data['errors'] ?? array() ) : array();
 			$message = $errors ? implode( '; ', array_map( static fn( $e ): string => (string) ( $e['message'] ?? '' ), $errors ) ) : '';
 			/* translators: 1: HTTP status, 2: message from Cloudflare. */
-			return new \WP_Error( 'sentinel_shield_cf_api', sprintf( __( 'Cloudflare answered %1$d: %2$s', 'sentinel-shield' ), (int) wp_remote_retrieve_response_code( $response ), '' === $message ? __( 'unexpected response', 'sentinel-shield' ) : $message ) );
+			return new \WP_Error( 'sentinel_shield_cf_api', sprintf( __( 'Cloudflare answered %1$d: %2$s', 'sentinel-shield' ), $code, '' === $message ? __( 'unexpected response', 'sentinel-shield' ) : $message ) );
 		}
 		return $data;
 	}

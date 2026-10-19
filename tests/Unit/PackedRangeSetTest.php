@@ -45,6 +45,11 @@ final class PackedRangeSetTest extends TestCase {
 		$this->assertSame( 0, PackedRangeSet::empty()->count() );
 	}
 
+	/**
+	 * Skipped by the branch coverage run, where tight loops are very slow.
+	 *
+	 * @group heavy
+	 */
 	public function test_agrees_with_ip_range_set_on_random_data(): void {
 		mt_srand( 42 );
 		$items = array();

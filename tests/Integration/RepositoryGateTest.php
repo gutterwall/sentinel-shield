@@ -98,5 +98,87 @@ final class RepositoryGateTest extends \WP_UnitTestCase {
 		$this->assertNotNull( $tokens->consume( $token ) );
 		$this->assertNull( $tokens->consume( $token ) );
 		$this->assertNull( $tokens->consume( str_repeat( 'a', 64 ) ) );
+		// Used a while ago (a second consume in the same second could look unchanged to MySQL).
+		global $wpdb;
+		$wpdb->query( $wpdb->prepare( 'UPDATE %i SET used_at = %s', $tokens->table(), gmdate( 'Y-m-d H:i:s', time() - 60 ) ) );
+		$this->assertNull( $tokens->consume( $token ), 'still used' );
+		$this->assertNull( $tokens->peek( $token ) );
+	}
+
+	/**
+	 * Review 5 (mutation testing): the rule lookup used by the admin screens
+	 * and the IP check skips expired rules unless asked for them.
+	 */
+	public function test_rule_lookup_skips_expired_rules(): void {
+		global $wpdb;
+		$id = $this->repo->add( 'block', Cidr::parse( '203.0.113.0/24' ), 'x', 'manual', time() + 3600 );
+		$this->assertCount( 1, $this->repo->find_containing( 'block', (string) inet_pton( '203.0.113.9' ) ) );
+		$wpdb->update( $this->repo->table(), array( 'expires_at' => gmdate( 'Y-m-d H:i:s', time() - 1 ) ), array( 'id' => $id ) );
+		$this->assertSame( array(), $this->repo->find_containing( 'block', (string) inet_pton( '203.0.113.9' ) ) );
+		$this->assertCount( 1, $this->repo->find_containing( 'block', (string) inet_pton( '203.0.113.9' ), false ) );
+	}
+
+	/**
+	 * An unlock link stops working when it expires, used or not.
+	 */
+	public function test_unlock_tokens_expire(): void {
+		global $wpdb;
+		$tokens = Plugin::instance()->container()->get( TokenRepository::class );
+		$token  = $tokens->create( 1, '203.0.113.30', 600 );
+		$this->assertNotNull( $tokens->peek( $token ) );
+		$wpdb->query( $wpdb->prepare( 'UPDATE %i SET expires_at = %s', $tokens->table(), gmdate( 'Y-m-d H:i:s', time() - 1 ) ) );
+		$this->assertNull( $tokens->peek( $token ) );
+		$this->assertNull( $tokens->consume( $token ) );
+	}
+
+	/**
+	 * The unlock form answers at most the configured number of requests per
+	 * IP and hour; the next one is refused without looking anything up.
+	 */
+	public function test_unlock_requests_are_limited_per_ip(): void {
+		$service = Plugin::instance()->container()->get( \SentinelShield\Unlock\UnlockService::class );
+		$ask     = new \ReflectionMethod( $service, 'request_locked' );
+		$ask->setAccessible( true );
+		delete_site_transient( 'sentinel_shield_unlock_rl_' . md5( '203.0.113.31' ) );
+		for ( $i = 0; $i < 3; $i++ ) {
+			$this->assertSame( 'generic', $ask->invoke( $service, '203.0.113.31', 'nobody@example.org', 'generic' )['message'] );
+		}
+		$this->assertStringContainsString( 'Too many', $ask->invoke( $service, '203.0.113.31', 'nobody@example.org', 'generic' )['message'] );
+		$this->assertSame( 'generic', $ask->invoke( $service, '203.0.113.32', 'nobody@example.org', 'generic' )['message'], 'per IP' );
+	}
+
+	/**
+	 * Application passwords expire at their maximum age and retire when unused.
+	 */
+	public function test_application_password_age_limits(): void {
+		$settings = Plugin::instance()->container()->get( \SentinelShield\Settings::class );
+		update_site_option(
+			\SentinelShield\Settings::OPTION,
+			array(
+				'login' => array(
+					'app_password_max_days'    => 30,
+					'app_password_unused_days' => 10,
+				),
+			)
+		);
+		$settings->refresh();
+		$now    = 1800000000;
+		$status = static fn( int $created, int $used ): string => \SentinelShield\Login\AppPasswordPolicy::status(
+			array(
+				'created'   => $created,
+				'last_used' => $used,
+			),
+			$settings,
+			$now
+		);
+		try {
+			$this->assertSame( 'ok', $status( $now - 29 * DAY_IN_SECONDS, $now - 9 * DAY_IN_SECONDS ) );
+			$this->assertSame( 'expired', $status( $now - 31 * DAY_IN_SECONDS, $now ) );
+			$this->assertSame( 'unused', $status( $now - 20 * DAY_IN_SECONDS, $now - 11 * DAY_IN_SECONDS ) );
+			$this->assertSame( 'unused', $status( $now - 11 * DAY_IN_SECONDS, 0 ), 'never used: counted from its creation' );
+		} finally {
+			delete_site_option( \SentinelShield\Settings::OPTION );
+			$settings->refresh();
+		}
 	}
 }
