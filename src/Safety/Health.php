@@ -189,10 +189,19 @@ final class Health {
 			}
 			$add( 'early', __( 'Early firewall', 'sentinel-shield' ), '' === $issue ? 'ok' : 'warn', '' === $issue ? __( 'Running with a current snapshot.', 'sentinel-shield' ) : $issue );
 		}
+		$legacy = EarlyGate::legacy_state();
+		if ( ! empty( $legacy['failed'] ) ) {
+			/* translators: %s: file paths. */
+			$add( 'legacy', __( 'Old runtime files', 'sentinel-shield' ), 'bad', sprintf( __( 'Could not remove files left in the public uploads folder by version 0.8.0: %s. Delete them by hand.', 'sentinel-shield' ), implode( ', ', array_map( 'strval', (array) $legacy['failed'] ) ) ) );
+		}
+		$cf_state = CloudflareSync::state();
+		if ( ! empty( $cf_state['retired'] ) || ( ! $settings->get( 'cloudflare.sync', false ) && in_array( $cf_state['status'] ?? '', array( 'failed', 'unknown', 'applying' ), true ) ) ) {
+			$add( 'cloudflare_cleanup', __( 'Cloudflare cleanup', 'sentinel-shield' ), 'warn', __( 'A Cloudflare list is not confirmed empty yet; its blocks may still be active at Cloudflare. See Settings → Server & CDN.', 'sentinel-shield' ) );
+		}
 		if ( $settings->get( 'cloudflare.sync', false ) ) {
 			$cf     = CloudflareSync::state();
 			$status = (string) ( $cf['status'] ?? '' );
-			$fine   = 'active' === $status || ( 'applying' === $status && (int) ( $cf['time'] ?? 0 ) > time() - 10 * MINUTE_IN_SECONDS );
+			$fine   = in_array( $status, array( 'active', 'empty' ), true ) || ( 'applying' === $status && (int) ( $cf['time'] ?? 0 ) > time() - 10 * MINUTE_IN_SECONDS );
 			$add(
 				'cloudflare',
 				__( 'Cloudflare IP list', 'sentinel-shield' ),

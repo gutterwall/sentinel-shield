@@ -76,17 +76,27 @@ final class CloudflareSync {
 	}
 
 	/**
-	 * Stores the API token (encrypted), or removes it with ''.
+	 * Stores the API token (encrypted), or removes it with ''. Before the token
+	 * is removed, the list it manages is emptied: without the token, Sentinel
+	 * Shield could never empty it again.
 	 *
 	 * @param string $token Token.
+	 * @return true|string True, or why the token was kept.
 	 */
-	public function set_token( string $token ): void {
+	public function set_token( string $token ): bool|string {
 		$token = trim( $token );
-		if ( '' === $token ) {
-			delete_site_option( self::TOKEN );
-			return;
+		if ( '' !== $token ) {
+			update_site_option( self::TOKEN, $this->box->seal( $token ) );
+			return true;
 		}
-		update_site_option( self::TOKEN, $this->box->seal( $token ) );
+		if ( $this->manages_items() && '' !== $this->token() ) {
+			$this->clear_remote( __( 'API token removed', 'sentinel-shield' ), true );
+			if ( 'empty' !== ( self::state()['status'] ?? '' ) ) {
+				return __( 'The token was kept: the Cloudflare list it manages could not be confirmed empty, and without the token it could not be emptied later. Empty the list (or delete the WAF rule) in Cloudflare, or try again.', 'sentinel-shield' );
+			}
+		}
+		delete_site_option( self::TOKEN );
+		return true;
 	}
 
 	/**
@@ -139,6 +149,11 @@ final class CloudflareSync {
 	 * not enforce blocks), then follows Cloudflare's bulk operation until it
 	 * reports the list as updated.
 	 *
+	 * Uploading and emptying share one state: status is applying (sent, not yet
+	 * confirmed), active or empty (confirmed by Cloudflare), failed, or unknown
+	 * (never confirmed); failed and unknown are retried. A list the settings no
+	 * longer point at is emptied before it is forgotten (see retire()).
+	 *
 	 * Scheduled syncs skip the upload when Cloudflare already has the same list,
 	 * wait while its previous bulk operation is still running, and keep to one
 	 * upload per INTERVAL (an emptied policy is sent at once). $force (Sync now,
@@ -148,17 +163,29 @@ final class CloudflareSync {
 	 * @return array<string, mixed> The new state.
 	 */
 	public function sync( bool $force = false ): array {
+		$this->retry_retired();
 		if ( ! $this->enabled() ) {
+			// Switched off with items still there (an earlier clear failed): keep trying.
+			if ( $this->manages_items() && '' !== $this->token() && ! $this->settings->get( 'cloudflare.sync', false ) ) {
+				$this->clear_remote( __( 'sync switched off', 'sentinel-shield' ) );
+			}
 			return self::state();
 		}
-		$data  = $this->gate->compile();
+		$prior = self::state();
+		$dest  = $this->destination();
+		if ( ! empty( $prior['dest'] ) && $prior['dest'] !== $dest ) {
+			$this->retire( (array) $prior['dest'], $prior );
+			$prior = self::state();
+		}
+		$data  = $this->gate->published_policy() ?? $this->gate->compile();
 		$conv  = self::items( $data['blocked'], (string) $this->settings->get( 'cloudflare.ipv6', 'skip' ), $data['allow_set'] );
 		$gen   = (int) ( ( (array) get_site_option( EarlyGate::STATE, array() ) )['generation'] ?? 0 );
 		$hash  = md5( implode( ',', $conv['items'] ) );
-		$prior = self::state();
+		$empty = ! $conv['items'];
 		if ( ! $force ) {
 			$status = (string) ( $prior['status'] ?? '' );
-			if ( ( $prior['items'] ?? '' ) === $hash && in_array( $status, array( 'active', 'applying' ), true ) ) {
+			$same   = ( $prior['dest'] ?? null ) === $dest && ( $prior['items'] ?? '' ) === $hash;
+			if ( $same && in_array( $status, array( 'active', 'applying', 'empty' ), true ) ) {
 				// Same list already there (or on its way): nothing to upload.
 				$prior['generation'] = $gen;
 				update_site_option( self::STATE, $prior );
@@ -167,7 +194,7 @@ final class CloudflareSync {
 			$wait = 0;
 			if ( 'applying' === $status ) {
 				$wait = 30;
-			} elseif ( $conv['items'] && ! empty( $prior['ok'] ) && time() < (int) ( $prior['time'] ?? 0 ) + self::INTERVAL ) {
+			} elseif ( ! $empty && ! empty( $prior['ok'] ) && time() < (int) ( $prior['time'] ?? 0 ) + self::INTERVAL ) {
 				$wait = (int) $prior['time'] + self::INTERVAL - time();
 			}
 			if ( $wait > 0 ) {
@@ -177,107 +204,299 @@ final class CloudflareSync {
 				return $prior;
 			}
 		}
-		$items  = array_map(
-			static fn( string $ip ): array => array(
-				'ip'      => $ip,
-				'comment' => 'Sentinel Shield',
-			),
-			$conv['items']
-		);
-		$result = $this->request( 'PUT', '/items', $items );
-		$state  = array(
+		$sent  = $this->send( $dest, $conv['items'] );
+		$state = array(
 			'time'       => time(),
-			'ok'         => ! is_wp_error( $result ),
-			'count'      => count( $items ),
+			'ok'         => $sent['ok'],
+			'dest'       => $dest,
+			'want'       => $empty ? 'empty' : 'policy',
+			'count'      => count( $conv['items'] ),
 			'skipped'    => $conv['skipped'],
 			'expanded'   => $conv['expanded'],
 			'generation' => $gen,
-			'status'     => is_wp_error( $result ) ? 'failed' : 'applying',
-			'operation'  => is_wp_error( $result ) ? '' : (string) ( $result['result']['operation_id'] ?? '' ),
+			'status'     => $sent['status'],
+			'operation'  => $sent['operation'],
 			'checks'     => 0,
-			'items'      => is_wp_error( $result ) ? '' : $hash,
-			'error'      => is_wp_error( $result ) ? $result->get_error_message() : '',
+			'items'      => $sent['ok'] ? $hash : '',
+			'error'      => $sent['error'],
+			'retired'    => (array) ( $prior['retired'] ?? array() ),
 		);
-		if ( ! is_wp_error( $result ) && '' === $state['operation'] ) {
-			$state['status'] = 'active';
-		}
 		update_site_option( self::STATE, $state );
-		if ( 'applying' === $state['status'] ) {
-			wp_schedule_single_event( time() + 15, self::CHECK );
-		} elseif ( 'failed' === $state['status'] && ! wp_next_scheduled( self::CRON ) ) {
-			wp_schedule_single_event( time() + self::INTERVAL, self::CRON );
-		}
+		$this->follow_up( $state );
 		return $state;
 	}
 
 	/**
-	 * Asks Cloudflare whether the last bulk operation finished.
+	 * Asks Cloudflare whether pending bulk operations finished: the current
+	 * list's and those of lists being emptied before they are forgotten.
 	 *
 	 * @return array<string, mixed> The state afterwards.
 	 */
 	public function check_operation(): array {
 		$state = self::state();
-		if ( 'applying' !== ( $state['status'] ?? '' ) || '' === (string) ( $state['operation'] ?? '' ) ) {
-			return $state;
+		if ( 'applying' === ( $state['status'] ?? '' ) && '' !== (string) ( $state['operation'] ?? '' ) ) {
+			$state = array_merge( $state, $this->poll( $state, (string) ( $state['want'] ?? 'policy' ) ) );
 		}
-		$result = $this->request( 'GET', '', null, sprintf( self::BULK, rawurlencode( $this->account() ), rawurlencode( (string) $state['operation'] ) ) );
-		++$state['checks'];
-		$status = is_wp_error( $result ) ? '' : (string) ( $result['result']['status'] ?? '' );
-		if ( 'completed' === $status ) {
-			$state['status'] = 'active';
-		} elseif ( 'failed' === $status ) {
-			$state['status'] = 'failed';
-			$state['ok']     = false;
-			$state['error']  = (string) ( $result['result']['error'] ?? __( 'Cloudflare reported that the list update failed.', 'sentinel-shield' ) );
-		} elseif ( $state['checks'] >= 20 ) {
-			$state['status'] = 'unknown';
-			$state['error']  = is_wp_error( $result ) ? $result->get_error_message() : __( 'Cloudflare did not confirm the update in time.', 'sentinel-shield' );
-		} else {
-			wp_schedule_single_event( time() + 15, self::CHECK );
+		$retired = array();
+		foreach ( (array) ( $state['retired'] ?? array() ) as $old ) {
+			if ( 'applying' === ( $old['status'] ?? '' ) ) {
+				$old = array_merge( $old, $this->poll( $old, 'empty' ) );
+			}
+			if ( 'empty' !== ( $old['status'] ?? '' ) ) {
+				$retired[] = $old; // Confirmed empty lists are forgotten.
+			}
 		}
+		$state['retired'] = $retired;
 		update_site_option( self::STATE, $state );
+		$this->follow_up( $state );
 		return $state;
 	}
 
 	/**
-	 * Empties the Cloudflare list (sync switched off, plugin deactivated), so no
-	 * block stays active at the edge without Sentinel Shield managing it.
+	 * Empties the managed Cloudflare list (sync switched off, token removed,
+	 * plugin deactivated), so no block stays active at the edge without
+	 * Sentinel Shield managing it. The list counts as empty only once
+	 * Cloudflare confirms the bulk operation; with $wait, Cloudflare is asked a
+	 * few times right away (for deactivation, after which nothing can ask).
 	 *
 	 * @param string $reason Why, for the state.
-	 * @return bool Whether the list is known to be empty now.
+	 * @param bool   $wait   Wait briefly for Cloudflare's confirmation.
+	 * @return bool Whether the list is confirmed empty now.
 	 */
-	public function clear_remote( string $reason ): bool {
+	public function clear_remote( string $reason, bool $wait = false ): bool {
 		$state = self::state();
-		if ( '' === $this->token() || '' === $this->account() || '' === $this->list() || ( empty( $state['count'] ) && 'failed' !== ( $state['status'] ?? '' ) ) ) {
-			return true;
+		$dest  = ! empty( $state['dest'] ) ? (array) $state['dest'] : $this->destination();
+		if ( '' === $this->token() || '' === (string) ( $dest['account'] ?? '' ) || '' === (string) ( $dest['list'] ?? '' ) || ! $this->manages_items() ) {
+			return ! $this->manages_items();
 		}
-		$result = $this->request( 'PUT', '/items', array() );
-		update_site_option(
-			self::STATE,
+		$sent  = $this->send( $dest, array() );
+		$state = array_merge(
+			$state,
 			array(
-				'time'       => time(),
-				'ok'         => ! is_wp_error( $result ),
-				'count'      => is_wp_error( $result ) ? (int) ( $state['count'] ?? 0 ) : 0,
-				'generation' => (int) ( $state['generation'] ?? 0 ),
-				'status'     => is_wp_error( $result ) ? 'failed' : 'cleared',
-				'operation'  => is_wp_error( $result ) ? '' : (string) ( $result['result']['operation_id'] ?? '' ),
-				'checks'     => 0,
+				'time'      => time(),
+				'ok'        => $sent['ok'],
+				'dest'      => $dest,
+				'want'      => 'empty',
+				'status'    => $sent['status'],
+				'operation' => $sent['operation'],
+				'checks'    => 0,
+				'items'     => $sent['ok'] ? md5( '' ) : (string) ( $state['items'] ?? '' ),
+				'reason'    => $reason,
 				/* translators: 1: reason, 2: error. */
-				'error'      => is_wp_error( $result ) ? sprintf( __( 'Could not empty the Cloudflare list (%1$s): %2$s. Its rules are still active at Cloudflare; empty the list or delete the WAF rule there.', 'sentinel-shield' ), $reason, $result->get_error_message() ) : '',
-				'reason'     => $reason,
+				'error'     => $sent['ok'] ? '' : sprintf( __( 'Could not empty the Cloudflare list (%1$s): %2$s. Its rules are still active at Cloudflare; empty the list or delete the WAF rule there.', 'sentinel-shield' ), $reason, $sent['error'] ),
 			)
 		);
-		return ! is_wp_error( $result );
+		if ( $sent['ok'] ) {
+			$state['count'] = 0;
+		}
+		update_site_option( self::STATE, $state );
+		if ( $wait ) {
+			/**
+			 * Seconds between confirmation checks while waiting (deactivation).
+			 *
+			 * @param int $delay Seconds.
+			 */
+			$delay = max( 0, (int) apply_filters( 'sentinel_shield_cloudflare_poll_delay', 2 ) );
+			for ( $i = 0; $i < 5; $i++ ) {
+				if ( 'applying' !== ( self::state()['status'] ?? '' ) ) {
+					break;
+				}
+				if ( $delay ) {
+					sleep( $delay );
+				}
+				$this->check_operation();
+			}
+			return 'empty' === ( self::state()['status'] ?? '' );
+		}
+		$this->follow_up( $state );
+		return 'empty' === $state['status'];
 	}
 
 	/**
-	 * After settings are saved: sync switched off empties the list.
+	 * After settings are saved: sync switched off empties the list; a new
+	 * account or list is synced soon (the old list is emptied first).
 	 */
 	public function settings_saved(): void {
 		$this->settings->refresh();
 		if ( ! $this->settings->get( 'cloudflare.sync', false ) ) {
 			$this->clear_remote( __( 'sync switched off', 'sentinel-shield' ) );
+			return;
 		}
+		$dest = self::state()['dest'] ?? null;
+		if ( $this->enabled() && null !== $dest && $dest !== $this->destination() ) {
+			wp_clear_scheduled_hook( self::CRON );
+			wp_schedule_single_event( time() + 5, self::CRON );
+		}
+	}
+
+	/**
+	 * Whether the managed list may still hold items: anything except a list
+	 * confirmed empty, or one confirmed active with no items.
+	 */
+	public function manages_items(): bool {
+		$state = self::state();
+		return match ( (string) ( $state['status'] ?? '' ) ) {
+			'', 'empty', 'cleared' => false,
+			'active'               => ! empty( $state['count'] ),
+			default                => true, // applying, failed, unknown: the remote list may hold items.
+		};
+	}
+
+	/**
+	 * Empties a list the settings no longer point at, and remembers it until
+	 * Cloudflare confirms it is empty (or keeps retrying).
+	 *
+	 * @param array<string, string> $dest  account, list.
+	 * @param array<string, mixed>  $prior The state that belonged to it.
+	 */
+	private function retire( array $dest, array $prior ): void {
+		$retired = (array) ( $prior['retired'] ?? array() );
+		if ( ! empty( $prior['count'] ) || 'empty' !== ( $prior['status'] ?? '' ) ) {
+			$sent      = $this->send( $dest, array() );
+			$retired[] = array(
+				'account'   => (string) ( $dest['account'] ?? '' ),
+				'list'      => (string) ( $dest['list'] ?? '' ),
+				'status'    => $sent['status'],
+				'operation' => $sent['operation'],
+				'checks'    => 0,
+				'time'      => time(),
+				'error'     => $sent['error'],
+			);
+		}
+		update_site_option(
+			self::STATE,
+			array(
+				'retired' => array_values( array_filter( $retired, static fn( array $r ): bool => 'empty' !== ( $r['status'] ?? '' ) ) ),
+			)
+		);
+	}
+
+	/**
+	 * Sends the empty list again to retired lists whose emptying failed or was
+	 * never confirmed.
+	 */
+	private function retry_retired(): void {
+		$state   = self::state();
+		$changed = false;
+		foreach ( (array) ( $state['retired'] ?? array() ) as $i => $old ) {
+			if ( in_array( $old['status'] ?? '', array( 'failed', 'unknown' ), true ) && time() >= (int) ( $old['time'] ?? 0 ) + self::INTERVAL ) {
+				$sent                   = $this->send( $old, array() );
+				$state['retired'][ $i ] = array_merge(
+					$old,
+					array_intersect_key( $sent, array_flip( array( 'status', 'operation', 'error' ) ) ),
+					array(
+						'checks' => 0,
+						'time'   => time(),
+					)
+				);
+				$changed                = true;
+			}
+		}
+		if ( $changed ) {
+			$state['retired'] = array_values( array_filter( (array) $state['retired'], static fn( array $r ): bool => 'empty' !== ( $r['status'] ?? '' ) ) );
+			update_site_option( self::STATE, $state );
+			$this->follow_up( $state );
+		}
+	}
+
+	/**
+	 * Replaces a list's items.
+	 *
+	 * @param array<string, string> $dest  account, list.
+	 * @param list<string>          $items Items.
+	 * @return array{ok:bool, status:string, operation:string, error:string}
+	 */
+	private function send( array $dest, array $items ): array {
+		$body   = array_map(
+			static fn( string $ip ): array => array(
+				'ip'      => $ip,
+				'comment' => 'Sentinel Shield',
+			),
+			$items
+		);
+		$result = $this->request( 'PUT', '/items', $body, '', $dest );
+		if ( is_wp_error( $result ) ) {
+			return array(
+				'ok'        => false,
+				'status'    => 'failed',
+				'operation' => '',
+				'error'     => $result->get_error_message(),
+			);
+		}
+		$operation = (string) ( $result['result']['operation_id'] ?? '' );
+		return array(
+			'ok'        => true,
+			// Without an operation ID Cloudflare applied the change synchronously.
+			'status'    => '' !== $operation ? 'applying' : ( $items ? 'active' : 'empty' ),
+			'operation' => $operation,
+			'error'     => '',
+		);
+	}
+
+	/**
+	 * Asks Cloudflare about one bulk operation.
+	 *
+	 * @param array<string, mixed> $entry State (or retired entry) with operation and checks.
+	 * @param string               $want  policy or empty.
+	 * @return array<string, mixed> Changed fields.
+	 */
+	private function poll( array $entry, string $want ): array {
+		$account = (string) ( $entry['dest']['account'] ?? $entry['account'] ?? $this->account() );
+		$result  = $this->request( 'GET', '', null, sprintf( self::BULK, rawurlencode( $account ), rawurlencode( (string) $entry['operation'] ) ) );
+		$checks  = (int) ( $entry['checks'] ?? 0 ) + 1;
+		$status  = is_wp_error( $result ) ? '' : (string) ( $result['result']['status'] ?? '' );
+		if ( 'completed' === $status ) {
+			return array(
+				'checks' => $checks,
+				'status' => 'empty' === $want ? 'empty' : 'active',
+				'error'  => '',
+			);
+		}
+		if ( 'failed' === $status ) {
+			return array(
+				'checks' => $checks,
+				'status' => 'failed',
+				'ok'     => false,
+				'error'  => (string) ( $result['result']['error'] ?? __( 'Cloudflare reported that the list update failed.', 'sentinel-shield' ) ),
+			);
+		}
+		if ( $checks >= 20 ) {
+			return array(
+				'checks' => $checks,
+				'status' => 'unknown',
+				'error'  => is_wp_error( $result ) ? $result->get_error_message() : __( 'Cloudflare did not confirm the update in time.', 'sentinel-shield' ),
+			);
+		}
+		return array( 'checks' => $checks );
+	}
+
+	/**
+	 * Schedules what a state needs next: a confirmation check while anything
+	 * is applying, a retry after INTERVAL when something failed or was never
+	 * confirmed.
+	 *
+	 * @param array<string, mixed> $state State.
+	 */
+	private function follow_up( array $state ): void {
+		$statuses = array_merge( array( (string) ( $state['status'] ?? '' ) ), array_map( static fn( $r ): string => (string) ( $r['status'] ?? '' ), (array) ( $state['retired'] ?? array() ) ) );
+		if ( in_array( 'applying', $statuses, true ) && ! wp_next_scheduled( self::CHECK ) ) {
+			wp_schedule_single_event( time() + 15, self::CHECK );
+		}
+		if ( array_intersect( array( 'failed', 'unknown' ), $statuses ) && ! wp_next_scheduled( self::CRON ) ) {
+			wp_schedule_single_event( time() + self::INTERVAL, self::CRON );
+		}
+	}
+
+	/**
+	 * The list the settings point at.
+	 *
+	 * @return array{account:string, list:string}
+	 */
+	private function destination(): array {
+		return array(
+			'account' => $this->account(),
+			'list'    => $this->list(),
+		);
 	}
 
 	/**
@@ -335,14 +554,17 @@ final class CloudflareSync {
 	/**
 	 * Calls the Cloudflare API.
 	 *
-	 * @param string            $method HTTP method.
-	 * @param string            $path   Path after the list URL.
-	 * @param array<int, mixed> $body  JSON body.
-	 * @param string            $url   Full URL instead of the list URL.
+	 * @param string                     $method HTTP method.
+	 * @param string                     $path   Path after the list URL.
+	 * @param array<int, mixed>|null     $body   JSON body.
+	 * @param string                     $url    Full URL instead of the list URL.
+	 * @param array<string, string>|null $dest   account, list (default: the settings).
 	 * @return array<string, mixed>|\WP_Error
 	 */
-	private function request( string $method, string $path, ?array $body = null, string $url = '' ): array|\WP_Error {
-		if ( '' === $this->account() || '' === $this->list() || '' === $this->token() ) {
+	private function request( string $method, string $path, ?array $body = null, string $url = '', ?array $dest = null ): array|\WP_Error {
+		$account = (string) ( $dest['account'] ?? $this->account() );
+		$list    = (string) ( $dest['list'] ?? $this->list() );
+		if ( '' === $account || ( '' === $list && '' === $url ) || '' === $this->token() ) {
 			return new \WP_Error( 'sentinel_shield_cf_config', __( 'Enter the account ID, the list ID and an API token first.', 'sentinel-shield' ) );
 		}
 		$args = array(
@@ -356,7 +578,7 @@ final class CloudflareSync {
 		if ( null !== $body ) {
 			$args['body'] = (string) wp_json_encode( $body );
 		}
-		$response = wp_remote_request( '' !== $url ? $url : sprintf( self::API, rawurlencode( $this->account() ), rawurlencode( $this->list() ) ) . $path, $args );
+		$response = wp_remote_request( '' !== $url ? $url : sprintf( self::API, rawurlencode( $account ), rawurlencode( $list ) ) . $path, $args );
 		if ( is_wp_error( $response ) ) {
 			return $response;
 		}

@@ -386,6 +386,58 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 	}
 
 	/**
+	 * Review 4 finding 4: identity confirmation runs under the account's
+	 * two-factor lock and re-reads the failure count after taking it.
+	 */
+	public function test_identity_confirmation_is_serialized_per_account(): void {
+		$user = self::factory()->user->create_and_get( array( 'user_pass' => 'right-pass' ) );
+		wp_set_current_user( $user->ID );
+		$page    = new \SentinelShield\Admin\TwoFactorPage( Plugin::instance()->container() );
+		$confirm = new \ReflectionMethod( $page, 'confirm_identity' );
+		$confirm->setAccessible( true );
+		$try    = static function ( array $post ) use ( $confirm, $page, $user ): bool {
+			$_POST = $post;
+			try {
+				return (bool) $confirm->invoke( $page, get_userdata( $user->ID ) );
+			} finally {
+				$_POST = array();
+			}
+		};
+		$failed = 0;
+		$count  = static function () use ( &$failed ): void {
+			++$failed;
+		};
+		add_action( 'wp_login_failed', $count );
+		$other = self::other_connection();
+		$lock  = self::lock_name( \SentinelShield\TwoFactor\TwoFactorLogin::lock_name( $user->ID ) );
+		try {
+			// Another request holds the account lock: this one waits, then gives up without counting anything.
+			$this->assertSame( '1', (string) $other->get_var( $other->prepare( 'SELECT GET_LOCK(%s, 0)', $lock ) ) );
+			$this->assertFalse( $try( array( 'password' => 'wrong' ) ) );
+			$this->assertSame( '', get_user_meta( $user->ID, UserTwoFactor::META . 'reauth_fails', true ), 'nothing recorded while busy' );
+			$this->assertSame( 0, $failed );
+			$other->query( $other->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
+
+			// Failures written by a parallel request (this request's cache still says none) are seen after the lock is taken.
+			$this->assertSame( '', get_user_meta( $user->ID, UserTwoFactor::META . 'reauth_fails', true ) );
+			$GLOBALS['wpdb']->insert(
+				$GLOBALS['wpdb']->usermeta,
+				array(
+					'user_id'    => $user->ID,
+					'meta_key'   => UserTwoFactor::META . 'reauth_fails', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key
+					'meta_value' => maybe_serialize( array_fill( 0, 5, time() ) ), // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value
+				)
+			);
+			$this->assertFalse( $try( array( 'password' => 'right-pass' ) ), 'limited by failures the cache did not show' );
+		} finally {
+			$other->query( $other->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
+			$other->close();
+			remove_action( 'wp_login_failed', $count );
+			wp_set_current_user( 0 );
+		}
+	}
+
+	/**
 	 * Concurrency in the brute-force limits: while another login from the same
 	 * IP is in progress, a parallel one is refused (not counted) instead of
 	 * slipping past the limit check.

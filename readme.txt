@@ -4,7 +4,7 @@ Tags: security, firewall, two-factor, brute force, login
 Requires at least: 6.4
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.8.1
+Stable tag: 0.8.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -77,7 +77,7 @@ Nothing below is contacted unless stated as a default or you switch it on.
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.8.1.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.8.2.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
@@ -199,12 +199,22 @@ No. Test mode only records what would have been blocked. Use it to validate sett
 
 == Changelog ==
 
+= 0.8.2 =
+Fixes from a fourth code review of the new enforcement layers:
+* Private folder: a folder counts as private only on positive evidence. Outside the document root (now remembered from web requests, so WP-CLI and cron use it too), or inside it with a test file refused while a control file in uploads is served, over a verified TLS connection; that HTTP evidence is re-checked daily. A folder whose URL could not be worked out was wrongly approved before; it is now "not confirmed", and so is a challenge page that refuses everything.
+* Upgrading removes what 0.8.0 left in the public uploads folder: the snapshot, range files and block log are deleted, and the old server files are replaced with stubs that block nothing, so existing include lines keep working until you change them. Files that cannot be removed are reported on the Server & CDN tab and the health card, and removal is retried hourly.
+* Cloudflare: uploading and emptying share one state (applying, then confirmed active or empty, or failed or unknown and retried). A list counts as emptied only once Cloudflare confirms it. Removing the API token empties its list first (the token is kept if that cannot be confirmed), a list the settings no longer point at is emptied and tracked until confirmed, and deactivation waits a few seconds for Cloudflare and emails the site admin how to finish by hand if it does not confirm. Cloudflare mirrors the published policy generation.
+* Identity confirmation on the two-factor page runs under the account's two-factor lock and re-reads stored values after taking it, so parallel requests cannot share the failure budget or reuse a code, backup code or passkey challenge.
+* Each early firewall generation is published as a whole: range files with names unique to the build, every write checked, then one atomic switch of gate.json. A failed build keeps the previous generation and is retried after five minutes. Server file writes are checked too.
+* Expiry is described as it is: WordPress applies it immediately, other layers eventually (WP-Cron can run late, Cloudflare confirms asynchronously, web servers need a reload). The snapshot no longer lives at least a minute longer than the rule that expires first. The Server & CDN tab shows per layer which policy generation is wanted, published and confirmed.
+* Performance: range subtraction is a single sweep (20,000 blocked ranges minus 10,000 allowed addresses: 0.03 s instead of 22 s); rebuilds during a burst of lockouts are published at most every 10 seconds; undelivered audit events are kept through retention pruning (up to 90 days, with gaps counted) and the age of the oldest waiting event is shown. bin/bench-early-gate.php measures the early firewall: with 50,000 or 500,000 blocked ranges its throughput stayed within measurement noise of a one-line PHP page, both when letting requests through and when refusing a flood.
+
 = 0.8.1 =
 Stabilization release from a third code review:
 * One policy everywhere: the early firewall, the nginx and Apache files and the Cloudflare list now block exactly what WordPress blocks, the enforced block rules minus the allowlist and this server's addresses (ranges are split around allowed addresses). Before, an allowlisted IP inside a blocked range was refused by the server files and Cloudflare. Each change gets a generation number shown on the Server & CDN tab.
 * Switching off works on every layer: with protection or the IP gate off, every layer gets an empty policy; turning Cloudflare sync off or deactivating the plugin empties the Cloudflare list (with a warning if that fails); deactivation removes the must-use loader and the snapshot and empties the server files.
 * Private folder: the snapshot (which contains allowlisted addresses), the block log and the server files moved out of uploads to a folder outside the web root (sentinel-shield-data, or SENTINEL_SHIELD_DATA_DIR). Nothing is written until the folder is confirmed private; .htaccess rules are not relied on, so nginx sites are covered.
-* Short lockouts end on time everywhere: the policy is rebuilt when the next temporary rule expires, not only hourly.
+* Short lockouts reach the other layers sooner: the policy is rebuilt when the next temporary rule expires, not only hourly.
 * Cloudflare: the list is shown as active only after Cloudflare confirms its bulk operation; uploads happen at most every five minutes and only when the list changed; single IPv6 addresses are left out by default (new IPv6 setting) and never widened over an allowlisted address. Cloudflare's own address ranges now come from its API.
 * Identity confirmation for two-factor changes needs the second factor (passkey, or password plus an app or backup code) and is limited to five tries in 15 minutes; failures count toward the login limits.
 * Fallback lock rows record their owner, so a slow process can no longer release a lock another process took over; long jobs renew their lock.
@@ -279,6 +289,9 @@ Security fixes from a code review:
 * Phase 1: core framework, client IP detection, IP rules, lockout engine, lockout safety, test mode tooling, events, WP-CLI.
 
 == Upgrade Notice ==
+
+= 0.8.2 =
+Deletes 0.8.0 runtime files left in public uploads, confirms Cloudflare cleanup before reporting it, and approves a private folder only on positive evidence. If you included the old uploads server files in nginx or Apache, switch to the new path shown on Server & CDN.
 
 = 0.8.1 =
 Fixes allowlist precedence at the web server and Cloudflare, empties external blocklists when protection is off, and moves runtime files to a private folder outside the web root. If the Server & CDN tab reports a folder problem, set SENTINEL_SHIELD_DATA_DIR.

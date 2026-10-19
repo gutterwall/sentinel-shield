@@ -501,10 +501,14 @@ final class Actions {
 				$back .= '#ss-private';
 				break;
 			case 'cf_token':
-				$token = isset( $_POST['token'] ) ? sanitize_text_field( wp_unslash( $_POST['token'] ) ) : '';
-				$cloudflare->set_token( $token );
-				$this->audit( '' === $token ? 'cloudflare_token_removed' : 'cloudflare_token_saved' );
-				View::flash( 'success', '' === $token ? __( 'Cloudflare token removed.', 'sentinel-shield' ) : __( 'Cloudflare token saved.', 'sentinel-shield' ) );
+				$token  = isset( $_POST['token'] ) ? sanitize_text_field( wp_unslash( $_POST['token'] ) ) : '';
+				$result = $cloudflare->set_token( $token );
+				if ( true !== $result ) {
+					View::flash( 'error', (string) $result );
+				} else {
+					$this->audit( '' === $token ? 'cloudflare_token_removed' : 'cloudflare_token_saved' );
+					View::flash( 'success', '' === $token ? __( 'Cloudflare token removed.', 'sentinel-shield' ) : __( 'Cloudflare token saved.', 'sentinel-shield' ) );
+				}
 				$back .= '#ss-cloudflare';
 				break;
 			case 'cf_test':

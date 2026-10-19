@@ -165,12 +165,31 @@ final class EventRepository {
 	}
 
 	/**
-	 * Deletes events older than N days.
+	 * Deletes events older than N days. Events after $keep_after (not yet
+	 * delivered to the remote audit log) are kept, up to $hard_days.
 	 *
-	 * @param int $days Retention.
+	 * @param int      $days       Retention.
+	 * @param int|null $keep_after Last delivered event ID, or null to keep nothing extra.
+	 * @param int      $hard_days  Undelivered events are kept at most this long.
 	 * @return int Rows deleted.
 	 */
-	public function prune( int $days ): int {
-		return Batch::delete( $this->db, $this->db->prepare( 'DELETE FROM %i WHERE created_at < %s', $this->table(), gmdate( 'Y-m-d H:i:s', time() - ( max( 1, $days ) * DAY_IN_SECONDS ) ) ) );
+	public function prune( int $days, ?int $keep_after = null, int $hard_days = 90 ): int {
+		$cutoff = gmdate( 'Y-m-d H:i:s', time() - ( max( 1, $days ) * DAY_IN_SECONDS ) );
+		if ( null === $keep_after ) {
+			return Batch::delete( $this->db, $this->db->prepare( 'DELETE FROM %i WHERE created_at < %s', $this->table(), $cutoff ) );
+		}
+		$hard = gmdate( 'Y-m-d H:i:s', time() - ( max( $days, $hard_days ) * DAY_IN_SECONDS ) );
+		return Batch::delete( $this->db, $this->db->prepare( 'DELETE FROM %i WHERE created_at < %s AND ( id <= %d OR created_at < %s )', $this->table(), $cutoff, $keep_after, $hard ) );
+	}
+
+	/**
+	 * Number of events after an ID that are older than N days (about to be
+	 * pruned although never delivered).
+	 *
+	 * @param int $after ID.
+	 * @param int $days  Age.
+	 */
+	public function count_undelivered_older( int $after, int $days ): int {
+		return (int) $this->db->get_var( $this->db->prepare( 'SELECT COUNT(*) FROM %i WHERE id > %d AND created_at < %s', $this->table(), $after, gmdate( 'Y-m-d H:i:s', time() - $days * DAY_IN_SECONDS ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Live count.
 	}
 }

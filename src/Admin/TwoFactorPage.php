@@ -19,6 +19,7 @@ use SentinelShield\TwoFactor\QrCode;
 use SentinelShield\TwoFactor\Totp;
 use SentinelShield\TwoFactor\TwoFactorLogin;
 use SentinelShield\TwoFactor\UserTwoFactor;
+use SentinelShield\Support\Mutex;
 use SentinelShield\TwoFactor\WebAuthn;
 
 defined( 'ABSPATH' ) || exit;
@@ -499,14 +500,52 @@ final class TwoFactorPage {
 	 * @param \WP_User $user Current user.
 	 */
 	private function confirm_identity( \WP_User $user ): bool {
-		// phpcs:disable WordPress.Security.NonceVerification.Missing -- handle() checked the nonce.
-		$id    = (int) $user->ID;
-		$fails = $this->reauth_failures( $id );
-		if ( count( $fails ) >= self::REAUTH_MAX ) {
-			View::flash( 'error', __( 'Too many failed confirmations. Wait 15 minutes and try again.', 'sentinel-shield' ) );
-			return false;
+		$id = (int) $user->ID;
+		// The whole check runs under the account's two-factor lock, like code
+		// checks at login: parallel requests cannot share the failure budget,
+		// reuse a code or a backup code, or use one passkey challenge twice.
+		$result = Mutex::run(
+			TwoFactorLogin::lock_name( $id ),
+			TwoFactorLogin::LOCK_WAIT,
+			function () use ( $user, $id ): string {
+				wp_cache_delete( $id, 'user_meta' );
+				$fails = $this->reauth_failures( $id );
+				if ( count( $fails ) >= self::REAUTH_MAX ) {
+					return 'limited';
+				}
+				if ( $this->check_identity( $user ) ) {
+					delete_user_meta( $id, UserTwoFactor::META . 'reauth_fails' );
+					$this->users()->confirm( $id, (string) wp_get_session_token(), time() );
+					return 'ok';
+				}
+				$fails[] = time();
+				update_user_meta( $id, UserTwoFactor::META . 'reauth_fails', $fails );
+				return 'failed';
+			},
+			'busy'
+		);
+		if ( 'ok' === $result ) {
+			return true;
 		}
-		$ok = false;
+		if ( 'limited' === $result ) {
+			View::flash( 'error', __( 'Too many failed confirmations. Wait 15 minutes and try again.', 'sentinel-shield' ) );
+		} elseif ( 'busy' === $result ) {
+			View::flash( 'error', __( 'The site is busy. Please try again.', 'sentinel-shield' ) );
+		} else {
+			// A wrong confirmation counts like a wrong login (IP and account limits).
+			do_action( 'wp_login_failed', $user->user_login, new \WP_Error( 'sentinel_shield_reauth_failed', __( 'Wrong confirmation on the two-factor settings page.', 'sentinel-shield' ) ) ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core hook.
+		}
+		return false;
+	}
+
+	/**
+	 * Checks the submitted passkey, or password plus code (caller holds the lock).
+	 *
+	 * @param \WP_User $user Current user.
+	 */
+	private function check_identity( \WP_User $user ): bool {
+		// phpcs:disable WordPress.Security.NonceVerification.Missing -- handle() checked the nonce.
+		$id = (int) $user->ID;
 		if ( ! empty( $_POST['passkey'] ) ) {
 			// A passkey checks possession and the user (fingerprint, face or PIN) at once.
 			$stored = get_user_meta( $id, UserTwoFactor::META . 'reauth_challenge', true );
@@ -515,34 +554,27 @@ final class TwoFactorPage {
 			$data      = json_decode( (string) wp_unslash( $_POST['passkey'] ), true ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- JSON checked by WebAuthn verification.
 			$keys      = $this->users()->passkeys( $id );
 			$cred      = is_array( $data ) ? (string) ( $data['id'] ?? '' ) : '';
-			if ( '' !== $challenge && isset( $keys[ $cred ] ) ) {
-				try {
-					$count = WebAuthn::for_site()->verify_assertion( $keys[ $cred ], WebAuthn::unb64u( (string) ( $data['client'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['auth'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['signature'] ?? '' ) ), $challenge );
-					$this->users()->touch_passkey( $id, $cred, $count, time() );
-					$ok = true;
-				} catch ( \RuntimeException $e ) {
-					$ok = false;
-				}
+			if ( '' === $challenge || ! isset( $keys[ $cred ] ) ) {
+				return false;
 			}
-		} elseif ( ! empty( $_POST['password'] ) ) {
-			$ok = wp_check_password( (string) wp_unslash( $_POST['password'] ), $user->user_pass, $id ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Compared, never stored.
-			// Accounts with an app or backup codes also confirm the second factor.
-			if ( $ok && $this->needs_code( $id ) ) {
-				$code = isset( $_POST['code'] ) ? sanitize_text_field( wp_unslash( $_POST['code'] ) ) : '';
-				$ok   = $this->users()->verify_totp( $id, (string) preg_replace( '/\s+/', '', $code ), time() ) || $this->users()->use_backup_code( $id, $code );
+			try {
+				$count = WebAuthn::for_site()->verify_assertion( $keys[ $cred ], WebAuthn::unb64u( (string) ( $data['client'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['auth'] ?? '' ) ), WebAuthn::unb64u( (string) ( $data['signature'] ?? '' ) ), $challenge );
+			} catch ( \RuntimeException $e ) {
+				return false;
 			}
-		}
-		// phpcs:enable
-		if ( $ok ) {
-			delete_user_meta( $id, UserTwoFactor::META . 'reauth_fails' );
-			$this->users()->confirm( $id, (string) wp_get_session_token(), time() );
+			$this->users()->touch_passkey( $id, $cred, $count, time() );
 			return true;
 		}
-		$fails[] = time();
-		update_user_meta( $id, UserTwoFactor::META . 'reauth_fails', $fails );
-		// A wrong confirmation counts like a wrong login (IP and account limits).
-		do_action( 'wp_login_failed', $user->user_login, new \WP_Error( 'sentinel_shield_reauth_failed', __( 'Wrong confirmation on the two-factor settings page.', 'sentinel-shield' ) ) ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core hook.
-		return false;
+		if ( empty( $_POST['password'] ) || ! wp_check_password( (string) wp_unslash( $_POST['password'] ), $user->user_pass, $id ) ) { // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- Compared, never stored.
+			return false;
+		}
+		// Accounts with an app or backup codes also confirm the second factor.
+		if ( ! $this->needs_code( $id ) ) {
+			return true;
+		}
+		$code = isset( $_POST['code'] ) ? sanitize_text_field( wp_unslash( $_POST['code'] ) ) : '';
+		// phpcs:enable
+		return $this->users()->verify_totp( $id, (string) preg_replace( '/\s+/', '', $code ), time() ) || $this->users()->use_backup_code( $id, $code );
 	}
 
 	/**

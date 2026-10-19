@@ -19,6 +19,9 @@ use SentinelShield\Net\RangeMath;
 use SentinelShield\Net\IpRangeSet;
 use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Net\Cidr;
+use SentinelShield\Geo\GeoUpdater;
+use SentinelShield\Firewall\FeedSnapshot;
+use SentinelShield\Install\Installer;
 use SentinelShield\Plugin;
 use SentinelShield\Repository\BlockRepository;
 use SentinelShield\Repository\EventRepository;
@@ -50,6 +53,8 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 		parent::set_up();
 		$this->data = sys_get_temp_dir() . '/ss-data-' . wp_generate_password( 6, false );
 		add_filter( 'sentinel_shield_data_dir', array( $this, 'private_dir' ) );
+		// The private folder (in the system temp dir) is outside this document root.
+		$_SERVER['DOCUMENT_ROOT'] = ABSPATH;
 		DataDir::recheck();
 		global $wpdb;
 		$c = Plugin::instance()->container();
@@ -73,7 +78,9 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 		array_map( 'unlink', (array) glob( $this->data . '/*' ) );
 		@rmdir( $this->data ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 		remove_filter( 'sentinel_shield_data_dir', array( $this, 'private_dir' ) );
+		unset( $_SERVER['DOCUMENT_ROOT'] );
 		delete_site_option( DataDir::OPTION );
+		delete_site_option( DataDir::ROOT );
 		delete_site_option( Settings::OPTION );
 		delete_site_option( CloudflareSync::TOKEN );
 		delete_site_option( CloudflareSync::STATE );
@@ -477,13 +484,336 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 			$this->assertFalse( $sync->clear_remote( 'test' ) );
 			$this->assertStringContainsString( 'still active at Cloudflare', CloudflareSync::state()['error'] );
 			$this->cf_fail = false;
-			$this->assertTrue( $sync->clear_remote( 'test' ) );
-			$this->assertSame( 'cleared', CloudflareSync::state()['status'] );
+			$this->cf_status = 'running';
+			$this->assertFalse( $sync->clear_remote( 'test' ), 'accepted is not yet confirmed empty' );
+			$this->assertSame( 'applying', CloudflareSync::state()['status'] );
+			$this->assertTrue( $sync->manages_items() );
+			$this->cf_status = 'completed';
+			$this->assertSame( 'empty', $sync->check_operation()['status'] );
+			$this->assertFalse( $sync->manages_items() );
 
 			$test = $sync->test();
 			$this->assertTrue( $test['ok'] );
 		} finally {
 			remove_filter( 'pre_http_request', array( $this, 'fake_cloudflare' ), 10 );
 		}
+	}
+
+	/**
+	 * Sets up Cloudflare sync with a token and one blocked range.
+	 */
+	private function cloudflare( string $list = '' ): CloudflareSync {
+		Plugin::instance()->container()->get( BlockRepository::class )->add( 'block', Cidr::parse( '203.0.113.0/30' ), 'manual', 'manual' );
+		$this->gate(
+			array(
+				'cloudflare' => array(
+					'sync'       => true,
+					'account_id' => str_repeat( 'a', 32 ),
+					'list_id'    => '' !== $list ? $list : str_repeat( 'b', 32 ),
+				),
+			)
+		);
+		$sync = Plugin::instance()->container()->get( CloudflareSync::class );
+		$sync->set_token( 'secret-token' );
+		return $sync;
+	}
+
+	public function test_cloudflare_cleanup_accepted_but_later_failed_is_retried(): void {
+		$sync = $this->cloudflare();
+		add_filter( 'pre_http_request', array( $this, 'fake_cloudflare' ), 10, 3 );
+		try {
+			$sync->sync( true );
+			$this->cf_status = 'completed';
+			$sync->check_operation();
+			$this->cf_status = 'running';
+			$this->assertFalse( $sync->clear_remote( 'test' ) );
+			$this->cf_status = 'failed';
+			$state = $sync->check_operation();
+			$this->assertSame( 'failed', $state['status'], 'a failed bulk operation is not reported as emptied' );
+			$this->assertTrue( $sync->manages_items() );
+			$this->assertNotFalse( wp_next_scheduled( CloudflareSync::CRON ), 'a retry is scheduled' );
+			// The retry (sync switched off) sends the empty list again.
+			$this->gate( array( 'cloudflare' => array( 'sync' => false, 'account_id' => str_repeat( 'a', 32 ), 'list_id' => str_repeat( 'b', 32 ) ) ) );
+			$calls           = count( $this->cf_calls );
+			$this->cf_status = 'completed';
+			$sync->sync();
+			$this->assertGreaterThan( $calls, count( $this->cf_calls ) );
+			$this->assertSame( array(), json_decode( end( $this->cf_calls )[1]['body'], true ) );
+			$this->assertSame( 'empty', $sync->check_operation()['status'] );
+		} finally {
+			remove_filter( 'pre_http_request', array( $this, 'fake_cloudflare' ), 10 );
+			wp_clear_scheduled_hook( CloudflareSync::CRON );
+			wp_clear_scheduled_hook( CloudflareSync::CHECK );
+		}
+	}
+
+	public function test_cloudflare_token_removal_and_list_change_empty_the_old_list_first(): void {
+		$sync = $this->cloudflare();
+		add_filter( 'pre_http_request', array( $this, 'fake_cloudflare' ), 10, 3 );
+		add_filter( 'sentinel_shield_cloudflare_poll_delay', '__return_zero' );
+		try {
+			$sync->sync( true );
+			$this->cf_status = 'completed';
+			$sync->check_operation();
+
+			// A new list: the old one is emptied and tracked until confirmed.
+			$this->gate( array( 'cloudflare' => array( 'sync' => true, 'account_id' => str_repeat( 'a', 32 ), 'list_id' => str_repeat( 'c', 32 ) ) ) );
+			$this->cf_status = 'running';
+			$sync->sync( true );
+			$puts = array_values( array_filter( $this->cf_calls, static fn( array $c ): bool => 'PUT' === $c[1]['method'] ) );
+			$this->assertStringContainsString( '/lists/' . str_repeat( 'b', 32 ) . '/items', $puts[ count( $puts ) - 2 ][0] );
+			$this->assertSame( array(), json_decode( $puts[ count( $puts ) - 2 ][1]['body'], true ), 'old list emptied' );
+			$this->assertStringContainsString( '/lists/' . str_repeat( 'c', 32 ) . '/items', end( $puts )[0] );
+			$this->assertCount( 1, CloudflareSync::state()['retired'] );
+			$this->cf_status = 'completed';
+			$this->assertSame( array(), $sync->check_operation()['retired'], 'forgotten once confirmed empty' );
+
+			// Removing the token while Cloudflare cannot confirm: the token is kept.
+			$this->cf_status = 'running';
+			$this->assertIsString( $sync->set_token( '' ) );
+			$this->assertTrue( $sync->has_token() );
+			$this->cf_status = 'completed';
+			$this->assertTrue( $sync->set_token( '' ) );
+			$this->assertFalse( $sync->has_token() );
+			$this->assertSame( 'empty', CloudflareSync::state()['status'] );
+		} finally {
+			remove_filter( 'pre_http_request', array( $this, 'fake_cloudflare' ), 10 );
+			remove_filter( 'sentinel_shield_cloudflare_poll_delay', '__return_zero' );
+			wp_clear_scheduled_hook( CloudflareSync::CRON );
+			wp_clear_scheduled_hook( CloudflareSync::CHECK );
+		}
+	}
+
+	public function test_deactivation_without_cloudflare_confirmation_emails_instructions(): void {
+		$sync = $this->cloudflare();
+		add_filter( 'pre_http_request', array( $this, 'fake_cloudflare' ), 10, 3 );
+		add_filter( 'sentinel_shield_cloudflare_poll_delay', '__return_zero' );
+		reset_phpmailer_instance();
+		try {
+			$sync->sync( true );
+			$this->cf_status = 'completed';
+			$sync->check_operation();
+			$this->cf_status = 'running';
+			Installer::deactivate();
+			$mail = tests_retrieve_phpmailer_instance()->get_sent();
+			$this->assertNotFalse( $mail );
+			$this->assertStringContainsString( 'not confirmed empty', $mail->subject );
+			$this->assertStringContainsString( str_repeat( 'b', 32 ), $mail->body );
+		} finally {
+			remove_filter( 'pre_http_request', array( $this, 'fake_cloudflare' ), 10 );
+			remove_filter( 'sentinel_shield_cloudflare_poll_delay', '__return_zero' );
+		}
+	}
+
+	/**
+	 * A fake web server for the private folder probe: serves files under
+	 * $docroot by URL path; $refuse answers 403 for paths under it.
+	 *
+	 * @param string $docroot Document root.
+	 * @param string $refuse  Folder refused with 403 ('' = none; '*' = everything).
+	 * @param array  $seen    Request arguments, for inspection.
+	 */
+	private static function web( string $docroot, string $refuse, array &$seen ): \Closure {
+		return static function ( $pre, array $args, string $url ) use ( $docroot, $refuse, &$seen ) {
+			$seen[] = $args;
+			$path   = (string) wp_parse_url( $url, PHP_URL_PATH );
+			$file   = untrailingslashit( $docroot ) . $path;
+			if ( '*' === $refuse || ( '' !== $refuse && str_starts_with( $file, $refuse ) ) ) {
+				return array(
+					'response' => array( 'code' => 403 ),
+					'body'     => 'Forbidden',
+				);
+			}
+			return is_file( $file ) ? array(
+				'response' => array( 'code' => 200 ),
+				'body'     => (string) file_get_contents( $file ),
+			) : array(
+				'response' => array( 'code' => 404 ),
+				'body'     => '',
+			);
+		};
+	}
+
+	/**
+	 * Review 4 finding 1: a folder inside the document root that is not where
+	 * WordPress's own URLs lead (WordPress in a subfolder, data elsewhere under
+	 * the web root) is tested at the URL the document root gives it.
+	 */
+	public function test_an_unrecognized_public_data_folder_is_not_approved(): void {
+		$docroot = dirname( untrailingslashit( ABSPATH ) );
+		$folder  = $docroot . '/ss-elsewhere-' . strtolower( wp_generate_password( 6, false ) );
+		$filter  = static fn(): string => $folder;
+		$seen    = array();
+		add_filter( 'sentinel_shield_data_dir', $filter, 20 );
+		$_SERVER['DOCUMENT_ROOT'] = $docroot;
+		$uploads                  = wp_upload_dir( null, false );
+		// The fake server maps a URL path onto the document root, and the uploads URL onto the uploads folder.
+		$serve = function ( string $refuse ) use ( $docroot, $uploads, &$seen ): \Closure {
+			$inner = self::web( $docroot, $refuse, $seen );
+			return static function ( $pre, array $args, string $url ) use ( $inner, $uploads, $refuse ) {
+				if ( '*' !== $refuse && str_starts_with( $url, $uploads['baseurl'] ) ) {
+					$file = $uploads['basedir'] . substr( $url, strlen( $uploads['baseurl'] ) );
+					return is_file( $file ) ? array( 'response' => array( 'code' => 200 ), 'body' => (string) file_get_contents( $file ) ) : array( 'response' => array( 'code' => 404 ), 'body' => '' );
+				}
+				return $inner( $pre, $args, $url );
+			};
+		};
+		try {
+			$public = $serve( '' );
+			add_filter( 'pre_http_request', $public, 10, 3 );
+			$this->assertFalse( DataDir::recheck(), 'served over HTTP: public' );
+			remove_filter( 'pre_http_request', $public, 10 );
+			foreach ( $seen as $args ) {
+				$this->assertNotFalse( $args['sslverify'] ?? true, 'TLS certificates are verified' );
+			}
+
+			// A challenge page or login wall answering 403 to everything proves nothing.
+			$wall = $serve( '*' );
+			add_filter( 'pre_http_request', $wall, 10, 3 );
+			$this->assertNull( DataDir::recheck() );
+			$this->assertStringContainsString( 'could not fetch its own test file', DataDir::problem() );
+			remove_filter( 'pre_http_request', $wall, 10 );
+
+			// Refused while uploads is served: private, but only for a day.
+			$private = $serve( $folder );
+			add_filter( 'pre_http_request', $private, 10, 3 );
+			$this->assertTrue( DataDir::recheck() );
+			$this->assertSame( 'probe', get_site_option( DataDir::OPTION )['method'] );
+			remove_filter( 'pre_http_request', $private, 10 );
+			add_filter( 'pre_http_request', $public, 10, 3 );
+			$this->assertTrue( DataDir::is_private(), 'remembered for a day' );
+			$stored            = get_site_option( DataDir::OPTION );
+			$stored['checked'] = time() - DAY_IN_SECONDS - 1;
+			update_site_option( DataDir::OPTION, $stored );
+			$this->assertFalse( DataDir::is_private(), 'checked again after a day: the server changed' );
+			remove_filter( 'pre_http_request', $public, 10 );
+
+			// No document root known (WP-CLI before any web request): unknown.
+			unset( $_SERVER['DOCUMENT_ROOT'] );
+			delete_site_option( DataDir::ROOT );
+			$this->assertNull( DataDir::recheck() );
+			$this->assertStringContainsString( 'document root is not known', DataDir::problem() );
+			$_SERVER['DOCUMENT_ROOT'] = ABSPATH;
+			DataDir::remember_document_root();
+			unset( $_SERVER['DOCUMENT_ROOT'] );
+			remove_filter( 'sentinel_shield_data_dir', $filter, 20 );
+			$this->assertTrue( DataDir::recheck(), 'the remembered document root is used from the command line' );
+		} finally {
+			remove_all_filters( 'pre_http_request' );
+			remove_filter( 'sentinel_shield_data_dir', $filter, 20 );
+			$_SERVER['DOCUMENT_ROOT'] = ABSPATH;
+			@rmdir( $folder ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+			DataDir::recheck();
+		}
+	}
+
+	/**
+	 * Review 4 finding 2: upgrading from 0.8.0 removes the runtime files it kept
+	 * in uploads, keeps server includes working, and reports what failed.
+	 */
+	public function test_upgrade_removes_legacy_files_from_uploads(): void {
+		$old = GeoUpdater::dir();
+		wp_mkdir_p( $old );
+		if ( is_dir( "$old/gate.json" ) ) {
+			rmdir( "$old/gate.json" );
+		}
+		foreach ( array( 'gate.json', 'gate-block.bin', 'gate-allow.bin', 'early-blocks.log' ) as $file ) {
+			file_put_contents( "$old/$file", 'old 192.0.2.10' );
+		}
+		file_put_contents( "$old/nginx-deny.conf", "deny 203.0.113.5;\n" );
+		file_put_contents( "$old/apache-deny.conf", "Require not ip 203.0.113.5\n" );
+		file_put_contents( "$old/geo-country.bin", 'keep me' );
+		update_site_option( \SentinelShield\Install\Schema::OPTION, 5 );
+		\SentinelShield\Install\Schema::maybe_upgrade();
+		// The migration only marks the cleanup; it runs on init, when all of WordPress is loaded.
+		$this->assertFileExists( "$old/gate.json" );
+		$this->assertTrue( EarlyGate::legacy_state()['pending'] );
+		EarlyGate::maybe_clean_legacy();
+		$this->assertArrayNotHasKey( 'pending', EarlyGate::legacy_state() );
+		foreach ( array( 'gate.json', 'gate-block.bin', 'gate-allow.bin', 'early-blocks.log' ) as $file ) {
+			$this->assertFileDoesNotExist( "$old/$file" );
+		}
+		$this->assertStringNotContainsString( '203.0.113.5', (string) file_get_contents( "$old/nginx-deny.conf" ), 'stubbed, not deleted: the include keeps working' );
+		$this->assertStringContainsString( 'no longer updated', (string) file_get_contents( "$old/apache-deny.conf" ) );
+		$this->assertFileExists( "$old/geo-country.bin", 'the country database stays' );
+		$this->assertSame( array(), EarlyGate::legacy_state()['failed'] );
+
+		// A file that cannot be removed is reported, and the cleanup can run again.
+		mkdir( "$old/gate.json" );
+		try {
+			$state = EarlyGate::clean_legacy();
+		} finally {
+			// Removed below; also if an assertion fails first.
+			register_shutdown_function( static fn() => is_dir( "$old/gate.json" ) && rmdir( "$old/gate.json" ) );
+		}
+		$this->assertSame( array( "$old/gate.json" ), $state['failed'] );
+		$this->assertContains( "$old/nginx-deny.conf", $state['stubbed'] );
+		$health = ( new \SentinelShield\Safety\Health( Plugin::instance()->container() ) )->checks();
+		$this->assertContains( 'legacy', array_column( $health, 'id' ) );
+		rmdir( "$old/gate.json" );
+		$this->assertSame( array(), EarlyGate::clean_legacy()['failed'] );
+		foreach ( array( 'nginx-deny.conf', 'apache-deny.conf', 'geo-country.bin' ) as $file ) {
+			wp_delete_file( "$old/$file" );
+		}
+		delete_site_option( EarlyGate::LEGACY );
+	}
+
+	/**
+	 * Review 4 finding 5: a build that cannot be written completely leaves the
+	 * previous generation in place and is retried.
+	 */
+	public function test_a_partial_snapshot_write_keeps_the_previous_generation(): void {
+		$repo = Plugin::instance()->container()->get( BlockRepository::class );
+		$repo->add( 'block', Cidr::parse( '203.0.113.5' ), 'manual', 'manual' );
+		$gate  = $this->gate( array( 'firewall' => array( 'early_gate' => 'mu_plugin' ) ) );
+		$first = $gate->rebuild();
+		$this->assertSame( $first['generation'], $first['published'] );
+		$json = (string) file_get_contents( EarlyGate::path() );
+		$repo->add( 'block', Cidr::parse( '198.51.100.9' ), 'manual', 'manual' );
+		chmod( $this->data, 0555 );
+		try {
+			$state = $gate->rebuild();
+		} finally {
+			chmod( $this->data, 0755 );
+		}
+		$this->assertSame( $first['generation'] + 1, $state['generation'] );
+		$this->assertSame( $first['published'], $state['published'], 'the new generation was not published' );
+		$this->assertStringContainsString( 'previous one', $state['error'] );
+		$this->assertSame( $json, (string) file_get_contents( EarlyGate::path() ), 'the manifest is untouched' );
+		$snap = json_decode( $json, true );
+		$this->assertFileExists( $snap['block_file'], 'and still points at files that exist' );
+		$this->assertNotFalse( get_site_option( EarlyGate::DIRTY ) );
+		$this->assertLessThanOrEqual( time() + EarlyGate::RETRY_AFTER, (int) wp_next_scheduled( EarlyGate::EXPIRY_HOOK ), 'retried' );
+		$this->assertNull( $gate->published_policy(), 'Cloudflare does not mirror a generation that was not published' );
+
+		$state = $gate->rebuild();
+		$this->assertSame( $state['generation'], $state['published'] );
+		$snap = json_decode( (string) file_get_contents( EarlyGate::path() ), true );
+		$this->assertSame( $state['generation'], $snap['generation'] );
+		$this->assertTrue( FeedSnapshot::read_set( $snap['block_file'] )->contains( (string) inet_pton( '198.51.100.9' ) ) );
+		$policy = $gate->published_policy();
+		$this->assertContains( '198.51.100.9', $policy['blocked'] );
+		$this->assertCount( 4, glob( $this->data . '/gate-*.bin' ), 'this and the previous generation are kept, older ones removed' );
+	}
+
+	/**
+	 * Review 4 finding 6: the snapshot expires exactly with the next rule
+	 * (no minimum lifetime), and an expired one is not used.
+	 */
+	public function test_snapshot_expiry_is_exact_and_late_cron_falls_back_to_wordpress(): void {
+		$repo = Plugin::instance()->container()->get( BlockRepository::class );
+		$repo->add( 'block', Cidr::parse( '203.0.113.5' ), 'lockout', 'lockout', time() + 5 );
+		$gate  = $this->gate( array( 'firewall' => array( 'early_gate' => 'mu_plugin' ) ) );
+		$state = $gate->rebuild();
+		$this->assertLessThanOrEqual( time() + 5, $state['valid_until'], 'not stretched to a minute' );
+		$this->assertSame( $state['valid_until'] + 1, wp_next_scheduled( EarlyGate::EXPIRY_HOOK ) );
+		// Cron runs late: the snapshot has expired, so the early firewall and Cloudflare stop using it.
+		$snap                = json_decode( (string) file_get_contents( EarlyGate::path() ), true );
+		$snap['valid_until'] = time() - 1;
+		file_put_contents( EarlyGate::path(), wp_json_encode( $snap ) );
+		$stored                = get_site_option( EarlyGate::STATE );
+		$stored['valid_until'] = time() - 1;
+		update_site_option( EarlyGate::STATE, $stored );
+		$this->assertNull( $gate->published_policy() );
 	}
 }

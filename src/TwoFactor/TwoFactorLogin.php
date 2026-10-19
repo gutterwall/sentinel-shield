@@ -1004,11 +1004,12 @@ final class TwoFactorLogin {
 	}
 
 	/**
-	 * Name of an account's two-factor lock.
+	 * Name of an account's two-factor lock (also held while the account
+	 * confirms its identity on the two-factor settings page).
 	 *
 	 * @param int $user_id User.
 	 */
-	private static function lock_name( int $user_id ): string {
+	public static function lock_name( int $user_id ): string {
 		return 'twofa_' . $user_id;
 	}
 

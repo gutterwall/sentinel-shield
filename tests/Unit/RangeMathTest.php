@@ -37,4 +37,42 @@ final class RangeMathTest extends TestCase {
 		$this->assertTrue( $set->contains( (string) inet_pton( '2001:db8::2' ) ) );
 		$this->assertTrue( $set->contains( (string) inet_pton( 'ffff::1' ) ) );
 	}
+
+	public function test_matches_a_brute_force_answer_on_random_sets(): void {
+		mt_srand( 8102 );
+		$ip = static fn( int $n ): string => pack( 'N', ( 10 << 24 ) + $n );
+		for ( $round = 0; $round < 200; $round++ ) {
+			$make = static function ( int $count ) use ( $ip ): array {
+				$pairs = array();
+				for ( $i = 0; $i < $count; $i++ ) {
+					$a       = mt_rand( 0, 255 );
+					$b       = min( 255, $a + mt_rand( 0, 40 ) );
+					$pairs[] = array( $ip( $a ), $ip( $b ) );
+				}
+				return $pairs;
+			};
+			$from  = IpRangeSet::from_pairs( $make( mt_rand( 0, 6 ) ) );
+			$minus = IpRangeSet::from_pairs( $make( mt_rand( 0, 6 ) ) );
+			$got   = RangeMath::subtract( $from, $minus );
+			for ( $n = 0; $n <= 255; $n++ ) {
+				$want = $from->contains( $ip( $n ) ) && ! $minus->contains( $ip( $n ) );
+				$this->assertSame( $want, $got->contains( $ip( $n ) ), "round $round, address $n" );
+			}
+		}
+	}
+
+	public function test_large_sets_are_subtracted_quickly(): void {
+		$block = array();
+		$allow = array();
+		for ( $i = 0; $i < 20000; $i++ ) {
+			$block[] = long2ip( ( 11 << 24 ) + $i * 256 ) . '/24';
+			$allow[] = long2ip( ( 11 << 24 ) + $i * 256 + 7 );
+		}
+		$from  = IpRangeSet::from_strings( $block );
+		$minus = IpRangeSet::from_strings( $allow );
+		$start = microtime( true );
+		$out   = RangeMath::subtract( $from, $minus );
+		$this->assertLessThan( 2.0, microtime( true ) - $start, '20,000 ranges minus 20,000 exemptions' );
+		$this->assertSame( 40000, $out->count() );
+	}
 }

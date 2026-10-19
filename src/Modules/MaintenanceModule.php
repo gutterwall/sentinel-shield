@@ -83,9 +83,12 @@ final class MaintenanceModule implements ModuleInterface {
 	 */
 	public static function run( Container $container ): array {
 		$settings = $container->get( Settings::class );
-		$result   = array(
+		$audit    = $container->get( AuditExporter::class );
+		// Events not yet delivered to the remote audit log are kept (up to 90 days).
+		$audit->note_dropped();
+		$result = array(
 			'rules'    => $container->get( BlockRepository::class )->purge_expired(),
-			'events'   => $container->get( EventRepository::class )->prune( (int) $settings->get( 'general.event_retention_days', 30 ) ),
+			'events'   => $container->get( EventRepository::class )->prune( (int) $settings->get( 'general.event_retention_days', 30 ), $audit->retention_cursor(), AuditExporter::KEEP_UNSENT_DAYS ),
 			'offenses' => $container->get( OffenseRepository::class )->prune( time() - $settings->lockout_window() ),
 			'tokens'   => $container->get( TokenRepository::class )->prune(),
 			// Kept a week for the Login Security overview; limits use far shorter windows.
@@ -96,8 +99,8 @@ final class MaintenanceModule implements ModuleInterface {
 		}
 		$gate            = $container->get( EarlyGate::class );
 		$result['early'] = $gate->import_log();
+		EarlyGate::maybe_clean_legacy();
 		$gate->rebuild_if_dirty();
-		$audit = $container->get( AuditExporter::class );
 		$audit->heartbeat();
 		$audit->run();
 		update_site_option( self::LAST_RUN, time() );

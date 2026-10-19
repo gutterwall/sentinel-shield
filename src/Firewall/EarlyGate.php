@@ -48,6 +48,14 @@ final class EarlyGate {
 	public const MAX_LIFE = DAY_IN_SECONDS;
 
 	public const EXPIRY_HOOK = 'sentinel_shield_gate_expiry';
+	public const DEBOUNCE    = 10;
+	public const RETRY_AFTER = 300;
+	public const LEGACY      = 'sentinel_shield_legacy_files';
+
+	/**
+	 * Files 0.8.0 kept in uploads/sentinel-shield that must not stay there.
+	 */
+	public const LEGACY_SENSITIVE = array( 'gate.json', 'gate-block.bin', 'gate-allow.bin', 'early-blocks.log', 'early-blocks.log.import' );
 
 	/**
 	 * Whether a rebuild is scheduled for the end of this request.
@@ -85,6 +93,7 @@ final class EarlyGate {
 		add_action( 'sentinel_shield_feeds_changed', array( $this, 'mark_dirty' ) );
 		add_action( 'sentinel_shield_settings_saved', array( $this, 'settings_saved' ) );
 		add_action( self::EXPIRY_HOOK, array( $this, 'rebuild' ) );
+		add_action( 'init', array( self::class, 'maybe_clean_legacy' ) );
 	}
 
 	/**
@@ -154,9 +163,20 @@ final class EarlyGate {
 		}
 		$state = get_site_option( self::STATE );
 		$stale = ! is_array( $state ) || (int) ( $state['valid_until'] ?? 0 ) < time() + 2 * HOUR_IN_SECONDS;
-		if ( get_site_option( self::DIRTY ) || $stale ) {
-			$this->rebuild();
+		if ( ! get_site_option( self::DIRTY ) && ! $stale ) {
+			return;
 		}
+		// During a burst of lockouts, publish at most every DEBOUNCE seconds;
+		// WordPress itself enforces each new rule immediately.
+		$next = is_array( $state ) ? (int) ( $state['built'] ?? 0 ) + self::DEBOUNCE : 0;
+		if ( ! $stale && $next > time() && ! wp_doing_cron() ) {
+			if ( ! wp_next_scheduled( self::EXPIRY_HOOK ) || wp_next_scheduled( self::EXPIRY_HOOK ) > $next ) {
+				wp_clear_scheduled_hook( self::EXPIRY_HOOK );
+				wp_schedule_single_event( $next, self::EXPIRY_HOOK );
+			}
+			return;
+		}
+		$this->rebuild();
 	}
 
 	/**
@@ -170,47 +190,68 @@ final class EarlyGate {
 		}
 		try {
 			delete_site_option( self::DIRTY );
-			$data  = $this->compile();
-			$dir   = DataDir::path();
-			$error = '';
-			if ( ! DataDir::ready() ) {
+			$data   = $this->compile();
+			$dir    = DataDir::path();
+			$old    = (array) get_site_option( self::STATE, array() );
+			$hash   = md5( implode( ',', $data['blocked'] ) );
+			$gen    = (int) ( $old['generation'] ?? 0 ) + ( ( $old['hash'] ?? '' ) !== $hash ? 1 : 0 );
+			$errors = array();
+			$files  = (array) ( $old['files'] ?? array() );
+			$pub    = (int) ( $old['published'] ?? 0 );
+			$srv    = (int) ( $old['server_generation'] ?? 0 );
+			if ( true !== DataDir::is_private() ) {
 				// Never write the policy, the log or server files where they could be downloaded.
-				$error = DataDir::problem();
+				$errors[] = DataDir::problem();
 				self::delete_files( false );
+				$files = array();
+				$pub   = 0;
+				$srv   = 0;
 			} else {
-				$snap = $data['snapshot'];
-				FeedSnapshot::write( $data['block_set'], $dir . '/gate-block.bin' );
-				FeedSnapshot::write( $data['allow_set'], $dir . '/gate-allow.bin' );
-				$snap['block_file'] = $dir . '/gate-block.bin';
-				$snap['allow_file'] = $dir . '/gate-allow.bin';
-				if ( ! self::write_atomic( self::path(), (string) wp_json_encode( $snap ) ) ) {
-					$error = __( 'The snapshot could not be written.', 'sentinel-shield' );
+				$published = $this->publish( $dir, $data, $gen );
+				if ( is_array( $published ) ) {
+					$files = $published;
+					$pub   = $gen;
+				} else {
+					$errors[] = $published;
 				}
 				if ( $this->settings->get( 'firewall.server_files', false ) ) {
-					self::write_atomic( $dir . '/nginx-deny.conf', self::nginx( $data['blocked'] ) );
-					self::write_atomic( $dir . '/apache-deny.conf', self::apache( $data['blocked'] ) );
+					if ( self::write_atomic( $dir . '/nginx-deny.conf', self::nginx( $data['blocked'], $gen ) ) && self::write_atomic( $dir . '/apache-deny.conf', self::apache( $data['blocked'], $gen ) ) ) {
+						$srv = $gen;
+					} else {
+						$errors[] = __( 'The server blocklist files could not be written; the web server keeps the previous version.', 'sentinel-shield' );
+					}
 				} else {
 					self::empty_server_files();
+					$srv = 0;
 				}
 			}
-			$hash  = md5( implode( ',', $data['blocked'] ) );
-			$old   = (array) get_site_option( self::STATE, array() );
 			$state = array(
-				'built'       => time(),
-				'valid_until' => (int) $data['snapshot']['valid_until'],
-				'block'       => count( $data['blocked'] ),
-				'allow'       => (int) $data['allow_count'],
-				'feeds'       => '' !== $data['snapshot']['feeds'],
-				'enforcing'   => (bool) $data['snapshot']['enabled'],
-				'hash'        => $hash,
-				'generation'  => (int) ( $old['generation'] ?? 0 ) + ( ( $old['hash'] ?? '' ) !== $hash ? 1 : 0 ),
-				'error'       => $error,
+				'built'             => time(),
+				'valid_until'       => (int) $data['snapshot']['valid_until'],
+				'block'             => count( $data['blocked'] ),
+				'allow'             => (int) $data['allow_count'],
+				'feeds'             => '' !== $data['snapshot']['feeds'],
+				'enforcing'         => (bool) $data['snapshot']['enabled'],
+				'hash'              => $hash,
+				'generation'        => $gen,
+				'published'         => $pub,
+				'server_generation' => $srv,
+				'files'             => $files,
+				'error'             => implode( ' ', array_filter( $errors ) ),
 			);
 			update_site_option( self::STATE, $state );
-			// Rebuild again the moment the next rule expires, so short lockouts end everywhere on time.
+			// Rebuild again when the next rule expires, so short lockouts end in
+			// every layer soon after (WP-Cron can run late; WordPress itself
+			// checks expiry on every request).
 			wp_clear_scheduled_hook( self::EXPIRY_HOOK );
-			if ( $state['valid_until'] < time() + self::MAX_LIFE ) {
-				wp_schedule_single_event( $state['valid_until'] + 1, self::EXPIRY_HOOK );
+			$next = $state['valid_until'] < time() + self::MAX_LIFE ? $state['valid_until'] + 1 : 0;
+			if ( $pub !== $gen && true === DataDir::is_private() ) {
+				// A failed publication is retried; the previous snapshot stays in use meanwhile.
+				update_site_option( self::DIRTY, time() );
+				$next = $next ? min( $next, time() + self::RETRY_AFTER ) : time() + self::RETRY_AFTER;
+			}
+			if ( $next ) {
+				wp_schedule_single_event( $next, self::EXPIRY_HOOK );
 			}
 			if ( ( $old['hash'] ?? '' ) !== $hash ) {
 				do_action( 'sentinel_shield_blocklist_changed', $data['blocked'] );
@@ -219,6 +260,106 @@ final class EarlyGate {
 		} finally {
 			Mutex::release( 'early_gate_build' );
 		}
+	}
+
+	/**
+	 * The policy of the published generation, read back from its range files,
+	 * so Cloudflare mirrors exactly what was published instead of compiling
+	 * again. Null when the published snapshot is not the current generation,
+	 * has expired, or cannot be read.
+	 *
+	 * @return array{blocked:list<string>, allow_set:IpRangeSet, generation:int}|null
+	 */
+	public function published_policy(): ?array {
+		$state = (array) get_site_option( self::STATE, array() );
+		$files = (array) ( $state['files'] ?? array() );
+		if ( empty( $state['generation'] ) || (int) ( $state['published'] ?? 0 ) !== (int) $state['generation'] || (int) ( $state['valid_until'] ?? 0 ) <= time() || empty( $files['block'] ) || empty( $files['allow'] ) ) {
+			return null;
+		}
+		$block = FeedSnapshot::read_set( (string) $files['block'] );
+		$allow = FeedSnapshot::read_set( (string) $files['allow'] );
+		if ( null === $block || null === $allow ) {
+			return null;
+		}
+		return array(
+			'blocked'    => RangeMath::cidrs( $block ),
+			'allow_set'  => $allow,
+			'generation' => (int) $state['generation'],
+		);
+	}
+
+	/**
+	 * Publishes one complete policy generation: both range files under names
+	 * unique to this build, each verified, and then the manifest (gate.json)
+	 * that points at them, replaced in one atomic rename. Until that rename the
+	 * previous manifest and its files stay in use, so a request never sees a
+	 * mix of two generations. Files from older builds are removed afterwards,
+	 * except the previous one (a request may still be reading it).
+	 *
+	 * @param string               $dir  Private folder.
+	 * @param array<string, mixed> $data compile() result.
+	 * @param int                  $gen  Generation number.
+	 * @return array{block:string, allow:string}|string The new files, or an error.
+	 */
+	private function publish( string $dir, array $data, int $gen ): array|string {
+		$tag   = $gen . '-' . bin2hex( random_bytes( 4 ) );
+		$block = "$dir/gate-block-$tag.bin";
+		$allow = "$dir/gate-allow-$tag.bin";
+		$snap  = $data['snapshot'] + array(
+			'generation' => $gen,
+			'block_file' => $block,
+			'allow_file' => $allow,
+		);
+		$ok    = FeedSnapshot::write( $data['block_set'], $block ) && self::verify( $block, $data['block_set'] )
+			&& FeedSnapshot::write( $data['allow_set'], $allow ) && self::verify( $allow, $data['allow_set'] )
+			&& self::write_atomic( self::path(), (string) wp_json_encode( $snap ) );
+		if ( ! $ok ) {
+			foreach ( array( $block, $allow ) as $file ) {
+				if ( is_file( $file ) ) {
+					wp_delete_file( $file );
+				}
+			}
+			return __( 'The snapshot could not be written completely; the early firewall keeps using the previous one, and the build is retried in five minutes.', 'sentinel-shield' );
+		}
+		$old  = (array) ( ( (array) get_site_option( self::STATE, array() ) )['files'] ?? array() );
+		$keep = array_merge( array( $block, $allow ), array_values( array_map( 'strval', $old ) ) );
+		foreach ( self::snapshot_files( $dir ) as $file ) {
+			if ( str_ends_with( $file, '.bin' ) && ! in_array( $file, $keep, true ) ) {
+				wp_delete_file( $file );
+			}
+		}
+		return array(
+			'block' => $block,
+			'allow' => $allow,
+		);
+	}
+
+	/**
+	 * Whether a written range file has the expected header and size.
+	 *
+	 * @param string     $file File.
+	 * @param IpRangeSet $set  What was written.
+	 */
+	private static function verify( string $file, IpRangeSet $set ): bool {
+		clearstatcache( true, $file );
+		$head = is_readable( $file ) ? (string) file_get_contents( $file, false, null, 0, 16 ) : ''; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Local file.
+		if ( 16 !== strlen( $head ) || FeedSnapshot::MAGIC !== substr( $head, 0, 8 ) ) {
+			return false;
+		}
+		$n4 = count( $set->pairs( 4 ) );
+		$n6 = count( $set->pairs( 6 ) );
+		return pack( 'NN', $n4, $n6 ) === substr( $head, 8 ) && (int) filesize( $file ) === 16 + 8 * $n4 + 32 * $n6;
+	}
+
+	/**
+	 * The snapshot's files in a folder: gate.json, range files and leftovers.
+	 *
+	 * @param string $dir Folder.
+	 * @return list<string>
+	 */
+	private static function snapshot_files( string $dir ): array {
+		$files = array_merge( array( "$dir/gate.json" ), (array) glob( "$dir/gate-block*.bin" ), (array) glob( "$dir/gate-allow*.bin" ), (array) glob( "$dir/*.tmp" ) );
+		return array_values( array_filter( $files, static fn( $f ): bool => is_string( $f ) && is_file( $f ) ) );
 	}
 
 	/**
@@ -275,7 +416,7 @@ final class EarlyGate {
 			'snapshot'    => array(
 				'v'           => 2,
 				'built'       => $now,
-				'valid_until' => max( $now + MINUTE_IN_SECONDS, $until ),
+				'valid_until' => max( $now + 1, $until ),
 				'enabled'     => $enabled,
 				'status'      => '404' === $this->settings->get( 'general.block_response' ) ? 404 : 403,
 				'page'        => BlockPage::early_template( $this->settings ),
@@ -390,18 +531,89 @@ final class EarlyGate {
 	 * @param bool $state Also forget the build state.
 	 */
 	public static function delete_files( bool $state = true ): void {
-		foreach ( array( DataDir::path(), GeoUpdater::dir() ) as $dir ) {
-			// The uploads folder held these files before 0.8.1.
-			foreach ( array( 'gate.json', 'gate-block.bin', 'gate-allow.bin', 'nginx-deny.conf', 'apache-deny.conf', 'early-blocks.log' ) as $file ) {
-				if ( is_file( "$dir/$file" ) ) {
-					wp_delete_file( "$dir/$file" );
-				}
+		$dir = DataDir::path();
+		foreach ( array_merge( self::snapshot_files( $dir ), array( "$dir/nginx-deny.conf", "$dir/apache-deny.conf", "$dir/early-blocks.log" ) ) as $file ) {
+			if ( is_file( $file ) ) {
+				wp_delete_file( $file );
 			}
 		}
 		if ( $state ) {
 			delete_site_option( self::STATE );
 			wp_clear_scheduled_hook( self::EXPIRY_HOOK );
 		}
+	}
+
+	/**
+	 * Removes what 0.8.0 left in the public uploads folder: the snapshot (with
+	 * allowlisted addresses), the range files and the block log are deleted;
+	 * the server blocklist files are replaced with a stub that blocks nothing
+	 * and says where the list moved, because deleting a file that nginx or
+	 * Apache includes would stop the server from reloading. Safe to run again;
+	 * the result (including files that could not be removed) is stored.
+	 *
+	 * @return array{checked:int, removed:list<string>, stubbed:list<string>, failed:list<string>}
+	 */
+	public static function clean_legacy(): array {
+		$dir    = GeoUpdater::dir();
+		$result = array(
+			'checked' => time(),
+			'removed' => array(),
+			'stubbed' => array(),
+			'failed'  => array(),
+		);
+		$doomed = array_map( static fn( string $f ): string => "$dir/$f", self::LEGACY_SENSITIVE );
+		foreach ( array_merge( $doomed, (array) glob( $dir . '/gate*.tmp' ), (array) glob( $dir . '/*-deny.conf.*.tmp' ) ) as $file ) {
+			if ( ! is_string( $file ) || ! file_exists( $file ) ) {
+				continue;
+			}
+			wp_delete_file( $file );
+			clearstatcache( true, $file );
+			$result[ file_exists( $file ) ? 'failed' : 'removed' ][] = $file;
+		}
+		foreach ( array(
+			'nginx-deny.conf'  => "# Sentinel Shield: this file is no longer updated and blocks nothing. The blocklist moved to the\n# private folder shown on Settings → Server & CDN. Change the include line to the one shown there,\n# check and reload nginx (nginx -t && nginx -s reload), then delete this file.\n",
+			'apache-deny.conf' => "# Sentinel Shield: this file is no longer updated and blocks nothing. The blocklist moved to the\n# private folder shown on Settings → Server & CDN. Change the Include line to the one shown there,\n# check and reload Apache (apachectl configtest && apachectl graceful), then delete this file.\n",
+		) as $name => $stub ) {
+			$file = "$dir/$name";
+			if ( ! is_file( $file ) ) {
+				continue;
+			}
+			if ( (string) file_get_contents( $file ) === $stub ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Local file.
+				$result['stubbed'][] = $file;
+				continue;
+			}
+			$result[ self::write_atomic( $file, $stub ) ? 'stubbed' : 'failed' ][] = $file;
+		}
+		update_site_option( self::LEGACY, $result );
+		return $result;
+	}
+
+	/**
+	 * Notes that the legacy cleanup must run (from the upgrade migration).
+	 */
+	public static function mark_legacy_pending(): void {
+		update_site_option( self::LEGACY, array( 'pending' => true ) + self::legacy_state() );
+	}
+
+	/**
+	 * Runs the legacy cleanup when it is pending or something failed last time
+	 * (on init after an upgrade, and from hourly maintenance).
+	 */
+	public static function maybe_clean_legacy(): void {
+		$state = self::legacy_state();
+		if ( ! empty( $state['pending'] ) || ! empty( $state['failed'] ) ) {
+			self::clean_legacy();
+		}
+	}
+
+	/**
+	 * Result of the last legacy cleanup (empty when there was nothing to do).
+	 *
+	 * @return array<string, mixed>
+	 */
+	public static function legacy_state(): array {
+		$state = get_site_option( self::LEGACY );
+		return is_array( $state ) ? $state : array();
 	}
 
 	/**
@@ -425,8 +637,8 @@ final class EarlyGate {
 	 */
 	public static function deactivate(): void {
 		self::remove_loader();
-		foreach ( array( 'gate.json', 'gate-block.bin', 'gate-allow.bin', 'early-blocks.log' ) as $file ) {
-			$path = DataDir::path() . '/' . $file;
+		$dir = DataDir::path();
+		foreach ( array_merge( self::snapshot_files( $dir ), array( "$dir/early-blocks.log" ) ) as $path ) {
 			if ( is_file( $path ) ) {
 				wp_delete_file( $path );
 			}
@@ -459,9 +671,10 @@ final class EarlyGate {
 	 * Blocked ranges as an nginx include file.
 	 *
 	 * @param list<string> $labels CIDR labels.
+	 * @param int          $gen    Policy generation.
 	 */
-	public static function nginx( array $labels ): string {
-		$out = '# Sentinel Shield blocklist for nginx, generated ' . gmdate( 'Y-m-d H:i:s' ) . " UTC. Include it in a server block and reload nginx.\n";
+	public static function nginx( array $labels, int $gen = 0 ): string {
+		$out = '# Sentinel Shield blocklist for nginx, policy generation ' . $gen . ', generated ' . gmdate( 'Y-m-d H:i:s' ) . " UTC. Include it in a server block and reload nginx.\n";
 		foreach ( $labels as $label ) {
 			if ( null !== Cidr::parse( $label ) ) {
 				$out .= 'deny ' . $label . ";\n";
@@ -474,9 +687,10 @@ final class EarlyGate {
 	 * Blocked ranges as an Apache 2.4 include file.
 	 *
 	 * @param list<string> $labels CIDR labels.
+	 * @param int          $gen    Policy generation.
 	 */
-	public static function apache( array $labels ): string {
-		$out = '# Sentinel Shield blocklist for Apache 2.4, generated ' . gmdate( 'Y-m-d H:i:s' ) . " UTC. Include it inside a <Directory> or virtual host.\n<RequireAll>\n\tRequire all granted\n";
+	public static function apache( array $labels, int $gen = 0 ): string {
+		$out = '# Sentinel Shield blocklist for Apache 2.4, policy generation ' . $gen . ', generated ' . gmdate( 'Y-m-d H:i:s' ) . " UTC. Include it inside a <Directory> or virtual host.\n<RequireAll>\n\tRequire all granted\n";
 		foreach ( $labels as $label ) {
 			if ( null !== Cidr::parse( $label ) ) {
 				$out .= "\tRequire not ip " . $label . "\n";
@@ -546,7 +760,7 @@ final class EarlyGate {
 	 * @param string $content Content.
 	 */
 	private static function write_atomic( string $path, string $content ): bool {
-		$tmp = $path . '.' . wp_generate_password( 8, false ) . '.tmp';
+		$tmp = $path . '.' . bin2hex( random_bytes( 4 ) ) . '.tmp';
 		if ( false === @file_put_contents( $tmp, $content ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- Our own generated file.
 			return false;
 		}

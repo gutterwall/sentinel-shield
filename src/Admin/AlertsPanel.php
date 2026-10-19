@@ -73,6 +73,15 @@ final class AlertsPanel {
 			}
 			/* translators: %d: number of events. */
 			$lines[] = sprintf( _n( '%d event waiting.', '%d events waiting.', $backlog, 'sentinel-shield' ), $backlog );
+			$oldest  = $backlog > 0 ? $export->oldest_unsent() : 0;
+			if ( $oldest ) {
+				/* translators: %s: time span. */
+				$lines[] = sprintf( __( 'The oldest has waited %s; undelivered events are kept for up to 90 days, whatever the retention setting.', 'sentinel-shield' ), human_time_diff( $oldest ) );
+			}
+			if ( ! empty( $state['dropped'] ) ) {
+				/* translators: 1: number of events, 2: date. */
+				$lines[] = sprintf( __( 'Gap: %1$d events were pruned before they could be delivered (last on %2$s).', 'sentinel-shield' ), (int) $state['dropped'], wp_date( 'Y-m-d', (int) ( $state['gap'] ?? 0 ) ) );
+			}
 			echo '<p>' . esc_html( implode( ' ', $lines ) ) . '</p>';
 			if ( ! empty( $state['failures'] ) ) {
 				/* translators: 1: number of failures, 2: error, 3: date. */

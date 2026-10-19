@@ -48,7 +48,17 @@ final class ServerPanel {
 		View::form_open( 'server' );
 		echo '<input type="hidden" name="op" value="recheck">';
 		submit_button( __( 'Re-check', 'sentinel-shield' ), 'small', 'submit', false );
-		echo '</form><p class="description">' . esc_html__( 'To use another folder, add define( \'SENTINEL_SHIELD_DATA_DIR\', \'/path/outside/the/web/root\' ); to wp-config.php.', 'sentinel-shield' ) . '</p></div>';
+		echo '</form><p class="description">' . esc_html__( 'To use another folder, add define( \'SENTINEL_SHIELD_DATA_DIR\', \'/path/outside/the/web/root\' ); to wp-config.php.', 'sentinel-shield' ) . '</p>';
+		$legacy = EarlyGate::legacy_state();
+		if ( ! empty( $legacy['failed'] ) ) {
+			/* translators: %s: file paths. */
+			$this->status( 'bad', sprintf( __( 'Files from version 0.8.0 in the public uploads folder could not be removed: %s. They may contain allowlisted addresses or visitor data; delete them by hand (removal is retried hourly).', 'sentinel-shield' ), implode( ', ', array_map( 'strval', (array) $legacy['failed'] ) ) ) );
+		}
+		if ( ! empty( $legacy['stubbed'] ) ) {
+			/* translators: %s: file paths. */
+			$this->status( 'warn', sprintf( __( 'Your server configuration may still include the old blocklist files %s. They now block nothing. Change the include lines to the files below, check and reload the web server, then delete the old files.', 'sentinel-shield' ), implode( ', ', array_map( 'strval', (array) $legacy['stubbed'] ) ) ) );
+		}
+		echo '</div>';
 
 		echo '<div class="ss-card" id="ss-early"><h2>' . esc_html__( 'Early firewall', 'sentinel-shield' ) . '</h2>';
 		$mode   = $gate->mode();
@@ -74,8 +84,9 @@ final class ServerPanel {
 		}
 		if ( $state ) {
 			/* translators: 1: generation, 2: date, 3: block count, 4: allow count, 5: feeds state, 6: date. */
-			$text = sprintf( __( 'Policy generation %1$d, built %2$s: %3$d blocked ranges after removing %4$d allowlisted ones, blocklist feeds %5$s. Rebuilt on every change and at %6$s, when the next temporary rule expires.', 'sentinel-shield' ), (int) ( $state['generation'] ?? 0 ), wp_date( 'Y-m-d H:i', (int) $state['built'] ), (int) $state['block'], (int) $state['allow'], ! empty( $state['feeds'] ) ? __( 'included', 'sentinel-shield' ) : __( 'not included', 'sentinel-shield' ), wp_date( 'Y-m-d H:i', (int) $state['valid_until'] ) );
+			$text = sprintf( __( 'Policy generation %1$d, built %2$s: %3$d blocked ranges after removing %4$d allowlisted ones, blocklist feeds %5$s. Rebuilt after changes (at most every 10 seconds) and again after %6$s, when the next temporary rule expires; scheduled tasks can run late, so expiry reaches the other layers eventually, not to the second. WordPress itself always applies expiry immediately.', 'sentinel-shield' ), (int) ( $state['generation'] ?? 0 ), wp_date( 'Y-m-d H:i', (int) $state['built'] ), (int) $state['block'], (int) $state['allow'], ! empty( $state['feeds'] ) ? __( 'included', 'sentinel-shield' ) : __( 'not included', 'sentinel-shield' ), wp_date( 'Y-m-d H:i', (int) $state['valid_until'] ) );
 			echo '<p>' . esc_html( $text ) . '</p>';
+			$this->layers( $settings, $state );
 			if ( isset( $state['enforcing'] ) && ! $state['enforcing'] ) {
 				$this->status( 'warn', __( 'WordPress is not enforcing IP blocks (protection or the IP gate is off), so every layer gets an empty policy.', 'sentinel-shield' ) );
 			}
@@ -109,6 +120,7 @@ final class ServerPanel {
 			$labels = array(
 				'applying' => array( 'warn', __( 'Sent to Cloudflare, waiting for it to confirm', 'sentinel-shield' ) ),
 				'active'   => array( 'ok', __( 'Active at Cloudflare', 'sentinel-shield' ) ),
+				'empty'    => array( 'ok', __( 'List confirmed empty at Cloudflare', 'sentinel-shield' ) ),
 				'cleared'  => array( 'ok', __( 'List emptied at Cloudflare', 'sentinel-shield' ) ),
 				'failed'   => array( 'bad', __( 'Failed', 'sentinel-shield' ) ),
 				'unknown'  => array( 'warn', __( 'Not confirmed by Cloudflare', 'sentinel-shield' ) ),
@@ -123,7 +135,15 @@ final class ServerPanel {
 			if ( ! empty( $sync['error'] ) ) {
 				$text .= ' ' . (string) $sync['error'];
 			}
+			if ( 'applying' === ( $sync['status'] ?? '' ) && 'empty' === ( $sync['want'] ?? '' ) ) {
+				$label = array( 'warn', __( 'Emptying sent to Cloudflare, waiting for it to confirm', 'sentinel-shield' ) );
+				$text  = $label[1] . '.';
+			}
 			$this->status( $label[0], $text );
+			foreach ( (array) ( $sync['retired'] ?? array() ) as $old ) {
+				/* translators: 1: list ID, 2: status. */
+				$this->status( 'failed' === ( $old['status'] ?? '' ) ? 'bad' : 'warn', sprintf( __( 'Previous list %1$s: being emptied before it is forgotten (%2$s).', 'sentinel-shield' ), (string) ( $old['list'] ?? '' ), (string) ( $old['status'] ?? '' ) . ( empty( $old['error'] ) ? '' : ': ' . (string) $old['error'] ) ) );
+			}
 		}
 		View::form_open( 'server' );
 		echo '<input type="hidden" name="op" value="cf_token">';
@@ -143,7 +163,51 @@ final class ServerPanel {
 			}
 			echo '</p>';
 		}
-		echo '<p class="description">' . esc_html__( 'Then add a WAF custom rule in Cloudflare (Security → WAF → Custom rules) with the expression (ip.src in $your_list_name) and the action Block.', 'sentinel-shield' ) . '</p></div>';
+		echo '<p class="description">' . esc_html__( 'Then add a WAF custom rule in Cloudflare (Security → WAF → Custom rules) with the expression (ip.src in $your_list_name) and the action Block.', 'sentinel-shield' ) . '</p>';
+		echo '<p class="description">' . esc_html__( 'Before deactivating the plugin, switch sync off here and wait until the list shows as confirmed empty. Deactivation also empties the list and waits a few seconds for Cloudflare; if Cloudflare does not confirm in that time, the site admin is emailed how to empty the list by hand (in Cloudflare: Manage Account → Configurations → Lists, or remove the WAF rule).', 'sentinel-shield' ) . '</p></div>';
+	}
+
+	/**
+	 * Desired, published and confirmed policy for each layer.
+	 *
+	 * @param Settings             $settings Settings.
+	 * @param array<string, mixed> $state    Early firewall build state.
+	 */
+	private function layers( Settings $settings, array $state ): void {
+		$gen  = (int) ( $state['generation'] ?? 0 );
+		$rows = array();
+		/* translators: %d: generation. */
+		$rows[ __( 'WordPress', 'sentinel-shield' ) ] = sprintf( __( 'generation %d, applied immediately', 'sentinel-shield' ), $gen );
+		if ( 'off' !== $this->c->get( EarlyGate::class )->mode() ) {
+			$pub = (int) ( $state['published'] ?? 0 );
+			$rows[ __( 'Early firewall', 'sentinel-shield' ) ] = $pub === $gen
+				/* translators: %d: generation. */
+				? sprintf( __( 'generation %d published', 'sentinel-shield' ), $pub )
+				/* translators: 1: generation in use, 2: wanted generation. */
+				: sprintf( __( 'generation %1$d still in use; %2$d not published yet', 'sentinel-shield' ), $pub, $gen );
+		}
+		if ( $settings->get( 'firewall.server_files', false ) ) {
+			/* translators: %d: generation. */
+			$rows[ __( 'Server files', 'sentinel-shield' ) ] = sprintf( __( 'generation %d written; active only after the web server reloads', 'sentinel-shield' ), (int) ( $state['server_generation'] ?? 0 ) );
+		}
+		if ( $settings->get( 'cloudflare.sync', false ) ) {
+			$sync = CloudflareSync::state();
+			$cf   = (int) ( $sync['generation'] ?? 0 );
+			$rows[ __( 'Cloudflare', 'sentinel-shield' ) ] = match ( (string) ( $sync['status'] ?? '' ) ) {
+				/* translators: %d: generation. */
+				'active', 'empty' => sprintf( __( 'generation %d confirmed active', 'sentinel-shield' ), $cf ),
+				/* translators: %d: generation. */
+				'applying'        => sprintf( __( 'generation %d sent, not confirmed yet', 'sentinel-shield' ), $cf ),
+				'failed'          => __( 'last upload failed; retried every five minutes', 'sentinel-shield' ),
+				'unknown'         => __( 'last upload never confirmed; it is sent again', 'sentinel-shield' ),
+				default           => __( 'not synced yet', 'sentinel-shield' ),
+			};
+		}
+		echo '<table class="widefat striped ss-narrow"><thead><tr><th>' . esc_html__( 'Layer', 'sentinel-shield' ) . '</th><th>' . esc_html__( 'Policy', 'sentinel-shield' ) . '</th></tr></thead><tbody>';
+		foreach ( $rows as $layer => $text ) {
+			echo '<tr><td>' . esc_html( $layer ) . '</td><td>' . esc_html( $text ) . '</td></tr>';
+		}
+		echo '</tbody></table>';
 	}
 
 	/**

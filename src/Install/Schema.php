@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace SentinelShield\Install;
 
+use SentinelShield\Firewall\EarlyGate;
 use SentinelShield\Settings;
 
 defined( 'ABSPATH' ) || exit;
@@ -22,7 +23,7 @@ defined( 'ABSPATH' ) || exit;
  */
 final class Schema {
 
-	public const VERSION = 5;
+	public const VERSION = 6;
 	public const OPTION  = 'sentinel_shield_db_version';
 
 	/**
@@ -62,6 +63,13 @@ final class Schema {
 	 */
 	private static function migrations(): array {
 		return array(
+			// 0.8.2: 0.8.0 kept the early firewall snapshot (with allowlisted
+			// addresses), its block log and the server files in public uploads.
+			// Migrations run while plugins load, before all of WordPress is
+			// available, so the cleanup itself runs on init (and hourly until done).
+			6 => static function (): void {
+				EarlyGate::mark_legacy_pending();
+			},
 			// 0.6.0: automatic administrator allowlist entries expire unless used.
 			4 => static function (): void {
 				global $wpdb;

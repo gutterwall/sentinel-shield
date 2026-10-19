@@ -25,7 +25,7 @@ defined( 'ABSPATH' ) || exit;
  */
 final class FeedSnapshot implements RangeLookup {
 
-	private const MAGIC  = "SSFEED1\0";
+	public const MAGIC   = "SSFEED1\0";
 	private const HEADER = 16;
 	private const WIDTH  = array(
 		4 => 8,
@@ -63,6 +63,34 @@ final class FeedSnapshot implements RangeLookup {
 	}
 
 	/**
+	 * Reads a whole range file back into a set (null if missing or damaged).
+	 *
+	 * @param string $path File.
+	 */
+	public static function read_set( string $path ): ?IpRangeSet {
+		$raw = is_readable( $path ) ? (string) file_get_contents( $path ) : ''; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Our own binary file.
+		if ( strlen( $raw ) < self::HEADER || self::MAGIC !== substr( $raw, 0, 8 ) ) {
+			return null;
+		}
+		$n = (array) unpack( 'Nv4/Nv6', substr( $raw, 8, 8 ) );
+		if ( strlen( $raw ) !== self::HEADER + 8 * (int) $n['v4'] + 32 * (int) $n['v6'] ) {
+			return null;
+		}
+		$pairs  = array();
+		$offset = self::HEADER;
+		foreach ( array(
+			4  => (int) $n['v4'],
+			16 => (int) $n['v6'],
+		) as $len => $count ) {
+			for ( $i = 0; $i < $count; $i++ ) {
+				$pairs[] = array( substr( $raw, $offset, $len ), substr( $raw, $offset + $len, $len ) );
+				$offset += 2 * $len;
+			}
+		}
+		return IpRangeSet::from_pairs( $pairs );
+	}
+
+	/**
 	 * Writes a snapshot. Returns false when the folder is not writable.
 	 *
 	 * @param IpRangeSet $set  Ranges.
@@ -76,7 +104,7 @@ final class FeedSnapshot implements RangeLookup {
 		GeoUpdater::protect_dir( $dir );
 		$v4  = $set->pairs( 4 );
 		$v6  = $set->pairs( 6 );
-		$tmp = $path . '.' . wp_generate_password( 8, false ) . '.tmp';
+		$tmp = $path . '.' . bin2hex( random_bytes( 4 ) ) . '.tmp';
 		$out = @fopen( $tmp, 'wb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Unwritable folder: caller falls back.
 		if ( false === $out ) {
 			return false;

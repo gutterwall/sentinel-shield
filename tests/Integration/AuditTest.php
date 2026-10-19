@@ -165,6 +165,33 @@ final class AuditTest extends \WP_UnitTestCase {
 		$this->assertTrue( $this->exporter->in_scope( 'blocked' ) );
 	}
 
+	public function test_undelivered_events_survive_retention_pruning(): void {
+		$export = $this->exporter( array( 'webhook_url' => 'https://logs.example.test/in' ) );
+		self::log( 'lockout' );
+		$this->status = 503;
+		$export->run();
+		global $wpdb;
+		$events = Plugin::instance()->container()->get( EventRepository::class );
+		$table  = $events->table();
+		self::log( 'lockout' );
+		self::log( 'lockout' );
+		$ids = array_map( 'intval', $wpdb->get_col( $wpdb->prepare( 'SELECT id FROM %i ORDER BY id', $table ) ) );
+		// All three are older than the 30-day retention; the last is older than 90 days.
+		$wpdb->query( $wpdb->prepare( 'UPDATE %i SET created_at = %s WHERE id IN (%d, %d)', $table, gmdate( 'Y-m-d H:i:s', time() - 40 * DAY_IN_SECONDS ), $ids[0], $ids[1] ) );
+		$wpdb->query( $wpdb->prepare( 'UPDATE %i SET created_at = %s WHERE id = %d', $table, gmdate( 'Y-m-d H:i:s', time() - 100 * DAY_IN_SECONDS ), $ids[2] ) );
+		$this->assertSame( 3, $export->backlog() );
+		$this->assertGreaterThan( 39 * DAY_IN_SECONDS, time() - $export->oldest_unsent() );
+
+		$export->note_dropped();
+		$deleted = $events->prune( 30, $export->retention_cursor(), AuditExporter::KEEP_UNSENT_DAYS );
+		$this->assertSame( 1, $deleted, 'only the undelivered event older than 90 days is pruned' );
+		$this->assertSame( 2, $export->backlog() );
+		$this->assertSame( 1, AuditExporter::state()['dropped'], 'and counted as a gap' );
+
+		// Without a webhook, retention applies to everything.
+		$this->assertSame( 2, $events->prune( 30 ) );
+	}
+
 	public function test_failures_back_off_and_keep_the_events(): void {
 		$export = $this->exporter( array( 'webhook_url' => 'https://logs.example.test/in' ) );
 		$this->status = 503;

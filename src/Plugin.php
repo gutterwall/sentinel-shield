@@ -52,6 +52,7 @@ use SentinelShield\Repository\OffenseRepository;
 use SentinelShield\Repository\TokenRepository;
 use SentinelShield\Safety\AdminProtection;
 use SentinelShield\Safety\SafetyGuard;
+use SentinelShield\Support\DataDir;
 use SentinelShield\Support\I18n;
 use SentinelShield\TwoFactor\SecretBox;
 use SentinelShield\TwoFactor\TwoFactorLogin;
@@ -312,6 +313,8 @@ final class Plugin {
 		$this->booted = true;
 
 		Schema::maybe_upgrade();
+		// WP-CLI and cron have no document root; remember the web server's.
+		DataDir::remember_document_root();
 
 		$this->modules = array(
 			'ip_gate'      => new IpGateModule(),

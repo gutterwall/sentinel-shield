@@ -20,7 +20,7 @@ foreach ( array( 'sentinel_ip_rules', 'sentinel_events', 'sentinel_offenses', 's
 
 // Read before the options are deleted below.
 $sentinel_shield_data = get_site_option( 'sentinel_shield_data_dir' );
-foreach ( array( 'sentinel_shield_settings', 'sentinel_shield_db_version', 'sentinel_shield_secret', 'sentinel_shield_cloudflare_ranges', 'sentinel_shield_welcome', 'sentinel_shield_feeds_state', 'sentinel_shield_admin_approvals', 'sentinel_shield_scan_report', 'sentinel_shield_scan_baseline', 'sentinel_shield_scan_uploads', 'sentinel_shield_integrity_state', 'sentinel_shield_integrity_report', 'sentinel_shield_gate_state', 'sentinel_shield_data_dir', 'sentinel_shield_audit_state', 'sentinel_shield_audit_secret', 'sentinel_shield_mail_health', 'sentinel_shield_gate_dirty', 'sentinel_shield_cf_token', 'sentinel_shield_cf_state', 'sentinel_shield_lock_health', 'sentinel_shield_maintenance_last', 'sentinel_shield_report_gen', 'sentinel_shield_geo_db' ) as $sentinel_shield_option ) {
+foreach ( array( 'sentinel_shield_settings', 'sentinel_shield_db_version', 'sentinel_shield_secret', 'sentinel_shield_cloudflare_ranges', 'sentinel_shield_welcome', 'sentinel_shield_feeds_state', 'sentinel_shield_admin_approvals', 'sentinel_shield_scan_report', 'sentinel_shield_scan_baseline', 'sentinel_shield_scan_uploads', 'sentinel_shield_integrity_state', 'sentinel_shield_integrity_report', 'sentinel_shield_gate_state', 'sentinel_shield_data_dir', 'sentinel_shield_audit_state', 'sentinel_shield_audit_secret', 'sentinel_shield_mail_health', 'sentinel_shield_gate_dirty', 'sentinel_shield_cf_token', 'sentinel_shield_cf_state', 'sentinel_shield_lock_health', 'sentinel_shield_maintenance_last', 'sentinel_shield_report_gen', 'sentinel_shield_geo_db', 'sentinel_shield_document_root', 'sentinel_shield_legacy_files' ) as $sentinel_shield_option ) {
 	delete_site_option( $sentinel_shield_option );
 }
 
@@ -72,9 +72,15 @@ if ( is_file( $sentinel_shield_loader ) && str_contains( (string) file_get_conte
 
 // Private data folder (early firewall snapshot, block log, server files).
 if ( is_array( $sentinel_shield_data ) && ! empty( $sentinel_shield_data['path'] ) && is_dir( (string) $sentinel_shield_data['path'] ) ) {
-	foreach ( array( 'gate.json', 'gate-block.bin', 'gate-allow.bin', 'early-blocks.log', 'early-blocks.log.import', 'nginx-deny.conf', 'apache-deny.conf', 'gate.disabled' ) as $sentinel_shield_file ) {
-		if ( is_file( $sentinel_shield_data['path'] . '/' . $sentinel_shield_file ) ) {
-			wp_delete_file( $sentinel_shield_data['path'] . '/' . $sentinel_shield_file );
+	$sentinel_shield_path = (string) $sentinel_shield_data['path'];
+	foreach ( array( 'gate.json', 'early-blocks.log', 'early-blocks.log.import', 'nginx-deny.conf', 'apache-deny.conf', 'gate.disabled', 'index.php', '.htaccess' ) as $sentinel_shield_file ) {
+		if ( is_file( $sentinel_shield_path . '/' . $sentinel_shield_file ) ) {
+			wp_delete_file( $sentinel_shield_path . '/' . $sentinel_shield_file );
+		}
+	}
+	foreach ( array_merge( (array) glob( $sentinel_shield_path . '/gate-*.bin' ), (array) glob( $sentinel_shield_path . '/*.tmp' ) ) as $sentinel_shield_file ) {
+		if ( is_string( $sentinel_shield_file ) && is_file( $sentinel_shield_file ) ) {
+			wp_delete_file( $sentinel_shield_file );
 		}
 	}
 	@rmdir( (string) $sentinel_shield_data['path'] ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- Only if empty.
@@ -88,7 +94,7 @@ $sentinel_shield_dir = trailingslashit( wp_upload_dir( null, false )['basedir'] 
 if ( is_multisite() ) {
 	restore_current_blog();
 }
-$sentinel_shield_files = array_merge( array( 'geo-country.bin', 'geo-country.bin.new', 'geo-country.bin.new.tmp', 'index.php', '.htaccess', 'gate.json', 'gate.disabled', 'nginx-deny.conf', 'apache-deny.conf', 'early-blocks.log', 'early-blocks.log.import' ), array_map( 'basename', (array) glob( "$sentinel_shield_dir/feeds-*" ) ) );
+$sentinel_shield_files = array_merge( array( 'geo-country.bin', 'geo-country.bin.new', 'geo-country.bin.new.tmp', 'index.php', '.htaccess', 'gate.json', 'gate-block.bin', 'gate-allow.bin', 'gate.disabled', 'nginx-deny.conf', 'apache-deny.conf', 'early-blocks.log', 'early-blocks.log.import' ), array_map( 'basename', (array) glob( "$sentinel_shield_dir/feeds-*" ) ) );
 foreach ( $sentinel_shield_files as $sentinel_shield_file ) {
 	if ( is_file( "$sentinel_shield_dir/$sentinel_shield_file" ) ) {
 		wp_delete_file( "$sentinel_shield_dir/$sentinel_shield_file" );

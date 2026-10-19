@@ -20,7 +20,8 @@ defined( 'ABSPATH' ) || exit;
 final class RangeMath {
 
 	/**
-	 * $from minus $minus.
+	 * $from minus $minus, in one sweep over both sorted, merged lists
+	 * (O(n + m) instead of comparing every range with every exemption).
 	 *
 	 * @param IpRangeSet $from  Ranges.
 	 * @param IpRangeSet $minus Ranges to remove.
@@ -28,30 +29,34 @@ final class RangeMath {
 	public static function subtract( IpRangeSet $from, IpRangeSet $minus ): IpRangeSet {
 		$out = array();
 		foreach ( array( 4, 6 ) as $version ) {
-			$cuts = $minus->pairs( $version );
+			$cuts  = $minus->pairs( $version );
+			$count = count( $cuts );
+			$j     = 0;
 			foreach ( $from->pairs( $version ) as [ $start, $end ] ) {
-				$pieces = array( array( $start, $end ) );
-				foreach ( $cuts as [ $cs, $ce ] ) {
-					$next = array();
-					foreach ( $pieces as [ $ps, $pe ] ) {
-						if ( strcmp( $ce, $ps ) < 0 || strcmp( $cs, $pe ) > 0 ) {
-							$next[] = array( $ps, $pe );
-							continue;
-						}
-						if ( strcmp( $cs, $ps ) > 0 ) {
-							$next[] = array( $ps, self::step( $cs, -1 ) );
-						}
-						if ( strcmp( $ce, $pe ) < 0 ) {
-							$next[] = array( self::step( $ce, 1 ), $pe );
-						}
-					}
-					$pieces = $next;
-					if ( ! $pieces ) {
+				// Exemptions ending before this range cannot touch it or any later one.
+				while ( $j < $count && strcmp( $cuts[ $j ][1], $start ) < 0 ) {
+					++$j;
+				}
+				$cursor = $start;
+				$open   = true;
+				for ( $k = $j; $k < $count; $k++ ) {
+					[ $cs, $ce ] = $cuts[ $k ];
+					if ( strcmp( $cs, $end ) > 0 ) {
 						break;
 					}
+					if ( strcmp( $cs, $cursor ) > 0 ) {
+						$out[] = array( $cursor, self::step( $cs, -1 ) );
+					}
+					if ( strcmp( $ce, $end ) >= 0 ) {
+						$open = false;
+						break;
+					}
+					if ( strcmp( $ce, $cursor ) >= 0 ) {
+						$cursor = self::step( $ce, 1 );
+					}
 				}
-				foreach ( $pieces as $piece ) {
-					$out[] = $piece;
+				if ( $open ) {
+					$out[] = array( $cursor, $end );
 				}
 			}
 		}

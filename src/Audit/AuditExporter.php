@@ -226,6 +226,55 @@ final class AuditExporter {
 	}
 
 	/**
+	 * Undelivered events older than this many days are pruned anyway (and
+	 * counted as a delivery gap).
+	 */
+	public const KEEP_UNSENT_DAYS = 90;
+
+	/**
+	 * The last delivered event ID while a webhook is set (retention pruning
+	 * keeps everything after it), or null.
+	 */
+	public function retention_cursor(): ?int {
+		if ( '' === $this->webhook() ) {
+			return null;
+		}
+		$state = self::state();
+		return isset( $state['cursor'] ) ? (int) $state['cursor'] : null;
+	}
+
+	/**
+	 * Before pruning: counts undelivered events that are too old to keep, so
+	 * the gap in the remote log is visible.
+	 */
+	public function note_dropped(): void {
+		$cursor = $this->retention_cursor();
+		if ( null === $cursor ) {
+			return;
+		}
+		$n = $this->events->count_undelivered_older( $cursor, self::KEEP_UNSENT_DAYS );
+		if ( $n > 0 ) {
+			$state            = self::state();
+			$state['dropped'] = (int) ( $state['dropped'] ?? 0 ) + $n;
+			$state['gap']     = time();
+			update_site_option( self::STATE, $state );
+		}
+	}
+
+	/**
+	 * Time of the oldest exportable event not sent yet, or 0.
+	 */
+	public function oldest_unsent(): int {
+		global $wpdb;
+		$cursor = $this->retention_cursor();
+		if ( null === $cursor ) {
+			return 0;
+		}
+		$created = (string) $wpdb->get_var( $wpdb->prepare( 'SELECT created_at FROM %i WHERE id > %d ORDER BY id LIMIT 1', $this->events->table(), $cursor ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Live value.
+		return '' === $created ? 0 : (int) strtotime( $created . ' UTC' );
+	}
+
+	/**
 	 * Where a fresh export starts when no event has set it yet: after the
 	 * newest event (events logged before the webhook was set up are not sent;
 	 * use WP-CLI audit-export for those).

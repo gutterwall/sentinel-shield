@@ -210,6 +210,14 @@ jobs:
           wp plugin activate sentinel-shield --path=/tmp/site
           wp plugin check sentinel-shield --path=/tmp/site --format=csv --fields=file,line,type,code,message | tee /tmp/plugin-check.csv
           if grep -q ',\(ERROR\|WARNING\),' /tmp/plugin-check.csv; then echo "Plugin Check reported problems"; exit 1; fi
+      - name: Upgrade from the 0.8.0 release (legacy files in public uploads)
+        run: |
+          BASE=https://github.com/gutterwall/sentinel-shield/releases/download/v0.8.0
+          mkdir -p /tmp/old && cd /tmp/old
+          curl -fsSL --retry 5 -O "$BASE/sentinel-shield-0.8.0.zip" -O "$BASE/sentinel-shield-0.8.0.zip.sha256"
+          sha256sum -c sentinel-shield-0.8.0.zip.sha256
+          cd "$GITHUB_WORKSPACE"
+          bin/upgrade-test.sh /tmp/site http://127.0.0.1:8099 /tmp/old/sentinel-shield-0.8.0.zip "$(ls dist/sentinel-shield-*.zip)"
       - name: Server log
         if: failure()
         run: tail -100 /tmp/server.log
