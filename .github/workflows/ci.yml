@@ -408,7 +408,7 @@ jobs:
           if-no-files-found: ignore
       - name: Logs
         if: failure()
-        run: tail -50 /tmp/stack.log $STACK_DIR/*.log || true
+        run: tail -n 50 /tmp/stack.log $STACK_DIR/*.log || true
 
   layouts:
     name: Site layout (${{ matrix.layout }})

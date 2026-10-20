@@ -19,7 +19,10 @@ use SentinelShield\Repository\BlockRepository;
  * Review 5 (P1). Runs with whatever cache the suite has: transients without a
  * persistent object cache, Redis in the object-cache CI job. Whatever the
  * cache loses or keeps too long, the database decides: a block needs a rule
- * that exists, and a missing cache only costs speed.
+ * that exists, and a missing cache only costs speed. The one bound: with a
+ * persistent object cache a rule's match is cached for up to a minute, so a
+ * row deleted or edited directly in the database (not through the plugin)
+ * still counts until that entry ends; the rule's own expiry always applies.
  */
 final class CacheResilienceTest extends \WP_UnitTestCase {
 
@@ -38,6 +41,17 @@ final class CacheResilienceTest extends \WP_UnitTestCase {
 		global $wpdb;
 		$wpdb->query( $wpdb->prepare( 'DELETE FROM %i', $this->repo->table() ) );
 		$this->cache->flush();
+	}
+
+	/**
+	 * Ends the cached match for an IP, as the minute running out would.
+	 * Without a persistent object cache there is none.
+	 */
+	private function match_lapses( string $ip ): void {
+		if ( wp_using_ext_object_cache() ) {
+			$this->assertTrue( $this->blocked( $ip ), 'within the minute the cached match still counts' );
+			wp_cache_delete( 'match_' . (int) wp_cache_get( 'rules_version', RuleCache::GROUP ) . '_' . bin2hex( (string) inet_pton( $ip ) ), RuleCache::GROUP );
+		}
 	}
 
 	private function blocked( string $ip ): bool {
@@ -82,6 +96,7 @@ final class CacheResilienceTest extends \WP_UnitTestCase {
 		$wpdb->delete( $this->repo->table(), array( 'id' => $id ) );
 		( new \ReflectionProperty( RuleCache::class, 'memo' ) )->setValue( $this->cache, array() );
 		$this->assertTrue( $this->cache->get( 'block' )->contains( (string) inet_pton( '198.51.100.20' ) ), 'the cache is stale' );
+		$this->match_lapses( '198.51.100.20' );
 		$decision = $this->gate->evaluate( '198.51.100.20', '/', false, true );
 		$this->assertFalse( $decision->is_block(), 'no rule, no block' );
 		$this->assertSame( 'stale_cache', $decision->reason );
@@ -118,6 +133,28 @@ final class CacheResilienceTest extends \WP_UnitTestCase {
 		global $wpdb;
 		$wpdb->query( $wpdb->prepare( 'UPDATE %i SET expires_at = %s', $this->repo->table(), gmdate( 'Y-m-d H:i:s', time() - 1 ) ) );
 		( new \ReflectionProperty( RuleCache::class, 'memo' ) )->setValue( $this->cache, array() );
+		$this->match_lapses( '198.51.100.30' );
 		$this->assertFalse( $this->blocked( '198.51.100.30' ), 'expired in the database: not blocked, though the cached list still had it' );
+	}
+
+	public function test_a_cached_match_never_outlives_its_rule(): void {
+		$this->repo->add( 'block', Cidr::parse( '198.51.100.40' ), 'cache', 'lockout', time() + 3600 );
+		$this->cache->flush();
+		$this->assertTrue( $this->blocked( '198.51.100.40' ) );
+		global $wpdb;
+		$wpdb->query( $wpdb->prepare( 'UPDATE %i SET expires_at = %s', $this->repo->table(), gmdate( 'Y-m-d H:i:s', time() - 1 ) ) );
+		( new \ReflectionProperty( RuleCache::class, 'memo' ) )->setValue( $this->cache, array() );
+		// A cache that keeps an entry past its time (coarse TTLs, a clock step) is checked against the rule's expiry.
+		$bin  = (string) inet_pton( '198.51.100.40' );
+		$rule = array(
+			'reason'     => 'cache',
+			'expires_at' => gmdate( 'Y-m-d H:i:s', time() - 1 ),
+		);
+		$find = static fn(): ?array => null;
+		if ( wp_using_ext_object_cache() ) {
+			wp_cache_set( 'match_' . (int) wp_cache_get( 'rules_version', RuleCache::GROUP ) . '_' . bin2hex( $bin ), $rule, RuleCache::GROUP, HOUR_IN_SECONDS );
+		}
+		$this->assertNull( $this->cache->block_rule( $bin, $find ), 'an expired cached match is not used' );
+		$this->assertFalse( $this->blocked( '198.51.100.40' ) );
 	}
 }

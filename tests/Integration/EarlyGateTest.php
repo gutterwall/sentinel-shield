@@ -612,6 +612,24 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 	}
 
 	/**
+	 * Found by the live nginx test in CI: with the early firewall off, switching
+	 * server files off left nothing to build and deleted the files nginx and
+	 * Apache include, so the next reload failed.
+	 */
+	public function test_switching_every_layer_off_keeps_the_includes_loadable(): void {
+		Plugin::instance()->container()->get( BlockRepository::class )->add( 'block', Cidr::parse( '203.0.113.0/24' ), 'manual', 'manual' );
+		$this->gate( array( 'firewall' => array( 'early_gate' => 'off', 'server_files' => true ) ) )->rebuild();
+		$this->assertStringContainsString( 'deny 203.0.113.0/24;', (string) file_get_contents( DataDir::path() . '/nginx-deny.conf' ) );
+		$gate = $this->gate( array( 'firewall' => array( 'early_gate' => 'off', 'server_files' => false ) ) );
+		$this->assertFalse( $gate->wanted() );
+		$gate->settings_saved();
+		foreach ( array( 'nginx-deny.conf' => 'deny ', 'apache-deny.conf' => 'Require not ip' ) as $file => $rule ) {
+			$this->assertFileExists( DataDir::path() . "/$file", "$file emptied, not deleted" );
+			$this->assertStringNotContainsString( $rule, (string) file_get_contents( DataDir::path() . "/$file" ) );
+		}
+	}
+
+	/**
 	 * Fake Cloudflare API: records calls; answers PUT with an operation ID and
 	 * the bulk operation status with $this->cf_status.
 	 *

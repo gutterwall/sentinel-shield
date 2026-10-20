@@ -228,9 +228,11 @@ final class RuleCache {
 
 	/**
 	 * The block rule matching an IP. With a persistent object cache the match
-	 * is cached for up to a minute (never past the rule's expiry), so a flood
-	 * from one IP does not query the rules table on every request; any rule
-	 * change retires all cached matches.
+	 * is cached for up to a minute (never past the rule's expiry, which is
+	 * also checked on every read), so a flood from one IP does not query the
+	 * rules table on every request. A change made through the plugin retires
+	 * all cached matches at once; a row edited or deleted directly in the
+	 * database is noticed within that minute.
 	 *
 	 * @param string   $bin  Packed IP.
 	 * @param callable $find fn(): ?array, the database lookup.
@@ -243,7 +245,7 @@ final class RuleCache {
 		$key    = 'match_' . (int) wp_cache_get( 'rules_version', self::GROUP ) . '_' . bin2hex( $bin );
 		$found  = false;
 		$cached = wp_cache_get( $key, self::GROUP, false, $found );
-		if ( $found ) {
+		if ( $found && ( ! is_array( $cached ) || empty( $cached['expires_at'] ) || (int) strtotime( $cached['expires_at'] . ' UTC' ) > time() ) ) {
 			return is_array( $cached ) ? $cached : null;
 		}
 		$rule = $find();

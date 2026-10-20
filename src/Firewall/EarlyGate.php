@@ -679,11 +679,13 @@ final class EarlyGate {
 	 */
 	public static function delete_files( bool $state = true ): void {
 		$dir = DataDir::path();
-		foreach ( array_merge( self::snapshot_files( $dir ), array( "$dir/nginx-deny.conf", "$dir/apache-deny.conf", "$dir/early-blocks.log" ) ) as $file ) {
+		foreach ( array_merge( self::snapshot_files( $dir ), array( "$dir/early-blocks.log" ) ) as $file ) {
 			if ( is_file( $file ) ) {
 				wp_delete_file( $file );
 			}
 		}
+		// Emptied, not deleted: nginx and Apache refuse to reload when a file they include is missing.
+		self::empty_server_files();
 		if ( $state ) {
 			delete_site_option( self::STATE );
 			wp_clear_scheduled_hook( self::EXPIRY_HOOK );

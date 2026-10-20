@@ -32,6 +32,34 @@ FAILED=0
 pass() { echo "  ok   $*"; }
 fail() { echo "  FAIL $*" >&2; FAILED=1; }
 code() { curl -s -o /dev/null -w '%{http_code}' -H "X-Forwarded-For: $2" "http://127.0.0.1:$1/index.html"; }
+# What a failed nginx step looked like: the include, the reload's own errors, nginx -t, the log.
+nginx_diag() {
+	echo "    --- $DATA/nginx-deny.conf:" >&2; ls -la "$DATA/nginx-deny.conf" >&2 2>&1 || true; head -5 "$DATA/nginx-deny.conf" >&2 2>&1 || true
+	echo "    --- reload: ${RELOAD_ERR:-}" >&2
+	echo "    --- answer for 203.0.113.8: $(code 18081 203.0.113.8); master $(cat "$T/nginx/nginx.pid" 2>/dev/null) alive: $(kill -0 "$(cat "$T/nginx/nginx.pid" 2>/dev/null)" 2>/dev/null && echo yes || echo no)" >&2
+	"$NGINX_BIN" -t -p "$T/nginx" -c "$T/nginx/nginx.conf" >&2 2>&1 || true
+	tail -n 12 "$T/nginx/error.log" >&2 2>/dev/null || true
+	"${WP[@]}" sentinel early-gate status >&2 2>&1 || true
+}
+# A graceful reload is complete once the old workers are gone: until then an
+# old worker can still take a connection and answer with the old rules.
+workers_gone() { # pids...
+	for i in $(seq 1 100); do
+		local alive=0
+		for p in "$@"; do kill -0 "$p" 2>/dev/null && alive=1; done
+		[ $alive = 0 ] && return 0
+		sleep 0.1
+	done
+	return 1
+}
+# The same answer ten times in a row (a few seconds at most).
+settled() { # port ip expected
+	local streak=0
+	for i in $(seq 1 100); do
+		if [ "$(code "$1" "$2")" = "$3" ]; then streak=$((streak + 1)); [ $streak -ge 10 ] && return 0; else streak=0; sleep 0.1; fi
+	done
+	return 1
+}
 port_free() { [ "$(code "$1" 198.51.100.1)" = 000 ] || { echo "Port $1 is already in use (a server left over from an earlier run?)" >&2; exit 1; }; }
 
 echo "Server configuration test"
@@ -68,7 +96,7 @@ if [ "${SKIP_NGINX:-0}" != 1 ] && [ -x "$NGINX_BIN" ]; then
 	port_free 18081
 	cat > "$T/nginx/nginx.conf" <<EOF
 pid $T/nginx/nginx.pid;
-error_log $T/nginx/error.log;
+error_log $T/nginx/error.log notice;
 events { worker_connections 64; }
 http {
 	access_log off;
@@ -89,11 +117,13 @@ EOF
 	check_enforcing 18081 nginx
 	empty_policy
 	"$NGINX_BIN" -t -p "$T/nginx" -c "$T/nginx/nginx.conf" >/dev/null 2>&1 && pass "nginx -t accepts the emptied file" || fail "nginx rejects the emptied file"
-	"$NGINX_BIN" -s reload -p "$T/nginx" -c "$T/nginx/nginx.conf" 2>/dev/null
-	for i in $(seq 1 100); do [ "$(code 18081 203.0.113.8)" = 200 ] && break; sleep 0.1; done
-	[ "$(code 18081 203.0.113.8)" = 200 ] && pass "nginx: after unblocking and a reload, the address gets through" || fail "nginx still refuses 203.0.113.8 after reload"
+	OLD_WORKERS=$(pgrep -P "$(cat "$T/nginx/nginx.pid")" || true)
+	RELOAD_ERR=$("$NGINX_BIN" -s reload -p "$T/nginx" -c "$T/nginx/nginx.conf" 2>&1 | grep -v 'could not open error log' || true)
+	# shellcheck disable=SC2086 # One pid per word.
+	workers_gone $OLD_WORKERS || echo "    (old nginx workers still running after 10 s)" >&2
+	settled 18081 203.0.113.8 200 && pass "nginx: after unblocking and a reload, the address gets through" || { fail "nginx still refuses 203.0.113.8 after reload"; nginx_diag; }
 	"${WP[@]}" sentinel settings-set firewall.server_files 0 >/dev/null
-	"$NGINX_BIN" -t -p "$T/nginx" -c "$T/nginx/nginx.conf" >/dev/null 2>&1 && pass "nginx: switching server files off leaves a loadable (empty) include" || fail "nginx: the include broke when server files were switched off"
+	"$NGINX_BIN" -t -p "$T/nginx" -c "$T/nginx/nginx.conf" >/dev/null 2>&1 && pass "nginx: switching server files off leaves a loadable (empty) include" || { fail "nginx: the include broke when server files were switched off"; nginx_diag; }
 	"${WP[@]}" sentinel settings-set firewall.server_files 1 >/dev/null
 	restore_policy
 	kill "$(cat "$T/nginx/nginx.pid")"; rm -f "$T/nginx/nginx.pid"
@@ -132,8 +162,7 @@ EOF
 	empty_policy
 	"$APACHE_BIN" -t -f "$T/apache/httpd.conf" >/dev/null 2>&1 && pass "apache -t accepts the emptied file" || fail "Apache rejects the emptied file"
 	"$APACHE_BIN" -f "$T/apache/httpd.conf" -k graceful
-	for i in $(seq 1 50); do [ "$(code 18082 203.0.113.8)" = 200 ] && break; sleep 0.1; done
-	[ "$(code 18082 203.0.113.8)" = 200 ] && pass "Apache: after unblocking and a graceful restart, the address gets through" || fail "Apache still refuses 203.0.113.8 after reload"
+	settled 18082 203.0.113.8 200 && pass "Apache: after unblocking and a graceful restart, the address gets through" || fail "Apache still refuses 203.0.113.8 after reload"
 	restore_policy
 	"$APACHE_BIN" -f "$T/apache/httpd.conf" -k stop; sleep 0.5; rm -f "$T/apache/httpd.pid"
 else
