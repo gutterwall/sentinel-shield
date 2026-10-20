@@ -71,7 +71,8 @@ jobs:
       - name: Settings reference (docs/SETTINGS.md) is current
         run: php bin/settings-docs.php --check
       - name: Release build (versions agree, zip and checksums)
-        run: bin/build.sh --skip-tests
+        # Tags build the release; other pushes build a test zip of the same version.
+        run: bin/build.sh --skip-tests $([ "$GITHUB_REF_TYPE" = tag ] || echo --dev)
       - uses: actions/upload-artifact@v5
         with:
           name: sentinel-shield-zip

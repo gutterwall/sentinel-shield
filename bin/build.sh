@@ -8,9 +8,11 @@
 #   build.json        version, git commit, build time
 #   checksums.sha256  SHA-256 of every file (check with: sha256sum -c checksums.sha256)
 #
-# Usage: bin/build.sh [--skip-tests] [--allow-dirty]
+# Usage: bin/build.sh [--skip-tests] [--allow-dirty] [--dev]
 #   --skip-tests   skip phpcs and phpunit
 #   --allow-dirty  build uncommitted changes to tracked files (marked -dirty in build.json)
+#   --dev          allow a commit after the tagged release of this version (CI test
+#                  builds of main; marked "development": true in build.json, never a release)
 #
 # Release: bump the version (plugin header, SENTINEL_SHIELD_VERSION, readme Stable tag
 # and changelog), commit, run bin/build.sh, then: git tag -a v<version> -m "Release <version>"
@@ -18,11 +20,13 @@ set -euo pipefail
 
 SKIP_TESTS=0
 ALLOW_DIRTY=0
+DEV=0
 for arg in "$@"; do
 	case "$arg" in
 		--skip-tests) SKIP_TESTS=1 ;;
 		--allow-dirty) ALLOW_DIRTY=1 ;;
-		-h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		--dev) DEV=1 ;;
+		-h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 		*) echo "Unknown option: $arg" >&2; exit 2 ;;
 	esac
 done
@@ -54,7 +58,14 @@ if [ -n "$(git ls-files --others --exclude-standard)" ]; then
 fi
 COMMIT=$(git rev-parse HEAD)
 if TAGGED=$(git rev-parse -q --verify "refs/tags/v$VERSION^{commit}"); then
-	[ "$TAGGED" = "$COMMIT" ] || fail "tag v$VERSION already exists on another commit; bump the version"
+	if [ "$TAGGED" != "$COMMIT" ]; then
+		[ "$DEV" = 1 ] || fail "tag v$VERSION already exists on another commit; bump the version (or --dev for a test build)"
+		echo "build: development build: v$VERSION was released from another commit" >&2
+	else
+		DEV=0
+	fi
+else
+	DEV=0
 fi
 
 # 3. Generated docs, coding standards, tests.
@@ -86,12 +97,14 @@ done < <(find "$STAGE/$SLUG" -name '*.php' -print0)
 
 BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 FILES=$(find "$STAGE/$SLUG" -type f | wc -l)
+DEV_LINE=""
+[ "$DEV" = 1 ] && DEV_LINE=$'\n\t"development": true,'
 cat > "$STAGE/$SLUG/build.json" <<JSON
 {
 	"name": "$SLUG",
 	"version": "$VERSION",
 	"commit": "$COMMIT$DIRTY",
-	"built": "$BUILT",
+	"built": "$BUILT",$DEV_LINE
 	"files": $((FILES + 2))
 }
 JSON
