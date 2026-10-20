@@ -177,7 +177,7 @@ The release zip built by the lint job is the one tested by the later jobs. On a 
 
 ### Coverage: where it stands
 
-Measured for 0.8.3 (lines on every push; branches nightly, counting each way out of every branch point):
+Measured for 0.8.4 (lines on every push; branches nightly, counting each way out of every branch point):
 
 | Area | Lines | Branches | Goal |
 |---|---|---|---|

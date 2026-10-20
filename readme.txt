@@ -4,7 +4,7 @@ Tags: security, firewall, two-factor, brute force, login
 Requires at least: 6.4
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.8.3
+Stable tag: 0.8.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -77,7 +77,7 @@ Nothing below is contacted unless stated as a default or you switch it on.
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.8.3.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.8.4.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
@@ -199,7 +199,8 @@ No. Test mode only records what would have been blocked. Use it to validate sett
 
 == Changelog ==
 
-= 0.8.3 =
+= 0.8.4 =
+0.8.3 was tagged but not released (its CI run found the two server-file and cache issues below); 0.8.4 contains all of it.
 Evidence before features: a fifth review asked for measurable testing under failure and load. Changes users notice:
 * Passkeys: a new setting, Passkey user verification. By default a security key that only checks a touch is accepted after the password; "Always require" asks for fingerprint, face or PIN at login and when adding a key, and refuses responses without it. Confirming identity with a passkey alone (no password) now always requires that check. Without PHP's OpenSSL extension only Ed25519 passkeys are offered and the health screen says so, instead of a fatal error at login.
 * Policy publication is durable and off visitors' requests: a change made by a visitor's request (a lockout at the login form) is published by a background job; the marker survives a build that dies half-way, a change that arrives during a build is not lost, and the health screen warns when publication is overdue (WP-Cron not running).
@@ -303,7 +304,7 @@ Security fixes from a code review:
 
 == Upgrade Notice ==
 
-= 0.8.3 =
+= 0.8.4 =
 New passkey verification setting, durable background policy publication, storage limits, full-disk and crash safety, and a much larger test suite. Uninstall now removes all data it should. No action needed.
 
 = 0.8.2 =
