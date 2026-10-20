@@ -4,7 +4,7 @@ Tags: security, firewall, two-factor, brute force, login
 Requires at least: 6.4
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.8.4
+Stable tag: 0.8.5
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -77,7 +77,7 @@ Nothing below is contacted unless stated as a default or you switch it on.
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.8.4.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.8.5.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
@@ -199,6 +199,12 @@ No. Test mode only records what would have been blocked. Use it to validate sett
 
 == Changelog ==
 
+= 0.8.5 =
+Release tooling only; the plugin code is the same as 0.8.4.
+* CI: composer audit is retried when packagist cannot be reached (findings still fail at once); the browser passkey test waits longer for Chrome and reports why it did not start.
+* Builds: test builds of commits after a release are allowed with bin/build.sh --dev and marked "development": true in build.json; release builds from tags stay strict.
+* Upgrade tests now also start from 0.8.4.
+
 = 0.8.4 =
 0.8.3 was tagged but not released (its CI run found the two server-file and cache issues below); 0.8.4 contains all of it.
 Evidence before features: a fifth review asked for measurable testing under failure and load. Changes users notice:
@@ -303,6 +309,9 @@ Security fixes from a code review:
 * Phase 1: core framework, client IP detection, IP rules, lockout engine, lockout safety, test mode tooling, events, WP-CLI.
 
 == Upgrade Notice ==
+
+= 0.8.5 =
+No plugin changes since 0.8.4; release tooling and CI only.
 
 = 0.8.4 =
 New passkey verification setting, durable background policy publication, storage limits, full-disk and crash safety, and a much larger test suite. Uninstall now removes all data it should. No action needed.

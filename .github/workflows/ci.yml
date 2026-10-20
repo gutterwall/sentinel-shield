@@ -318,7 +318,7 @@ jobs:
       - name: Earlier releases (checksum-verified)
         run: |
           mkdir -p /tmp/old && cd /tmp/old
-          for v in 0.8.0 0.8.1 0.8.2; do
+          for v in 0.8.0 0.8.1 0.8.2 0.8.4; do
             BASE=https://github.com/gutterwall/sentinel-shield/releases/download/v$v
             curl -fsSL --retry 5 -O "$BASE/sentinel-shield-$v.zip" -O "$BASE/sentinel-shield-$v.zip.sha256"
             sha256sum -c sentinel-shield-$v.zip.sha256
@@ -326,7 +326,7 @@ jobs:
       - name: Upgrade from the 0.8.0 release (legacy files in public uploads)
         run: bin/upgrade-test.sh /tmp/site http://127.0.0.1:8099 /tmp/old/sentinel-shield-0.8.0.zip "$(ls dist/sentinel-shield-*.zip)"
       - name: Install, deactivate, reactivate, uninstall and upgrade matrix (the release zip)
-        run: bin/lifecycle-test.sh /tmp/site http://127.0.0.1:8099 "$(ls dist/sentinel-shield-*.zip)" /tmp/old/sentinel-shield-0.8.0.zip /tmp/old/sentinel-shield-0.8.1.zip /tmp/old/sentinel-shield-0.8.2.zip
+        run: bin/lifecycle-test.sh /tmp/site http://127.0.0.1:8099 "$(ls dist/sentinel-shield-*.zip)" /tmp/old/sentinel-shield-0.8.0.zip /tmp/old/sentinel-shield-0.8.1.zip /tmp/old/sentinel-shield-0.8.2.zip /tmp/old/sentinel-shield-0.8.4.zip
       - name: Server log
         if: failure()
         run: tail -100 /tmp/server.log
