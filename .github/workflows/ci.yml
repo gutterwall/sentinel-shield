@@ -52,7 +52,14 @@ jobs:
       - name: Static analysis (PHPStan level 6)
         run: vendor/bin/phpstan analyse --no-progress --memory-limit=1G
       - name: Known vulnerabilities in dependencies
-        run: composer audit
+        # Retried only when packagist cannot be reached (exit 100); findings fail at once.
+        run: |
+          for i in 1 2 3; do
+            rc=0; composer audit || rc=$?
+            [ $rc -ne 100 ] && exit $rc
+            echo "packagist unreachable; retrying in 20 s"; sleep 20
+          done
+          exit 100
       - name: Secret scan (whole history)
         run: |
           V=8.21.2

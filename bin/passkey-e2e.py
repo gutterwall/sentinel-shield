@@ -129,17 +129,30 @@ class Browser:
                  '--no-first-run', '--no-default-browser-check', '--disable-gpu']
         if os.environ.get('CHROME_SPKI'):
             flags.append('--ignore-certificate-errors-spki-list=' + os.environ['CHROME_SPKI'])
+        self.log = tempfile.TemporaryFile()
         self.proc = subprocess.Popen([os.environ.get('CHROME', 'google-chrome'), *flags, 'about:blank'],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                     stdout=subprocess.DEVNULL, stderr=self.log)
+        base = f'http://127.0.0.1:{port}/json'
         pages = []
-        for _ in range(60):
+        # A slow runner can take a while to start Chrome, and it can come up without a page.
+        for i in range(180):
+            if self.proc.poll() is not None:
+                break
             try:
-                pages = [t for t in json.load(urllib.request.urlopen(f'http://127.0.0.1:{port}/json/list')) if t['type'] == 'page']
+                pages = [t for t in json.load(urllib.request.urlopen(base + '/list', timeout=5)) if t['type'] == 'page']
                 if pages:
                     break
+                if i >= 8:
+                    urllib.request.urlopen(urllib.request.Request(base + '/new?about:blank', method='PUT'), timeout=5).read()
             except Exception:
                 pass
             time.sleep(0.25)
+        if not pages:
+            self.log.seek(0)
+            tail = self.log.read().decode(errors='replace')[-2000:]
+            state = f'exited with {self.proc.returncode}' if self.proc.poll() is not None else 'running, no page after 45 s'
+            self.close()
+            sys.exit(f'Chrome did not start ({state}):\n{tail}')
         self.cdp = CDP(WS(pages[0]['webSocketDebuggerUrl']))
         for domain in ('Page', 'Runtime', 'Network', 'WebAuthn'):
             self.cdp.call(domain + '.enable')
