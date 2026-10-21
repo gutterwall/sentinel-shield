@@ -1048,6 +1048,45 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 	}
 
 	/**
+	 * Found by the upgrade test in CI: a cron run that WP-CLI had started
+	 * under 0.8.0 was still running when the plugin folder was replaced, and
+	 * wrote the old snapshot to uploads after the new code had cleaned up.
+	 * Hourly maintenance removes such a file; with nothing left over it
+	 * writes nothing.
+	 */
+	public function test_a_legacy_file_written_after_the_cleanup_is_removed_by_maintenance(): void {
+		$old = GeoUpdater::dir();
+		wp_mkdir_p( $old );
+		$maintain = static fn() => \SentinelShield\Modules\MaintenanceModule::run( Plugin::instance()->container(), 30.0 );
+		$checked  = static function ( int $at ): void {
+			update_site_option( EarlyGate::LEGACY, array( 'checked' => $at ) + EarlyGate::legacy_state() );
+		};
+		try {
+			file_put_contents( "$old/nginx-deny.conf", "deny 203.0.113.5;\n" );
+			EarlyGate::clean_legacy();
+			$checked( 1 );
+			$maintain();
+			$this->assertSame( 1, EarlyGate::legacy_state()['checked'], 'only the stub is left: nothing to do, nothing written' );
+
+			file_put_contents( "$old/gate.json", '{"allow":["192.0.2.10"]}' );
+			$maintain();
+			$this->assertFileDoesNotExist( "$old/gate.json" );
+			$this->assertSame( array( "$old/gate.json" ), EarlyGate::legacy_state()['removed'] );
+
+			file_put_contents( "$old/nginx-deny.conf", "deny 203.0.113.5;\n" );
+			$checked( 1 );
+			$maintain();
+			$this->assertGreaterThan( 1, EarlyGate::legacy_state()['checked'], 'an old server file is a leftover too' );
+			$this->assertStringContainsString( 'no longer updated', (string) file_get_contents( "$old/nginx-deny.conf" ) );
+		} finally {
+			foreach ( array( 'gate.json', 'nginx-deny.conf' ) as $file ) {
+				wp_delete_file( "$old/$file" );
+			}
+			delete_site_option( EarlyGate::LEGACY );
+		}
+	}
+
+	/**
 	 * Review 4 finding 5: a build that cannot be written completely leaves the
 	 * previous generation in place and is retried.
 	 */

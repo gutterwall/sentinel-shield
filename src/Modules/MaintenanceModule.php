@@ -119,7 +119,7 @@ final class MaintenanceModule implements ModuleInterface {
 				+ $logins->trim( (int) $settings->get( 'login.history_max_rows', 500000 ), time() - $window, $deadline ),
 			'early'    => static fn(): int => $gate->import_log(),
 			'legacy'   => static function (): int {
-				EarlyGate::maybe_clean_legacy();
+				EarlyGate::clean_legacy_leftovers();
 				return 0;
 			},
 			'policy'   => static function () use ( $gate, $deadline ): int {

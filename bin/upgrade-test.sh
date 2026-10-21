@@ -15,13 +15,21 @@ WP_PATH=$1
 URL=${2%/}
 OLD=$3
 NEW=$4
-WP=(wp --path="$WP_PATH")
+# WP-CLI starts a cron run on the web server when events are due. One started
+# under the old version can still be running when the folder is replaced and
+# write old files after the cleanup (handled hourly; checked at the end), so
+# the commands here start none, and any started earlier is waited for.
+WP=(wp --path="$WP_PATH" --exec="define( 'DISABLE_WP_CRON', true );")
 PLUGINS="$WP_PATH/wp-content/plugins"
 UPLOADS="$WP_PATH/wp-content/uploads/sentinel-shield"
 pass() { echo "  ok   $*"; }
 fail() { echo "  FAIL $*" >&2; exit 1; }
 
 echo "Upgrade test: $(basename "$OLD") -> $(basename "$NEW")"
+for i in $(seq 1 60); do
+	[ -z "$("${WP[@]}" transient get doing_cron 2>/dev/null)" ] && break
+	sleep 1
+done
 "${WP[@]}" plugin deactivate sentinel-shield >/dev/null 2>&1 || true
 rm -rf "${PLUGINS:?}/sentinel-shield"
 unzip -q "$OLD" -d "$PLUGINS"
@@ -45,5 +53,8 @@ FAILED=$("${WP[@]}" eval 'echo count( SentinelShield\Firewall\EarlyGate::legacy_
 "${WP[@]}" sentinel early-gate rebuild >/dev/null
 DATA=$(dirname "$(cd "$WP_PATH" && pwd -P)")/sentinel-shield-data
 [ -s "$DATA/gate.json" ] && [ ! -e "$UPLOADS/gate.json" ] && pass "the new snapshot is written to the private folder" || fail "no snapshot in $DATA"
+echo '{"allow":["192.0.2.10"]}' > "$UPLOADS/gate.json"
+"${WP[@]}" cron event run sentinel_shield_maintenance >/dev/null
+[ ! -e "$UPLOADS/gate.json" ] && pass "an old snapshot written after the cleanup (by a request still running the old code) is removed hourly" || fail "a late old snapshot stays in uploads"
 "${WP[@]}" sentinel unblock 203.0.113.99 >/dev/null
 echo "Upgrade test passed."

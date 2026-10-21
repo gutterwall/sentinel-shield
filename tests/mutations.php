@@ -479,4 +479,11 @@ return array(
 		'why'         => 'an answer about another bulk operation is applied to the current state',
 		'integration' => 'CloudflareContractTest',
 	),
+	array(
+		'file'        => 'src/Firewall/EarlyGate.php',
+		'find'        => "\t\tif ( self::legacy_leftovers() ) {\n\t\t\tself::clean_legacy();\n\t\t\treturn;\n\t\t}\n",
+		'replace'     => '',
+		'why'         => 'an old snapshot written to uploads after the upgrade cleanup stays there',
+		'integration' => 'EarlyGateTest',
+	),
 );

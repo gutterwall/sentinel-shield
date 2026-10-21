@@ -72,6 +72,16 @@ final class EarlyGate {
 	public const LEGACY_SENSITIVE = array( 'gate.json', 'gate-block.bin', 'gate-allow.bin', 'early-blocks.log', 'early-blocks.log.import' );
 
 	/**
+	 * What the 0.8.0 server files in uploads are replaced with: a stub that
+	 * blocks nothing (deleting a file nginx or Apache includes would stop the
+	 * server from reloading).
+	 */
+	private const LEGACY_STUBS = array(
+		'nginx-deny.conf'  => "# Sentinel Shield: this file is no longer updated and blocks nothing. The blocklist moved to the\n# private folder shown on Settings → Server & CDN. Change the include line to the one shown there,\n# check and reload nginx (nginx -t && nginx -s reload), then delete this file.\n",
+		'apache-deny.conf' => "# Sentinel Shield: this file is no longer updated and blocks nothing. The blocklist moved to the\n# private folder shown on Settings → Server & CDN. Change the Include line to the one shown there,\n# check and reload Apache (apachectl configtest && apachectl graceful), then delete this file.\n",
+	);
+
+	/**
 	 * Whether a rebuild is scheduled for the end of this request.
 	 *
 	 * @var bool
@@ -764,19 +774,15 @@ final class EarlyGate {
 			'stubbed' => array(),
 			'failed'  => array(),
 		);
-		$doomed = array_map( static fn( string $f ): string => "$dir/$f", self::LEGACY_SENSITIVE );
-		foreach ( array_merge( $doomed, (array) glob( $dir . '/gate*.tmp' ), (array) glob( $dir . '/*-deny.conf.*.tmp' ) ) as $file ) {
-			if ( ! is_string( $file ) || ! file_exists( $file ) ) {
+		foreach ( self::legacy_files( $dir ) as $file ) {
+			if ( ! file_exists( $file ) ) {
 				continue;
 			}
 			wp_delete_file( $file );
 			clearstatcache( true, $file );
 			$result[ file_exists( $file ) ? 'failed' : 'removed' ][] = $file;
 		}
-		foreach ( array(
-			'nginx-deny.conf'  => "# Sentinel Shield: this file is no longer updated and blocks nothing. The blocklist moved to the\n# private folder shown on Settings → Server & CDN. Change the include line to the one shown there,\n# check and reload nginx (nginx -t && nginx -s reload), then delete this file.\n",
-			'apache-deny.conf' => "# Sentinel Shield: this file is no longer updated and blocks nothing. The blocklist moved to the\n# private folder shown on Settings → Server & CDN. Change the Include line to the one shown there,\n# check and reload Apache (apachectl configtest && apachectl graceful), then delete this file.\n",
-		) as $name => $stub ) {
+		foreach ( self::LEGACY_STUBS as $name => $stub ) {
 			$file = "$dir/$name";
 			if ( ! is_file( $file ) ) {
 				continue;
@@ -807,6 +813,61 @@ final class EarlyGate {
 		if ( ! empty( $state['pending'] ) || ! empty( $state['failed'] ) ) {
 			self::clean_legacy();
 		}
+	}
+
+	/**
+	 * Hourly: runs the cleanup also when a 0.8.0 file has come back after it.
+	 * A request still running the old code while the plugin was updated (a
+	 * cron run, say) can write its snapshot to uploads after the new code
+	 * cleaned up; without this it would stay there, allowlist included.
+	 * A few file checks; nothing is written when there is nothing to do.
+	 */
+	public static function clean_legacy_leftovers(): void {
+		if ( self::legacy_leftovers() ) {
+			self::clean_legacy();
+			return;
+		}
+		self::maybe_clean_legacy();
+	}
+
+	/**
+	 * Whether a 0.8.0 file is in uploads: a sensitive one, or a server file
+	 * that is not the stub.
+	 */
+	private static function legacy_leftovers(): bool {
+		$dir = GeoUpdater::dir();
+		if ( (string) realpath( $dir ) === (string) realpath( DataDir::path() ) ) {
+			return false; // The data folder was set to the old place: these files are current.
+		}
+		foreach ( self::legacy_files( $dir ) as $file ) {
+			if ( file_exists( $file ) ) {
+				return true;
+			}
+		}
+		foreach ( self::LEGACY_STUBS as $name => $stub ) {
+			if ( is_file( "$dir/$name" ) && (string) file_get_contents( "$dir/$name" ) !== $stub ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Local file.
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * The 0.8.0 files that are deleted (whether they exist or not).
+	 *
+	 * @param string $dir The old folder in uploads.
+	 * @return list<string>
+	 */
+	private static function legacy_files( string $dir ): array {
+		$files = array_map( static fn( string $f ): string => "$dir/$f", self::LEGACY_SENSITIVE );
+		foreach ( array( '/gate*.tmp', '/*-deny.conf.*.tmp' ) as $pattern ) {
+			foreach ( (array) glob( $dir . $pattern ) as $file ) {
+				if ( is_string( $file ) ) {
+					$files[] = $file;
+				}
+			}
+		}
+		return $files;
 	}
 
 	/**
