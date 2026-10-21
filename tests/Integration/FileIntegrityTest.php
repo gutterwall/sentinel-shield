@@ -340,6 +340,35 @@ final class FileIntegrityTest extends \WP_UnitTestCase {
 		$other->close();
 	}
 
+	/**
+	 * Review 6 (lost locks): a slice whose lock went to another worker keeps
+	 * nothing it did; that worker's pass continues from the saved position.
+	 */
+	public function test_a_slice_that_lost_its_lock_saves_nothing(): void {
+		$verifier = $this->verifier( self::core_md5(), array() );
+		$verifier->start( true );
+		$before = FileIntegrity::state();
+		$other  = new \SentinelShield\Tests\Fakes\OtherWorker();
+		$steal  = static function ( string $step ) use ( $other ): void {
+			if ( 'integrity:before_save' === $step ) {
+				$other->steal( 'integrity_scan' );
+			}
+		};
+		add_action( 'sentinel_shield_checkpoint', $steal );
+		try {
+			$result = $verifier->step( INF );
+		} finally {
+			remove_action( 'sentinel_shield_checkpoint', $steal );
+		}
+		$this->assertTrue( $result['busy'], 'reported as running elsewhere' );
+		$this->assertFalse( $result['done'] );
+		$this->assertSame( $before, FileIntegrity::state(), 'neither progress nor findings saved' );
+		$this->assertNull( $result['report'] );
+		$other->close();
+		$result = $verifier->step( INF );
+		$this->assertTrue( $result['done'], 'the next holder finishes the pass' );
+	}
+
 	public function test_malware_scan_reports_coverage_and_resumes_the_uploads_walk(): void {
 		$uploads = wp_get_upload_dir()['basedir'];
 		$shells  = array();

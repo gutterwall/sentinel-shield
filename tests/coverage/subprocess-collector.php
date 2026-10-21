@@ -4,7 +4,9 @@
  * start (EarlyGateTest). Used instead of early-gate.php as auto_prepend_file
  * when SENTINEL_SHIELD_SUBPROCESS_COVERAGE names a folder: starts coverage
  * (PCOV or Xdebug), runs the gate, and on shutdown (also after the gate's
- * exit) saves the request's coverage there for phpcov merge.
+ * exit) saves the request's coverage there for phpcov merge. In branch
+ * coverage runs (SENTINEL_SHIELD_BRANCH_OUT set) the branch collector is
+ * used instead, adding to the same report as the in-process tests.
  *
  * @package SentinelShield
  */
@@ -12,7 +14,10 @@
 // phpcs:disable -- Test tool, not shipped in the plugin zip.
 
 $sentinel_shield_cov_dir = (string) getenv( 'SENTINEL_SHIELD_SUBPROCESS_COVERAGE' );
-if ( '' !== $sentinel_shield_cov_dir && is_dir( $sentinel_shield_cov_dir ) ) {
+if ( '' !== (string) getenv( 'SENTINEL_SHIELD_BRANCH_OUT' ) ) {
+	require __DIR__ . '/branch-collector.php';
+	unset( $sentinel_shield_cov_dir );
+} elseif ( '' !== $sentinel_shield_cov_dir && is_dir( $sentinel_shield_cov_dir ) ) {
 	require dirname( __DIR__, 2 ) . '/vendor/autoload.php';
 	$sentinel_shield_cov_filter = new SebastianBergmann\CodeCoverage\Filter();
 	$sentinel_shield_cov_filter->includeFile( dirname( __DIR__, 2 ) . '/early-gate.php' );

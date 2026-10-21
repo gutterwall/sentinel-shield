@@ -13,6 +13,7 @@ use SentinelShield\Net\Cidr;
 use SentinelShield\Net\RangeMath;
 use SentinelShield\Net\IpRangeSet;
 use SentinelShield\Settings;
+use SentinelShield\Support\Mutex;
 use SentinelShield\TwoFactor\SecretBox;
 
 defined( 'ABSPATH' ) || exit;
@@ -26,6 +27,17 @@ defined( 'ABSPATH' ) || exit;
  *
  * The API token needs only "Account Filter Lists: Edit". It is stored
  * encrypted with keys from wp-config.php and never included in settings exports.
+ *
+ * Concurrency: scheduled syncs, confirmation checks, Sync now, WP-CLI,
+ * settings changes, token removal and deactivation all change one state
+ * record, and each waits on Cloudflare in between. They run one at a time
+ * under the cloudflare_sync lock (scheduled work does not wait for it and is
+ * rescheduled; explicit actions wait up to LOCK_WAIT seconds). Every state
+ * write first confirms the lock is still held (save()); a worker that lost it
+ * writes nothing more, and the intent recorded before each upload makes the
+ * next holder send it again. Answers about a bulk operation are applied only
+ * to the state that still names that operation, so a slow or stale answer
+ * can never overwrite a newer upload's state.
  */
 final class CloudflareSync {
 
@@ -35,6 +47,8 @@ final class CloudflareSync {
 	public const STATE     = 'sentinel_shield_cf_state';
 	public const MAX_ITEMS = 10000;
 	public const INTERVAL  = 300;
+	public const LOCK_WAIT = 20;
+	private const LOCK     = 'cloudflare_sync';
 	private const API      = 'https://api.cloudflare.com/client/v4/accounts/%s/rules/lists/%s';
 	private const BULK     = 'https://api.cloudflare.com/client/v4/accounts/%s/rules/lists/bulk_operations/%s';
 
@@ -177,6 +191,32 @@ final class CloudflareSync {
 	 * @return array<string, mixed> The new state.
 	 */
 	public function sync( bool $force = false ): array {
+		return $this->locked(
+			$force ? self::lock_wait() : 0,
+			fn(): array => $this->sync_locked( $force ),
+			function () use ( $force ): array {
+				if ( ! $force ) {
+					// Another update is running: try again shortly.
+					if ( ! wp_next_scheduled( self::CRON ) ) {
+						wp_schedule_single_event( time() + 30, self::CRON );
+					}
+					return self::state();
+				}
+				return array(
+					'ok'    => false,
+					'error' => __( 'Another update of the Cloudflare list is still running; try again in a minute.', 'sentinel-shield' ),
+				) + self::state();
+			}
+		);
+	}
+
+	/**
+	 * Body of sync(), under the lock.
+	 *
+	 * @param bool $force Upload even if unchanged or recent.
+	 * @return array<string, mixed> The new state.
+	 */
+	private function sync_locked( bool $force ): array {
 		$this->retry_retired();
 		if ( ! $this->enabled() ) {
 			// Switched off with items still there (an earlier clear failed): keep trying.
@@ -202,7 +242,7 @@ final class CloudflareSync {
 			if ( $same && in_array( $status, array( 'active', 'applying', 'empty' ), true ) ) {
 				// Same list already there (or on its way): nothing to upload.
 				$prior['generation'] = $gen;
-				update_site_option( self::STATE, $prior );
+				$this->save( $prior );
 				return $prior;
 			}
 			$wait = 0;
@@ -220,7 +260,9 @@ final class CloudflareSync {
 				return $prior;
 			}
 		}
-		$this->intend( $dest, $empty ? 'empty' : 'policy' );
+		if ( ! $this->intend( $dest, $empty ? 'empty' : 'policy' ) ) {
+			return self::state(); // The lock was lost: the new holder syncs.
+		}
 		$sent = $this->send( $dest, $conv['items'] );
 		do_action( 'sentinel_shield_checkpoint', 'cloudflare:sent' );
 		$state = array(
@@ -238,9 +280,11 @@ final class CloudflareSync {
 			'items'      => $sent['ok'] ? $hash : '',
 			'error'      => $sent['error'],
 			'retry_at'   => $sent['retry_at'],
-			'retired'    => (array) ( $prior['retired'] ?? array() ),
+			'retired'    => (array) ( self::state()['retired'] ?? array() ),
 		);
-		update_site_option( self::STATE, $state );
+		if ( ! $this->save( $state ) ) {
+			return self::state();
+		}
 		$this->follow_up( $state );
 		return $state;
 	}
@@ -252,23 +296,82 @@ final class CloudflareSync {
 	 * @return array<string, mixed> The state afterwards.
 	 */
 	public function check_operation(): array {
-		$state = self::state();
+		return $this->locked(
+			0,
+			fn(): array => $this->check_locked(),
+			function (): array {
+				if ( ! wp_next_scheduled( self::CHECK ) ) {
+					wp_schedule_single_event( time() + 15, self::CHECK );
+				}
+				return self::state();
+			}
+		);
+	}
+
+	/**
+	 * Body of check_operation(), under the lock. Cloudflare's answers are
+	 * matched to the state as it is after asking, by operation ID: an answer
+	 * about an operation the state no longer names changes nothing.
+	 *
+	 * @return array<string, mixed> The state afterwards.
+	 */
+	private function check_locked(): array {
+		$state   = self::state();
+		$answers = array();
 		if ( 'applying' === ( $state['status'] ?? '' ) && '' !== (string) ( $state['operation'] ?? '' ) ) {
-			$state = array_merge( $state, $this->poll( $state, (string) ( $state['want'] ?? 'policy' ) ) );
+			$answers[ self::operation_key( (array) ( $state['dest'] ?? array() ), $state ) ] = $this->poll( $state, (string) ( $state['want'] ?? 'policy' ) );
+		}
+		foreach ( (array) ( $state['retired'] ?? array() ) as $old ) {
+			if ( 'applying' === ( $old['status'] ?? '' ) && '' !== (string) ( $old['operation'] ?? '' ) ) {
+				$answers[ self::operation_key( $old, $old ) ] = $this->poll( $old, 'empty' );
+			}
+		}
+		do_action( 'sentinel_shield_checkpoint', 'cloudflare:polled' );
+		$state = self::apply_answers( self::state(), $answers );
+		if ( ! $this->save( $state ) ) {
+			return self::state();
+		}
+		$this->follow_up( $state );
+		return $state;
+	}
+
+	/**
+	 * Applies answers about bulk operations (operation_key() => changed
+	 * fields) to a state: only to an entry still applying that operation on
+	 * that list. Confirmed empty retired lists are forgotten.
+	 *
+	 * @param array<string, mixed>                $state   State.
+	 * @param array<string, array<string, mixed>> $answers Answers by operation key.
+	 * @return array<string, mixed>
+	 */
+	public static function apply_answers( array $state, array $answers ): array {
+		$current = self::operation_key( (array) ( $state['dest'] ?? array() ), $state );
+		if ( '' !== (string) ( $state['operation'] ?? '' ) && isset( $answers[ $current ] ) && 'applying' === ( $state['status'] ?? '' ) ) {
+			$state = array_merge( $state, $answers[ $current ] );
 		}
 		$retired = array();
 		foreach ( (array) ( $state['retired'] ?? array() ) as $old ) {
-			if ( 'applying' === ( $old['status'] ?? '' ) ) {
-				$old = array_merge( $old, $this->poll( $old, 'empty' ) );
+			$key = self::operation_key( $old, $old );
+			if ( '' !== (string) ( $old['operation'] ?? '' ) && isset( $answers[ $key ] ) && 'applying' === ( $old['status'] ?? '' ) ) {
+				$old = array_merge( $old, $answers[ $key ] );
 			}
 			if ( 'empty' !== ( $old['status'] ?? '' ) ) {
-				$retired[] = $old; // Confirmed empty lists are forgotten.
+				$retired[] = $old;
 			}
 		}
 		$state['retired'] = $retired;
-		update_site_option( self::STATE, $state );
-		$this->follow_up( $state );
 		return $state;
+	}
+
+	/**
+	 * Identifies one bulk operation: account, list and operation ID
+	 * (operation IDs are only unique within an account).
+	 *
+	 * @param array<string, mixed> $dest  account, list.
+	 * @param array<string, mixed> $entry State or retired entry with operation.
+	 */
+	private static function operation_key( array $dest, array $entry ): string {
+		return (string) ( $dest['account'] ?? '' ) . '/' . (string) ( $dest['list'] ?? '' ) . '/' . (string) ( $entry['operation'] ?? '' );
 	}
 
 	/**
@@ -283,15 +386,27 @@ final class CloudflareSync {
 	 * @return bool Whether the list is confirmed empty now.
 	 */
 	public function clear_remote( string $reason, bool $wait = false ): bool {
+		return (bool) $this->locked( self::lock_wait(), fn(): bool => $this->clear_locked( $reason, $wait ), static fn(): bool => false );
+	}
+
+	/**
+	 * Body of clear_remote(), under the lock.
+	 *
+	 * @param string $reason Why, for the state.
+	 * @param bool   $wait   Wait briefly for Cloudflare's confirmation.
+	 */
+	private function clear_locked( string $reason, bool $wait ): bool {
 		$state = self::state();
 		$dest  = ! empty( $state['dest'] ) ? (array) $state['dest'] : $this->destination();
 		if ( '' === $this->token() || '' === (string) ( $dest['account'] ?? '' ) || '' === (string) ( $dest['list'] ?? '' ) || ! $this->manages_items() ) {
 			return ! $this->manages_items();
 		}
-		$this->intend( $dest, 'empty' );
+		if ( ! $this->intend( $dest, 'empty' ) ) {
+			return false;
+		}
 		$sent  = $this->send( $dest, array() );
 		$state = array_merge(
-			$state,
+			self::state(),
 			array(
 				'time'      => time(),
 				'ok'        => $sent['ok'],
@@ -309,7 +424,9 @@ final class CloudflareSync {
 		if ( $sent['ok'] ) {
 			$state['count'] = 0;
 		}
-		update_site_option( self::STATE, $state );
+		if ( ! $this->save( $state ) ) {
+			return false;
+		}
 		if ( $wait ) {
 			/**
 			 * Seconds between confirmation checks while waiting (deactivation).
@@ -370,10 +487,10 @@ final class CloudflareSync {
 	 *
 	 * @param array<string, string> $dest account, list.
 	 * @param string                $want policy or empty.
+	 * @return bool False when the lock was lost (nothing may be sent then).
 	 */
-	private function intend( array $dest, string $want ): void {
-		update_site_option(
-			self::STATE,
+	private function intend( array $dest, string $want ): bool {
+		$saved = $this->save(
 			array_merge(
 				self::state(),
 				array(
@@ -387,6 +504,7 @@ final class CloudflareSync {
 			)
 		);
 		$this->fallback();
+		return $saved;
 	}
 
 	/**
@@ -409,8 +527,7 @@ final class CloudflareSync {
 		$retired = (array) ( $prior['retired'] ?? array() );
 		if ( ! empty( $prior['count'] ) || 'empty' !== ( $prior['status'] ?? '' ) ) {
 			// Remembered before the request, so a crash cannot forget the list.
-			update_site_option(
-				self::STATE,
+			$noted = $this->save(
 				array(
 					'retired' => array_merge(
 						$retired,
@@ -429,6 +546,9 @@ final class CloudflareSync {
 				)
 			);
 			$this->fallback();
+			if ( ! $noted ) {
+				return; // The lock was lost: the new holder empties it.
+			}
 			$sent      = $this->send( $dest, array() );
 			$retired[] = array(
 				'account'   => (string) ( $dest['account'] ?? '' ),
@@ -440,8 +560,7 @@ final class CloudflareSync {
 				'error'     => $sent['error'],
 			);
 		}
-		update_site_option(
-			self::STATE,
+		$this->save(
 			array(
 				'retired' => array_values( array_filter( $retired, static fn( array $r ): bool => 'empty' !== ( $r['status'] ?? '' ) ) ),
 			)
@@ -471,8 +590,9 @@ final class CloudflareSync {
 		}
 		if ( $changed ) {
 			$state['retired'] = array_values( array_filter( (array) $state['retired'], static fn( array $r ): bool => 'empty' !== ( $r['status'] ?? '' ) ) );
-			update_site_option( self::STATE, $state );
-			$this->follow_up( $state );
+			if ( $this->save( $state ) ) {
+				$this->follow_up( $state );
+			}
 		}
 	}
 
@@ -571,6 +691,54 @@ final class CloudflareSync {
 				wp_schedule_single_event( $at, self::CRON );
 			}
 		}
+	}
+
+	/**
+	 * Runs $work under the cloudflare_sync lock (re-entrant: nested calls
+	 * share it), or returns $busy() when another worker holds it.
+	 *
+	 * @template T
+	 * @param int          $wait Seconds to wait for the lock.
+	 * @param callable():T $work Work.
+	 * @param callable():T $busy Result when the lock is held elsewhere.
+	 * @return T
+	 */
+	private function locked( int $wait, callable $work, callable $busy ): mixed {
+		if ( ! Mutex::acquire( self::LOCK, $wait ) ) {
+			return $busy();
+		}
+		try {
+			return $work();
+		} finally {
+			Mutex::release( self::LOCK );
+		}
+	}
+
+	/**
+	 * Seconds an explicit action waits for another update to finish.
+	 */
+	private static function lock_wait(): int {
+		/**
+		 * Seconds Sync now, WP-CLI, token removal and deactivation wait for an
+		 * update already running.
+		 *
+		 * @param int $seconds Seconds.
+		 */
+		return max( 0, (int) apply_filters( 'sentinel_shield_cloudflare_lock_wait', self::LOCK_WAIT ) );
+	}
+
+	/**
+	 * Writes the state, only while this worker still holds the lock.
+	 *
+	 * @param array<string, mixed> $state State.
+	 * @return bool False when the lock was lost (nothing written).
+	 */
+	private function save( array $state ): bool {
+		if ( ! Mutex::renew( self::LOCK ) ) {
+			return false;
+		}
+		update_site_option( self::STATE, $state );
+		return true;
 	}
 
 	/**

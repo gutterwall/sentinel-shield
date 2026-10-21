@@ -239,7 +239,9 @@ final class FileIntegrity {
 		$targets = (array) $this->state['targets'];
 		$total   = count( $targets );
 		while ( $this->state['i'] < $total && ! $this->out_of_time() ) {
-			Mutex::renew( 'integrity_scan' );
+			if ( ! Mutex::renew( 'integrity_scan' ) ) {
+				return $this->lost();
+			}
 			$target = (array) $targets[ $this->state['i'] ];
 			if ( $this->target( $target ) ) {
 				++$this->state['i'];
@@ -249,6 +251,10 @@ final class FileIntegrity {
 			}
 		}
 		$this->state['seconds'] = round( (float) $this->state['seconds'] + microtime( true ) - $start, 2 );
+		do_action( 'sentinel_shield_checkpoint', 'integrity:before_save' );
+		if ( ! Mutex::renew( 'integrity_scan' ) ) {
+			return $this->lost();
+		}
 
 		if ( $this->state['i'] < $total ) {
 			update_site_option( self::STATE_OPTION, $this->state );
@@ -265,6 +271,21 @@ final class FileIntegrity {
 			'busy'     => false,
 			'report'   => $report,
 			'progress' => self::progress( $this->state ),
+		);
+	}
+
+	/**
+	 * The scan lock was lost (another worker took the pass over): nothing from
+	 * this slice is saved, and the caller is told the pass is busy elsewhere.
+	 *
+	 * @return array{done:bool, busy:bool, report:array<string, mixed>|null, progress:array{done:int, total:int}}
+	 */
+	private function lost(): array {
+		return array(
+			'done'     => false,
+			'busy'     => true,
+			'report'   => null,
+			'progress' => self::progress( self::state() ),
 		);
 	}
 

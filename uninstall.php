@@ -49,6 +49,10 @@ if ( is_multisite() ) {
 		wp_clear_scheduled_hook( 'sentinel_shield_maintenance' );
 		wp_clear_scheduled_hook( 'sentinel_shield_maintenance', array( 'more' ) );
 		wp_clear_scheduled_hook( 'sentinel_shield_cf_refresh' );
+		wp_clear_scheduled_hook( 'sentinel_shield_audit_export' );
+		wp_clear_scheduled_hook( 'sentinel_shield_heartbeat' );
+		wp_clear_scheduled_hook( 'sentinel_shield_cloudflare_sync' );
+		wp_clear_scheduled_hook( 'sentinel_shield_cloudflare_check' );
 		wp_clear_scheduled_hook( 'sentinel_shield_feeds_tick' );
 		wp_clear_scheduled_hook( 'sentinel_shield_feeds_tick', array( 'soon' ) );
 		wp_clear_scheduled_hook( 'sentinel_shield_lockdown_scan' );
@@ -61,6 +65,10 @@ if ( is_multisite() ) {
 	wp_clear_scheduled_hook( 'sentinel_shield_maintenance' );
 	wp_clear_scheduled_hook( 'sentinel_shield_maintenance', array( 'more' ) );
 	wp_clear_scheduled_hook( 'sentinel_shield_cf_refresh' );
+	wp_clear_scheduled_hook( 'sentinel_shield_audit_export' );
+	wp_clear_scheduled_hook( 'sentinel_shield_heartbeat' );
+	wp_clear_scheduled_hook( 'sentinel_shield_cloudflare_sync' );
+	wp_clear_scheduled_hook( 'sentinel_shield_cloudflare_check' );
 	wp_clear_scheduled_hook( 'sentinel_shield_feeds_tick' );
 	wp_clear_scheduled_hook( 'sentinel_shield_feeds_tick', array( 'soon' ) );
 	wp_clear_scheduled_hook( 'sentinel_shield_lockdown_scan' );

@@ -143,14 +143,16 @@ final class StorageBudgetTest extends \WP_UnitTestCase {
 		$this->assertSame( 5, $recent, 'attempts inside the counting window are never pruned' );
 	}
 
-	public function test_a_run_out_of_time_still_progresses_and_continues_soon(): void {
+	public function test_a_run_out_of_time_continues_soon(): void {
 		self::settings( array( 'general' => array( 'event_max_rows' => 10000 ) ) );
 		self::events( 14000 );
 		$result = MaintenanceModule::run( Plugin::instance()->container(), 0.0 );
 		$this->assertSame( 1, $result['unfinished'] );
-		$this->assertGreaterThan( 0, $result['events'], 'one batch per table even without time left' );
+		$this->assertSame( 0, $result['events'], 'the budget is a deadline: nothing starts after it (DeadlineTest)' );
 		$this->assertNotFalse( wp_next_scheduled( 'sentinel_shield_maintenance', array( 'more' ) ), 'a follow-up run is due soon' );
 		$this->assertLessThanOrEqual( time() + 5 * MINUTE_IN_SECONDS, (int) wp_next_scheduled( 'sentinel_shield_maintenance', array( 'more' ) ) );
 		$this->assertSame( 1, get_site_option( MaintenanceModule::REPORT )['unfinished'] );
+		$result = MaintenanceModule::run( Plugin::instance()->container(), 30.0 );
+		$this->assertSame( 4000, $result['events'], 'and the follow-up does the work' );
 	}
 }

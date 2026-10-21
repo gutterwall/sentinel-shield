@@ -4,7 +4,7 @@ Tags: security, firewall, two-factor, brute force, login
 Requires at least: 6.4
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.8.5
+Stable tag: 0.8.6
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -77,7 +77,7 @@ Nothing below is contacted unless stated as a default or you switch it on.
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.8.5.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.8.6.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
@@ -199,6 +199,15 @@ No. Test mode only records what would have been blocked. Use it to validate sett
 
 == Changelog ==
 
+= 0.8.6 =
+Stabilization from a sixth review: deadlines, lost locks and Cloudflare concurrency. No new features.
+* Hourly housekeeping keeps to its time budget as a deadline: no step or database batch starts after it, a policy build starts only if the last one would fit (otherwise its own background job builds now), and whatever is left continues five minutes later. The report lists the steps that waited.
+* The monitoring heartbeat and audit-log delivery have their own background jobs instead of running inside housekeeping; delivery requests never wait past the time left, and a delivery cut short continues a minute later.
+* Lost locks stop the work they protected: a database reconnect (which releases MySQL named locks) or a lock row taken over after its lease is noticed, and the early firewall build, the audit export and the file integrity scan stop before their next change. A build that lost its lock publishes nothing; an audit batch is sent again by the next run with the same sequence numbers, so the hash chain never forks.
+* Cloudflare: scheduled syncs, confirmation checks, Sync now, WP-CLI, settings changes, token removal and deactivation update the list one at a time. Scheduled work waits its turn; Sync now and WP-CLI wait up to 20 seconds and say so if another update is still running. Answers from Cloudflare apply only to the operation they are about, so a late answer never overwrites a newer upload.
+* Uninstall also clears the audit delivery, heartbeat and Cloudflare jobs.
+Testing (not shipped; see docs/TESTING.md): tests for each deadline and lost-lock path, a race of simultaneous WP-CLI syncs against a stand-in Cloudflare API on nginx and Apache with PHP-FPM (the previous code overlapped 15 uploads in it, this one none), 10 more mutants (63, all caught), and coverage jobs that fail when a required report or any source file in a measured area is missing. That check found two files no test loaded (the block page's unlock-form token and the multisite per-site settings page); both have tests now.
+
 = 0.8.5 =
 Release tooling only; the plugin code is the same as 0.8.4.
 * CI: composer audit is retried when packagist cannot be reached (findings still fail at once); the browser passkey test waits longer for Chrome and reports why it did not start.
@@ -309,6 +318,9 @@ Security fixes from a code review:
 * Phase 1: core framework, client IP detection, IP rules, lockout engine, lockout safety, test mode tooling, events, WP-CLI.
 
 == Upgrade Notice ==
+
+= 0.8.6 =
+Housekeeping keeps to its time budget, work that lost its lock stops safely, and Cloudflare list updates run one at a time. No settings change.
 
 = 0.8.5 =
 No plugin changes since 0.8.4; release tooling and CI only.

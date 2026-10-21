@@ -157,10 +157,10 @@ wp sentinel settings-import backup.json
 | Unit tests | PHP 8.1, 8.2, 8.3 and 8.4 |
 | Integration | WordPress 6.4 and latest, single site and multisite, PHP 8.1 to 8.4, MySQL 8 and MariaDB 11.4 (which also exercises the row-lock fallback path in tests that force it) |
 | Object cache | The integration tests with Redis as persistent object cache, including the eviction, stale-cache and "cache never answers" tests |
-| Coverage | Line coverage with PCOV: unit and integration tests (single site and multisite) in-process, and the early firewall inside the PHP servers its HTTP tests start, reported separately and combined. HTML and Clover reports are kept as artifacts; `bin/coverage-check.php` fails the job when any area drops below its floor in `tests/coverage-baseline.json` |
-| Mutation tests | `bin/mutation-test.php` applies 53 deliberate defects from `tests/mutations.php` (weakened comparisons, expiry checks, capability and nonce checks, replay guards, lock checks, removed verification) one at a time; the tests must fail for every one |
+| Coverage | Line coverage with PCOV: unit and integration tests (single site and multisite) in-process, and the early firewall inside the PHP servers its HTTP tests start, reported separately and combined. HTML and Clover reports are kept as artifacts; `bin/coverage-check.php --require=lines` fails the job when any area drops below its floor in `tests/coverage-baseline.json`, when the report is missing or empty, or when a source file of an area has no line data |
+| Mutation tests | `bin/mutation-test.php` applies 63 deliberate defects from `tests/mutations.php` (weakened comparisons, expiry checks, capability and nonce checks, replay guards, lock checks, removed verification, ignored deadlines, work continuing after a lost lock, unserialized Cloudflare updates) one at a time; the tests must fail for every one |
 | Real site (PHP server) | The smoke test, passkeys in Chrome (registration, login, a passkey synchronized to a second browser profile, a touch-only key under both verification policies, password-manager hints), Plugin Check on the release zip, the 0.8.0 legacy-file upgrade, and the install/deactivate/reactivate/uninstall/upgrade matrix (`bin/lifecycle-test.sh`, upgrades from 0.8.0, 0.8.1 and 0.8.2, checksum-verified) |
-| nginx + PHP-FPM, Apache + PHP-FPM | The smoke test; `bin/race-test.php` (ten synchronized requests for one backup code, authenticator code, signed passkey response or identity confirmation: exactly one wins; simultaneous wrong passwords never check more than the limit); `bin/fault-test.sh` (workers killed with SIGKILL at each step of a publication, after a Cloudflare upload and while holding a lock; a full disk); `bin/server-config-test.sh` (the generated files loaded by real nginx and Apache, a blocked address refused, an allowlisted address inside a blocked range let through, and a reload after unblocking or disabling ends enforcement) |
+| nginx + PHP-FPM, Apache + PHP-FPM | The smoke test; `bin/race-test.php` (ten synchronized requests for one backup code, authenticator code, signed passkey response or identity confirmation: exactly one wins; simultaneous wrong passwords never check more than the limit; six WP-CLI Cloudflare syncs and two confirmation checks started at once against a stand-in API: uploads never overlap, every sync completes, and the state matches the list); `bin/fault-test.sh` (workers killed with SIGKILL at each step of a publication, after a Cloudflare upload and while holding a lock; a full disk); `bin/server-config-test.sh` (the generated files loaded by real nginx and Apache, a blocked address refused, an allowlisted address inside a blocked range let through, and a reload after unblocking or disabling ends enforcement) |
 
 ### Nightly
 
@@ -169,7 +169,7 @@ wp sentinel settings-import backup.json
 | Site layouts | `bin/layout-test.sh`: WordPress in a subdirectory and with a moved content folder (full smoke test each), and a multisite subsite on its own domain (firewall, lockouts across domains, two-factor redirects and passkey relying party on the mapped domain) |
 | HTTPS behind a proxy | nginx terminates TLS and proxies to the site; the passkey browser test runs over https:// and the pending-login cookie must be `secure` |
 | Performance budgets | `bin/bench-site.php` on nginx and Apache with PHP-FPM, compared with `tests/perf-budgets.json` (below) |
-| Branch coverage and long fuzzing | Branch coverage with Xdebug for all of `src/` (collected once per run by `tests/coverage/branch-collector.php`; PHPUnit's own path coverage would take hours), and the fuzz and property tests with 20,000 rounds each |
+| Branch coverage and long fuzzing | Branch coverage with Xdebug for all of `src/` and the early firewall: unit and integration tests (single site and multisite) and the PHP servers the HTTP tests start, merged as a union of branch exits (collected once per run by `tests/coverage/branch-collector.php`; PHPUnit's own path coverage would take hours). Lines and branches are both required (`--require=lines,branches`): a missing report, or a source file of an area that the branch report does not cover, fails the job instead of quietly leaving the floor unchecked. The fuzz and property tests run with 20,000 rounds each |
 
 ### Tags
 
@@ -177,19 +177,32 @@ The release zip built by the lint job is the one tested by the later jobs. On a 
 
 ### Coverage: where it stands
 
-Measured for 0.8.4 (lines on every push; branches nightly, counting each way out of every branch point):
+Measured for 0.8.6 (lines on every push; branches nightly, counting each way out of every branch point, merged across runs and the HTTP tests' servers):
 
 | Area | Lines | Branches | Goal |
 |---|---|---|---|
-| Overall | 81.7% (from 60.6% in 0.8.2) | 55.4% | 90% of lines |
-| Authentication (two-factor, passkeys, login) | 86.5% | 63.3% | 95% of branches |
-| Authorization (admin actions and pages that change data, plugin protection) | 73.1% | 48.8% | 95% of branches |
-| Recovery (unlock, lockouts, safety, tokens) | 81.1% | 55.4% | 95% of branches |
-| Policy publication (firewalls, ranges, private folder, locks) | 87.2%; the early firewall itself 91% over HTTP | 64.7% | 95% of branches |
+| Overall | 82.2% (from 60.6% in 0.8.2) | 56.1% | 90% of lines |
+| Authentication (two-factor, passkeys, login) | 86.4% | 63.5% | 95% of branches |
+| Authorization (admin actions and pages that change data, plugin protection) | 73.1% | 49.6% | 95% of branches |
+| Recovery (unlock, lockouts, safety, tokens) | 85.6% | 57.4% | 95% of branches |
+| Policy publication (firewalls, ranges, private folder, locks) | 87.7%; the early firewall itself 91% over HTTP | 64.9% | 95% of branches |
 
-Branch coverage is well short of its goal: many branches are error and edge paths (unreadable files, database errors, unusual proxy headers) that no test reaches yet. The 53 mutants, chosen at the security decisions themselves, are all caught, which says more about those decisions than the percentage does, but closing this gap is the next step.
+Every source file of every area is in both reports; the required-measurement check found two that were in neither test run (the block page's unlock-form token and the multisite per-site settings page) and both have tests now.
+
+Branch coverage is well short of its goal: many branches are error and edge paths (unreadable files, database errors, unusual proxy headers) that no test reaches yet. The 63 mutants, chosen at the security decisions themselves, are all caught, which says more about those decisions than the percentage does, but closing this gap is the next step.
 
 The goals are engineering targets, not WordPress.org requirements, and even 100% coverage would not prove the code secure; mutation testing is the stronger check that tests actually look at results. Not counted: `uninstall.php` (it deletes the tables the test suite runs on; `bin/lifecycle-test.sh` covers it over a real site), code that runs while the test bootstrap loads WordPress (before coverage starts), and the HTTP-only paths of the smoke, race and crash tests, which are not instrumented. The largest gaps left are the two-factor login screen's HTML (exercised over HTTP), admin page rendering, and the lockdown module's scheduled scans.
+
+### Deadlines, lost locks and concurrent updates
+
+What the tests hold the background work to (`DeadlineTest`, `LostLockTest`, and lost-lock tests in `EarlyGateTest`, `FileIntegrityTest` and `CloudflareContractTest`):
+
+* Housekeeping's budget is a deadline. With no time left nothing starts, not even one batch; a slow database stops it between batches, at most one batch past the deadline, and the later steps wait for the continuation five minutes later, which finishes the job. A policy build that would not fit is handed to its own job. Housekeeping makes no network requests; it only keeps the heartbeat and audit-delivery jobs scheduled.
+* Audit delivery caps each request's timeout to the time left and starts no batch with under two seconds left.
+* `Mutex::renew()` notices a named lock released with the database connection and a lock row taken over after its lease. A build that lost its lock while writing its range files publishes nothing (no manifest switch, no server files, no state) and leaves the change for the build that holds the lock; an integrity slice saves nothing; an audit batch is not recorded, and the next holder sends the same batch with the same sequence numbers and hashes.
+* Cloudflare: while another worker updates the list, nothing reaches the API and nothing changes the state; an upload whose lock was lost leaves the recorded intent, and the next holder uploads again; an answer about an operation the state no longer names, or about the same operation ID on another list, changes nothing.
+
+The in-process tests take a lock away with a second database connection (`tests/Fakes/OtherWorker.php`); the race test runs real processes. Each was checked against the code before these changes: all of them failed there.
 
 ### Performance budgets
 

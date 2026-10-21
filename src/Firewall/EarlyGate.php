@@ -20,6 +20,7 @@ use SentinelShield\Repository\BlockRepository;
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Safety\SafetyGuard;
 use SentinelShield\Settings;
+use SentinelShield\Support\Deadline;
 use SentinelShield\Support\Mutex;
 use SentinelShield\Net\RangeMath;
 use SentinelShield\Support\DataDir;
@@ -117,6 +118,14 @@ final class EarlyGate {
 	}
 
 	/**
+	 * End of an admin, cron or WP-CLI request that changed the policy (an
+	 * action callback: WordPress passes an empty string, not a deadline).
+	 */
+	public function shutdown_rebuild(): void {
+		$this->rebuild_if_dirty();
+	}
+
+	/**
 	 * Path of the snapshot.
 	 */
 	public static function path(): string {
@@ -165,7 +174,7 @@ final class EarlyGate {
 		}
 		$this->pending = true;
 		if ( ( is_admin() && ! wp_doing_ajax() ) || wp_doing_cron() || ( defined( 'WP_CLI' ) && WP_CLI ) ) {
-			add_action( 'shutdown', array( $this, 'rebuild_if_dirty' ) );
+			add_action( 'shutdown', array( $this, 'shutdown_rebuild' ) );
 			return;
 		}
 		$state = (array) get_site_option( self::STATE, array() );
@@ -278,8 +287,14 @@ final class EarlyGate {
 
 	/**
 	 * Rebuilds when marked dirty or about to expire (hourly maintenance, shutdown).
+	 *
+	 * A build cannot stop half-way, so with a deadline (maintenance) it starts
+	 * only if the last build's duration fits in the time left; otherwise it is
+	 * handed to the policy job (EXPIRY_HOOK, which runs without a budget) now.
+	 *
+	 * @param Deadline|null $deadline Time limit of the caller, if any.
 	 */
-	public function rebuild_if_dirty(): void {
+	public function rebuild_if_dirty( ?Deadline $deadline = null ): void {
 		if ( ! $this->wanted() ) {
 			return;
 		}
@@ -298,7 +313,25 @@ final class EarlyGate {
 			}
 			return;
 		}
+		if ( null !== $deadline && ! $deadline->allows( self::build_estimate( is_array( $state ) ? $state : array() ) ) ) {
+			$due = wp_next_scheduled( self::EXPIRY_HOOK );
+			if ( ! $due || $due > time() ) {
+				wp_clear_scheduled_hook( self::EXPIRY_HOOK );
+				wp_schedule_single_event( time(), self::EXPIRY_HOOK );
+			}
+			return;
+		}
 		$this->rebuild();
+	}
+
+	/**
+	 * Seconds the next build is expected to take: the last one's, with room
+	 * to spare (2 s before the first build).
+	 *
+	 * @param array<string, mixed> $state Build state.
+	 */
+	public static function build_estimate( array $state ): float {
+		return isset( $state['took'] ) ? 1.0 + 1.5 * (float) $state['took'] : 2.0;
 	}
 
 	/**
@@ -319,6 +352,7 @@ final class EarlyGate {
 			}
 			return $state;
 		}
+		$started = microtime( true );
 		try {
 			// Cleared only once this build is recorded, and only if no change
 			// came in meanwhile: a build that dies half-way is redone.
@@ -341,6 +375,11 @@ final class EarlyGate {
 				$srv   = 0;
 			} else {
 				$published = $this->publish( $dir, $data, $gen );
+				if ( ! Mutex::holds( 'early_gate_build' ) ) {
+					// Lost to another worker (renew() forgot it): nothing more is written.
+					$old['error'] = self::lost_lock_message();
+					return $old;
+				}
 				if ( is_array( $published ) ) {
 					$files = $published;
 					$pub   = $gen;
@@ -371,8 +410,14 @@ final class EarlyGate {
 				'server_generation' => $srv,
 				'files'             => $files,
 				'error'             => implode( ' ', array_filter( $errors ) ),
+				'took'              => round( microtime( true ) - $started, 2 ),
 			);
 			do_action( 'sentinel_shield_checkpoint', 'gate:before_state' );
+			if ( ! Mutex::renew( 'early_gate_build' ) ) {
+				// Another worker took the build over: its state counts, and the change stays marked.
+				$old['error'] = self::lost_lock_message();
+				return $old;
+			}
 			update_site_option( self::STATE, $state );
 			if ( null !== $dirty && self::dirty() === $dirty ) {
 				delete_site_option( self::DIRTY );
@@ -456,7 +501,9 @@ final class EarlyGate {
 		 * @param string $step Step reached.
 		 */
 		do_action( 'sentinel_shield_checkpoint', 'gate:ranges_written' );
-		$ok = $ok && self::write_atomic( self::path(), (string) wp_json_encode( $snap ) );
+		// The switch to this generation is made only while the build lock is still ours.
+		$owned = Mutex::renew( 'early_gate_build' );
+		$ok    = $ok && $owned && self::write_atomic( self::path(), (string) wp_json_encode( $snap ) );
 		do_action( 'sentinel_shield_checkpoint', 'gate:manifest_replaced' );
 		if ( ! $ok ) {
 			foreach ( array( $block, $allow ) as $file ) {
@@ -464,7 +511,7 @@ final class EarlyGate {
 					wp_delete_file( $file );
 				}
 			}
-			return __( 'The snapshot could not be written completely; the early firewall keeps using the previous one, and the build is retried in five minutes.', 'sentinel-shield' );
+			return $owned ? __( 'The snapshot could not be written completely; the early firewall keeps using the previous one, and the build is retried in five minutes.', 'sentinel-shield' ) : self::lost_lock_message();
 		}
 		$old  = (array) ( ( (array) get_site_option( self::STATE, array() ) )['files'] ?? array() );
 		$keep = array_merge( array( $block, $allow ), array_values( array_map( 'strval', $old ) ) );
@@ -479,6 +526,13 @@ final class EarlyGate {
 			'block' => $block,
 			'allow' => $allow,
 		);
+	}
+
+	/**
+	 * Why a build stopped without publishing: its lock was lost.
+	 */
+	private static function lost_lock_message(): string {
+		return __( 'The build lost its lock to another worker before publishing; that worker\'s build is used and this one was discarded.', 'sentinel-shield' );
 	}
 
 	/**

@@ -23,6 +23,15 @@ defined( 'ABSPATH' ) || exit;
  * taken over with a compare-and-set. If that fails too, the lock is reported as
  * not acquired, so callers refuse the sensitive operation rather than run it
  * unprotected. The mode in use is recorded for the health screen.
+ *
+ * A lock can be lost while work is still running: a lock row's lease runs out
+ * (another worker then takes it over), or the database connection is
+ * re-established (MySQL releases named locks with the connection). Work that
+ * changes shared state after a long step calls renew() before each change and
+ * stops when it returns false: the early firewall build, the audit export,
+ * the file integrity scan and Cloudflare sync. Locks that only stop several
+ * workers doing the same deterministic work at once (rule lists, the feed
+ * snapshot) need no check: losing one costs a duplicate build, nothing else.
  */
 final class Mutex {
 
@@ -224,15 +233,51 @@ final class Mutex {
 	}
 
 	/**
-	 * Extends a held lock row's lease (call during long work). Named locks need
-	 * no renewal. Returns false when the lease was lost to another worker.
+	 * Confirms that this request still holds a lock, extending a lock row's
+	 * lease. Call during long work, before each change the lock protects, and
+	 * stop when it returns false: a lock row's lease ran out and another worker
+	 * took it over, or the database connection was re-established and MySQL
+	 * released the named lock with it. A lock found lost is forgotten, so a
+	 * later release() cannot release someone else's.
+	 *
+	 * @phpstan-impure
 	 *
 	 * @param string $name Lock name.
 	 */
 	public static function renew( string $name ): bool {
-		if ( 'row' !== ( self::$how[ $name ] ?? '' ) ) {
-			return isset( self::$held[ $name ] );
+		if ( ! isset( self::$held[ $name ] ) ) {
+			return false;
 		}
+		$held = 'row' === ( self::$how[ $name ] ?? '' ) ? self::renew_row( $name ) : self::still_native( $name );
+		if ( ! $held ) {
+			unset( self::$held[ $name ], self::$how[ $name ], self::$rows[ $name ] );
+		}
+		return $held;
+	}
+
+	/**
+	 * Whether this connection still holds a named lock (an unanswered query
+	 * counts as held: the check must not turn a database hiccup into a lost
+	 * lock that stops the work for nothing).
+	 *
+	 * @param string $name Lock name.
+	 */
+	private static function still_native( string $name ): bool {
+		global $wpdb;
+		$suppress = $wpdb->suppress_errors( true );
+		$owner    = $wpdb->get_var( $wpdb->prepare( 'SELECT IS_USED_LOCK(%s) = CONNECTION_ID()', self::db_name( $name ) ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Named locks are not cacheable.
+		$failed   = null === $owner && '' !== (string) $wpdb->last_error;
+		$wpdb->suppress_errors( $suppress );
+		// 1: ours. 0: another connection's. NULL: free (released with a lost connection).
+		return $failed || '1' === (string) $owner;
+	}
+
+	/**
+	 * Extends a lock row's lease if this request still owns it.
+	 *
+	 * @param string $name Lock name.
+	 */
+	private static function renew_row( string $name ): bool {
 		global $wpdb;
 		$value = ( time() + self::LEASE ) . '|' . substr( (string) self::$rows[ $name ], (int) strpos( (string) self::$rows[ $name ], '|' ) + 1 );
 		if ( $value === self::$rows[ $name ] ) {

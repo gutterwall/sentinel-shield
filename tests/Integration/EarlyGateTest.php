@@ -128,11 +128,13 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 			$this->port   = (int) substr( $name, strrpos( $name, ':' ) + 1 );
 			// Coverage runs measure the gate in these servers too (tests/coverage/subprocess-collector.php).
 			$covered      = (string) getenv( 'SENTINEL_SHIELD_SUBPROCESS_COVERAGE' );
-			$prepend      = '' !== $covered ? dirname( __DIR__ ) . '/coverage/subprocess-collector.php' : EarlyGate::gate_file();
+			$branches     = (string) getenv( 'SENTINEL_SHIELD_BRANCH_OUT' );
+			$prepend      = '' !== $covered . $branches ? dirname( __DIR__ ) . '/coverage/subprocess-collector.php' : EarlyGate::gate_file();
 			$cmd          = array_merge( array( PHP_BINARY ), self::coverage_ini(), array( '-S', '127.0.0.1:' . $this->port, '-t', $this->docroot, '-d', 'auto_prepend_file=' . $prepend ) );
 			$env          = array(
 				'SENTINEL_SHIELD_GATE_CONFIG'         => EarlyGate::path(),
 				'SENTINEL_SHIELD_SUBPROCESS_COVERAGE' => $covered,
+				'SENTINEL_SHIELD_BRANCH_OUT'          => $branches,
 			);
 			$this->server = proc_open( $cmd, array( 1 => array( 'file', '/dev/null', 'w' ), 2 => array( 'file', '/dev/null', 'w' ) ), $pipes, null, $env );
 			for ( $i = 0; $i < 50; $i++ ) {
@@ -155,12 +157,16 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 	 * @return list<string>
 	 */
 	private static function coverage_ini(): array {
-		if ( '' === (string) getenv( 'SENTINEL_SHIELD_SUBPROCESS_COVERAGE' ) ) {
+		$branches = '' !== (string) getenv( 'SENTINEL_SHIELD_BRANCH_OUT' );
+		if ( '' === (string) getenv( 'SENTINEL_SHIELD_SUBPROCESS_COVERAGE' ) && ! $branches ) {
 			return array();
 		}
 		// An extension loaded on the command line (not in php.ini) must be named again.
 		$load = (string) getenv( 'SENTINEL_SHIELD_COVERAGE_EXTENSION' );
 		$load = '' !== $load ? array( '-d', ( str_contains( $load, 'xdebug' ) ? 'zend_extension=' : 'extension=' ) . $load ) : array();
+		if ( $branches ) {
+			return array_merge( $load, array( '-d', 'xdebug.mode=coverage' ) );
+		}
 		if ( extension_loaded( 'pcov' ) ) {
 			return array_merge( $load, array( '-d', 'pcov.enabled=1', '-d', 'pcov.directory=' . dirname( __DIR__, 2 ) ) );
 		}
@@ -392,7 +398,7 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 		$repo->add( 'block', Cidr::parse( '198.51.100.44' ), 'lockout', 'lockout', time() + 600 );
 		$visitor = new EarlyGate( ...self::gate_parts() );
 		$visitor->mark_dirty();
-		$this->assertFalse( has_action( 'shutdown', array( $visitor, 'rebuild_if_dirty' ) ), 'no build at the end of a visitor request' );
+		$this->assertFalse( has_action( 'shutdown', array( $visitor, 'shutdown_rebuild' ) ), 'no build at the end of a visitor request' );
 		$this->assertNotFalse( has_action( 'shutdown', array( $visitor, 'publish_if_overdue' ) ) );
 		$this->assertLessThanOrEqual( max( time(), $built + EarlyGate::DEBOUNCE ), (int) wp_next_scheduled( EarlyGate::EXPIRY_HOOK ), 'a background build is due within the debounce' );
 		$this->assertTrue( $gate->publication()['pending'] );
@@ -597,6 +603,50 @@ final class EarlyGateTest extends \WP_UnitTestCase {
 			exec( 'rm -rf ' . escapeshellarg( $public ) );
 			DataDir::recheck();
 		}
+	}
+
+	/**
+	 * Review 6 (lost locks): a build whose lock went to another worker while
+	 * it wrote its range files does not switch the published generation, does
+	 * not record a state and leaves the change marked for the build that now
+	 * holds the lock.
+	 */
+	public function test_a_build_that_lost_its_lock_publishes_nothing(): void {
+		Plugin::instance()->container()->get( BlockRepository::class )->add( 'block', Cidr::parse( '203.0.113.0/24' ), 'manual', 'manual' );
+		$gate = $this->gate( array( 'firewall' => array( 'early_gate' => 'mu_plugin', 'server_files' => true ) ) );
+		$gate->rebuild();
+		$before   = (array) get_site_option( EarlyGate::STATE );
+		$manifest = (string) file_get_contents( EarlyGate::path() );
+		$nginx    = (string) file_get_contents( DataDir::path() . '/nginx-deny.conf' );
+		$this->assertArrayHasKey( 'took', $before, 'each build records how long it took' );
+
+		Plugin::instance()->container()->get( BlockRepository::class )->add( 'block', Cidr::parse( '198.51.100.0/24' ), 'manual', 'manual' );
+		Plugin::instance()->container()->get( RuleCache::class )->flush();
+		$other = new \SentinelShield\Tests\Fakes\OtherWorker();
+		$steal = static function ( string $step ) use ( $other ): void {
+			if ( 'gate:ranges_written' === $step ) {
+				$other->steal( 'early_gate_build' );
+			}
+		};
+		add_action( 'sentinel_shield_checkpoint', $steal );
+		try {
+			$state = $gate->rebuild();
+		} finally {
+			remove_action( 'sentinel_shield_checkpoint', $steal );
+		}
+		$this->assertStringContainsString( 'lost its lock', (string) $state['error'] );
+		$this->assertSame( $before, get_site_option( EarlyGate::STATE ), 'no state recorded' );
+		$this->assertSame( $manifest, (string) file_get_contents( EarlyGate::path() ), 'the published generation was not switched' );
+		$this->assertSame( $nginx, (string) file_get_contents( DataDir::path() . '/nginx-deny.conf' ), 'server files untouched' );
+		$this->assertCount( 2, glob( DataDir::path() . '/gate-*.bin' ), 'its own range files were removed' );
+		$this->assertTrue( $gate->publication()['pending'], 'the change waits for the build that holds the lock now' );
+		$this->assertTrue( $other->holds( 'early_gate_build' ) );
+
+		$other->close();
+		$state = $gate->rebuild();
+		$this->assertSame( '', (string) $state['error'] );
+		$this->assertFalse( $gate->publication()['pending'] );
+		$this->assertStringContainsString( 'deny 198.51.100.0/24;', (string) file_get_contents( DataDir::path() . '/nginx-deny.conf' ) );
 	}
 
 	public function test_deactivation_stops_every_layer(): void {

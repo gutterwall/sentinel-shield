@@ -7,7 +7,10 @@
 # Usage: bin/coverage.sh [output-folder=build/coverage]
 #   Needs PCOV or Xdebug (in php.ini, or name it in COVERAGE_EXTENSION, e.g.
 #   /usr/lib/php/20230831/pcov.so) and the integration test setup (WP_TESTS_DIR).
-#   BRANCHES=1 also measures branch coverage with Xdebug (slow; nightly).
+#   BRANCHES=1 also measures branch coverage with Xdebug (slow; nightly):
+#   unit, integration (single site and multisite) and the early firewall in
+#   the HTTP tests' servers. Each measurement taken is also required: a
+#   missing report, or a source file it does not cover, fails the run.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -51,11 +54,15 @@ if [ "${BRANCHES:-0}" = 1 ]; then
 	[ -n "$XD" ] && XPHP=(php -d "zend_extension=$XD" -d xdebug.mode=coverage)
 	export SENTINEL_SHIELD_BRANCH_OUT=$OUT/branch.json
 	unset SENTINEL_SHIELD_SUBPROCESS_COVERAGE
+	# The servers the HTTP tests start load Xdebug the same way.
+	[ -n "$XD" ] && export SENTINEL_SHIELD_COVERAGE_EXTENSION=$XD
+	rm -f "$SENTINEL_SHIELD_BRANCH_OUT"
 	"${XPHP[@]}" -d "auto_prepend_file=$PWD/tests/coverage/branch-collector.php" vendor/bin/phpunit --testsuite unit --no-coverage --exclude-group heavy | tail -1
 	"${XPHP[@]}" -d "auto_prepend_file=$PWD/tests/coverage/branch-collector.php" vendor/bin/phpunit --testsuite integration --no-coverage --exclude-group heavy | tail -1
-	BRANCH_ARG=(--branches="$OUT/branch.json")
+	WP_MULTISITE=1 "${XPHP[@]}" -d "auto_prepend_file=$PWD/tests/coverage/branch-collector.php" vendor/bin/phpunit --testsuite integration --no-coverage --exclude-group heavy | tail -1
+	BRANCH_ARG=(--branches="$OUT/branch.json" --require=lines,branches)
 else
-	BRANCH_ARG=()
+	BRANCH_ARG=(--require=lines)
 fi
 
 echo

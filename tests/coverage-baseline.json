@@ -11,8 +11,8 @@
                 "sentinel-shield.php",
                 "early-gate.php"
             ],
-            "lines": 81,
-            "branches": 54.5
+            "lines": 81.5,
+            "branches": 55.5
         },
         "authentication": {
             "paths": [
@@ -21,7 +21,7 @@
                 "src/Geo/LoginGeoGuard.php"
             ],
             "lines": 86,
-            "branches": 62.5
+            "branches": 63
         },
         "authorization": {
             "paths": [
@@ -33,7 +33,7 @@
                 "src/Lockdown/AdminRegistry.php"
             ],
             "lines": 72.5,
-            "branches": 48
+            "branches": 49
         },
         "recovery": {
             "paths": [
@@ -42,8 +42,8 @@
                 "src/Repository/TokenRepository.php",
                 "src/Safety/"
             ],
-            "lines": 80.5,
-            "branches": 54.5
+            "lines": 85,
+            "branches": 56.5
         },
         "policy publication": {
             "paths": [
@@ -53,7 +53,7 @@
                 "src/Support/Mutex.php",
                 "early-gate.php"
             ],
-            "lines": 86.5,
+            "lines": 87,
             "branches": 64
         }
     }

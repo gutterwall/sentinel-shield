@@ -13,6 +13,7 @@ use SentinelShield\Http\Request;
 use SentinelShield\Net\IpAddress;
 
 use SentinelShield\Support\Batch;
+use SentinelShield\Support\Deadline;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -168,13 +169,13 @@ final class EventRepository {
 	 * Deletes events older than N days. Events after $keep_after (not yet
 	 * delivered to the remote audit log) are kept, up to $hard_days.
 	 *
-	 * @param int      $days       Retention.
-	 * @param int|null $keep_after Last delivered event ID, or null to keep nothing extra.
-	 * @param int      $hard_days  Undelivered events are kept at most this long.
-	 * @param float    $budget     Seconds.
+	 * @param int            $days       Retention.
+	 * @param int|null       $keep_after Last delivered event ID, or null to keep nothing extra.
+	 * @param int            $hard_days  Undelivered events are kept at most this long.
+	 * @param float|Deadline $budget Seconds, or a deadline.
 	 * @return int Rows deleted.
 	 */
-	public function prune( int $days, ?int $keep_after = null, int $hard_days = 90, float $budget = Batch::BUDGET ): int {
+	public function prune( int $days, ?int $keep_after = null, int $hard_days = 90, float|Deadline $budget = Batch::BUDGET ): int {
 		$cutoff = gmdate( 'Y-m-d H:i:s', time() - ( max( 1, $days ) * DAY_IN_SECONDS ) );
 		if ( null === $keep_after ) {
 			return Batch::delete( $this->db, $this->db->prepare( 'DELETE FROM %i WHERE created_at < %s', $this->table(), $cutoff ), $budget );
@@ -189,13 +190,13 @@ final class EventRepository {
 	 * an audit cursor, events not delivered yet are capped by $max_unsent
 	 * instead.
 	 *
-	 * @param int      $max_rows   Events to keep.
-	 * @param int|null $keep_after Last delivered event ID, or null.
-	 * @param int      $max_unsent Undelivered events to keep.
-	 * @param float    $budget     Seconds.
+	 * @param int            $max_rows   Events to keep.
+	 * @param int|null       $keep_after Last delivered event ID, or null.
+	 * @param int            $max_unsent Undelivered events to keep.
+	 * @param float|Deadline $budget Seconds, or a deadline.
 	 * @return int Rows removed.
 	 */
-	public function trim( int $max_rows, ?int $keep_after = null, int $max_unsent = 100000, float $budget = Batch::BUDGET ): int {
+	public function trim( int $max_rows, ?int $keep_after = null, int $max_unsent = 100000, float|Deadline $budget = Batch::BUDGET ): int {
 		$top = (int) $this->db->get_var( $this->db->prepare( 'SELECT COALESCE(MAX(id), 0) FROM %i', $this->table() ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- Live value.
 		$cap = $top - max( 1, $max_rows );
 		if ( null === $keep_after ) {

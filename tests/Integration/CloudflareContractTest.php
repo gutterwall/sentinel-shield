@@ -18,164 +18,8 @@ use SentinelShield\Plugin;
 use SentinelShield\Repository\BlockRepository;
 use SentinelShield\Settings;
 use SentinelShield\Support\DataDir;
-
-/**
- * A stateful stand-in for Cloudflare's list API: lists per account, tokens,
- * asynchronous bulk operations that take a number of polls to finish, and
- * faults queued for the next requests.
- */
-final class FakeCloudflare {
-
-	/**
-	 * Items per "account/list".
-	 *
-	 * @var array<string, list<string>>
-	 */
-	public array $lists = array();
-
-	/**
-	 * Tokens Cloudflare accepts.
-	 *
-	 * @var array<string, bool>
-	 */
-	public array $tokens = array( 'token-a' => true );
-
-	/**
-	 * Bulk operations: id => {key, items, polls, fail}.
-	 *
-	 * @var array<string, array<string, mixed>>
-	 */
-	public array $ops = array();
-
-	/**
-	 * Faults for the next requests, in order: timeout, timeout_after_apply,
-	 * rate_limited, malformed, server_error.
-	 *
-	 * @var list<string>
-	 */
-	public array $faults = array();
-
-	/**
-	 * Polls a new operation needs before it completes.
-	 */
-	public int $polls = 1;
-
-	/**
-	 * Whether new operations end as failed.
-	 */
-	public bool $fail_ops = false;
-
-	/**
-	 * Lists ("account/list") whose uploads are refused (400).
-	 *
-	 * @var array<string, bool>
-	 */
-	public array $refuse = array();
-
-	/**
-	 * Every request: [method, url, token].
-	 *
-	 * @var list<array{0:string, 1:string, 2:string}>
-	 */
-	public array $calls = array();
-
-	private int $next_op = 1;
-
-	/**
-	 * pre_http_request filter.
-	 *
-	 * @param mixed                $pre  Short-circuit value.
-	 * @param array<string, mixed> $args Request arguments.
-	 * @param string               $url  URL.
-	 * @return array<string, mixed>|\WP_Error
-	 */
-	public function __invoke( $pre, $args, $url ) {
-		if ( ! str_starts_with( (string) $url, 'https://api.cloudflare.com/' ) ) {
-			return $pre;
-		}
-		$token         = substr( (string) ( $args['headers']['Authorization'] ?? '' ), 7 );
-		$this->calls[] = array( (string) $args['method'], (string) $url, $token );
-		$fault         = array_shift( $this->faults );
-		if ( 'timeout' === $fault ) {
-			return new \WP_Error( 'http_request_failed', 'cURL error 28: Operation timed out after 20001 milliseconds' );
-		}
-		if ( 'rate_limited' === $fault ) {
-			return self::reply( 429, array( 'success' => false, 'errors' => array( array( 'message' => 'rate limited' ) ) ), array( 'retry-after' => '900' ) );
-		}
-		if ( 'malformed' === $fault ) {
-			return array(
-				'headers'  => array(),
-				'body'     => '<html>502 Bad Gateway',
-				'response' => array( 'code' => 200, 'message' => 'OK' ),
-				'cookies'  => array(),
-				'filename' => null,
-			);
-		}
-		if ( 'server_error' === $fault ) {
-			return self::reply( 500, array( 'success' => false, 'errors' => array( array( 'message' => 'internal error' ) ) ) );
-		}
-		if ( empty( $this->tokens[ $token ] ) ) {
-			return self::reply( 403, array( 'success' => false, 'errors' => array( array( 'code' => 10000, 'message' => 'Authentication error' ) ) ) );
-		}
-		if ( preg_match( '#/accounts/([^/]+)/rules/lists/bulk_operations/([^/]+)$#', (string) $url, $m ) ) {
-			$op = $this->ops[ $m[2] ] ?? null;
-			if ( null === $op ) {
-				return self::reply( 404, array( 'success' => false, 'errors' => array( array( 'message' => 'not found' ) ) ) );
-			}
-			if ( $op['polls'] > 0 ) {
-				--$this->ops[ $m[2] ]['polls'];
-				return self::reply( 200, array( 'success' => true, 'result' => array( 'status' => 'running' ) ) );
-			}
-			if ( $op['fail'] ) {
-				return self::reply( 200, array( 'success' => true, 'result' => array( 'status' => 'failed', 'error' => 'item limit reached' ) ) );
-			}
-			$this->lists[ $op['key'] ] = $op['items'];
-			return self::reply( 200, array( 'success' => true, 'result' => array( 'status' => 'completed' ) ) );
-		}
-		if ( preg_match( '#/accounts/([^/]+)/rules/lists/([^/]+)/items$#', (string) $url, $m ) && 'PUT' === $args['method'] ) {
-			$key = $m[1] . '/' . $m[2];
-			if ( ! empty( $this->refuse[ $key ] ) ) {
-				return self::reply( 400, array( 'success' => false, 'errors' => array( array( 'message' => 'list not found' ) ) ) );
-			}
-			$items            = array_column( (array) json_decode( (string) $args['body'], true ), 'ip' );
-			$id               = 'op' . $this->next_op++;
-			$this->ops[ $id ] = array(
-				'key'   => $key,
-				'items' => $items,
-				'polls' => $this->polls,
-				'fail'  => $this->fail_ops,
-			);
-			if ( 'timeout_after_apply' === $fault ) {
-				// Cloudflare took it; the answer never arrived.
-				$this->lists[ $key ] = $items;
-				return new \WP_Error( 'http_request_failed', 'cURL error 28: Operation timed out' );
-			}
-			return self::reply( 200, array( 'success' => true, 'result' => array( 'operation_id' => $id ) ) );
-		}
-		return self::reply( 200, array( 'success' => true, 'result' => array( 'kind' => 'ip', 'name' => 'blocked', 'num_items' => 0 ) ) );
-	}
-
-	/**
-	 * An HTTP response as WordPress's HTTP API returns it.
-	 *
-	 * @param int                   $code    Status.
-	 * @param array<string, mixed>  $body    JSON body.
-	 * @param array<string, string> $headers Headers.
-	 * @return array<string, mixed>
-	 */
-	private static function reply( int $code, array $body, array $headers = array() ): array {
-		return array(
-			'headers'  => $headers,
-			'body'     => (string) wp_json_encode( $body ),
-			'response' => array(
-				'code'    => $code,
-				'message' => '',
-			),
-			'cookies'  => array(),
-			'filename' => null,
-		);
-	}
-}
+use SentinelShield\Tests\Fakes\FakeCloudflare;
+use SentinelShield\Tests\Fakes\OtherWorker;
 
 /**
  * Review 5 (P0): timeouts, 429 responses, malformed answers, operations that
@@ -497,5 +341,122 @@ final class CloudflareContractTest extends \WP_UnitTestCase {
 		Plugin::instance()->container()->get( Settings::class )->refresh();
 		$this->sync->settings_saved();
 		$this->converges( array() );
+	}
+
+	/**
+	 * Review 6 (Cloudflare concurrency): while another worker is updating the
+	 * list, scheduled work waits its turn and explicit actions say so; nothing
+	 * reaches Cloudflare and nothing changes the state.
+	 */
+	public function test_one_update_at_a_time(): void {
+		$other = new OtherWorker();
+		$this->assertTrue( $other->hold( 'cloudflare_sync' ), 'another worker is syncing' );
+		add_filter( 'sentinel_shield_cloudflare_lock_wait', '__return_zero' );
+		try {
+			$before = CloudflareSync::state();
+			wp_clear_scheduled_hook( CloudflareSync::CRON );
+			$this->sync->sync();
+			$this->assertSame( array(), $this->cf->calls, 'a scheduled sync does not touch the list meanwhile' );
+			$this->assertLessThanOrEqual( time() + 30, (int) wp_next_scheduled( CloudflareSync::CRON ), 'and tries again shortly' );
+
+			$forced = $this->sync->sync( true );
+			$this->assertFalse( $forced['ok'] );
+			$this->assertStringContainsString( 'still running', (string) $forced['error'] );
+
+			wp_clear_scheduled_hook( CloudflareSync::CHECK );
+			$this->sync->check_operation();
+			$this->assertNotFalse( wp_next_scheduled( CloudflareSync::CHECK ), 'the confirmation check comes back' );
+			$this->assertFalse( $this->sync->clear_remote( 'test' ), 'emptying is not claimed' );
+			$this->assertSame( array(), $this->cf->calls );
+			$this->assertSame( $before, CloudflareSync::state(), 'state untouched' );
+		} finally {
+			remove_filter( 'sentinel_shield_cloudflare_lock_wait', '__return_zero' );
+			$other->close();
+		}
+		$this->sync->sync( true );
+		$this->converges( self::POLICY );
+	}
+
+	/**
+	 * A worker that lost the lock after uploading records nothing more; the
+	 * intent it recorded first makes the next holder upload again.
+	 */
+	public function test_an_upload_whose_lock_was_lost_is_redone_by_the_next_holder(): void {
+		$other = new OtherWorker();
+		$steal = static function ( string $step ) use ( $other ): void {
+			if ( 'cloudflare:sent' === $step ) {
+				$other->steal( 'cloudflare_sync' );
+			}
+		};
+		add_action( 'sentinel_shield_checkpoint', $steal );
+		try {
+			$this->sync->sync( true );
+		} finally {
+			remove_action( 'sentinel_shield_checkpoint', $steal );
+		}
+		$state = CloudflareSync::state();
+		$this->assertSame( 'unknown', $state['status'], 'only the intent is recorded: not claimed as applying or active' );
+		$this->assertTrue( $this->sync->manages_items() );
+		$other->close();
+		$this->converges( self::POLICY );
+	}
+
+	/**
+	 * An answer about a bulk operation that arrives after a newer upload
+	 * replaced it never overwrites the newer state.
+	 */
+	public function test_a_stale_answer_never_overwrites_newer_state(): void {
+		$this->cf->polls = 5;
+		$this->sync->sync( true );
+		$old = CloudflareSync::state();
+		$this->assertSame( 'applying', $old['status'] );
+		$this->cf->ops[ $old['operation'] ]['polls'] = 0; // Cloudflare answers "completed" for the old operation.
+
+		// While the answer travels, another worker takes over and uploads anew.
+		$other = new OtherWorker();
+		$newer = array(
+			'operation' => 'op-newer',
+			'want'      => 'policy',
+			'status'    => 'applying',
+			'items'     => 'newer',
+		) + $old;
+		$takeover = static function ( string $step ) use ( $other, $newer ): void {
+			if ( 'cloudflare:polled' === $step ) {
+				$other->steal( 'cloudflare_sync' );
+				update_site_option( CloudflareSync::STATE, $newer );
+			}
+		};
+		add_action( 'sentinel_shield_checkpoint', $takeover );
+		try {
+			$this->sync->check_operation();
+		} finally {
+			remove_action( 'sentinel_shield_checkpoint', $takeover );
+			$other->close();
+		}
+		$this->assertSame( $newer, CloudflareSync::state(), 'the late "completed" did not mark the newer upload active' );
+
+		// The same rule, without a lost lock: answers apply only to the operation they are about.
+		$dest  = array(
+			'account' => self::ACCOUNT,
+			'list'    => 'list-one',
+		);
+		$state = array(
+			'dest'      => $dest,
+			'status'    => 'applying',
+			'operation' => 'op-b',
+			'retired'   => array(
+				array(
+					'account'   => self::ACCOUNT,
+					'list'      => 'list-old',
+					'status'    => 'applying',
+					'operation' => 'op-b',
+				),
+			),
+		);
+		$late  = array( self::ACCOUNT . '/list-one/op-a' => array( 'status' => 'active' ) );
+		$this->assertSame( $state, CloudflareSync::apply_answers( $state, $late ), 'an answer about op-a changes nothing' );
+		$done = CloudflareSync::apply_answers( $state, array( self::ACCOUNT . '/list-old/op-b' => array( 'status' => 'empty' ) ) );
+		$this->assertSame( 'applying', $done['status'], 'the same operation ID on another list is another operation' );
+		$this->assertSame( array(), $done['retired'], 'the old list, confirmed empty, is forgotten' );
 	}
 }

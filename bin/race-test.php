@@ -10,13 +10,17 @@
  *   confirmation     "Confirm it is you" with the same backup code, at once
  *   wrong passwords  simultaneous guesses from one IP: no more are checked than
  *                    the limit allows
+ *   Cloudflare       simultaneous WP-CLI syncs and confirmation checks of the
+ *                    Cloudflare list (against a stand-in API): one update at a
+ *                    time, every sync done, the state matches the list
  *
  * Usage: php bin/race-test.php <wordpress-path> <site-url> [workers=8]
  *
  * The site must serve at least <workers> requests in parallel (PHP_CLI_SERVER_WORKERS,
  * pm.max_children) and trust X-Forwarded-For from 127.0.0.1 (the test sets
  * this). It installs bin/race-barrier.php as a must-use plugin while it runs,
- * which holds the racing requests until all of them have arrived.
+ * which holds the racing requests until all of them have arrived, and
+ * bin/race-cloudflare.php, the stand-in for Cloudflare's API.
  * DESTRUCTIVE: creates users and changes settings. Use a throwaway site only.
  * Needs wp-cli and PHP's curl and openssl extensions.
  *
@@ -344,6 +348,65 @@ function start_login_refused( string $ip ): bool {
 	$r = http( array( array( $b, '/wp-login.php', array( 'log' => 'race_bf', 'pwd' => RACE_PASS, 'testcookie' => '1' ) ) ) )[0];
 	return ! $b->logged_in() && ( 403 === $r['code'] || false !== stripos( $r['body'], 'Too many' ) );
 }
+
+echo "Cloudflare\n";
+$cf_dir = sys_get_temp_dir() . '/ss-race-cf-' . getmypid();
+@mkdir( $cf_dir );
+copy( __DIR__ . '/race-cloudflare.php', "$mu/sentinel-shield-race-cloudflare.php" );
+putenv( "SENTINEL_SHIELD_RACE_CF=$cf_dir" );
+register_shutdown_function(
+	static function () use ( $mu, $cf_dir ): void {
+		wp( 'sentinel settings-set cloudflare.sync 0' ); // Empties the stand-in list while it is still installed.
+		putenv( 'SENTINEL_SHIELD_RACE_CF' );
+		@unlink( "$mu/sentinel-shield-race-cloudflare.php" );
+		wp( 'sentinel unblock 203.0.113.64 --include-ranges' );
+		exec( 'rm -rf ' . escapeshellarg( $cf_dir ) );
+	}
+);
+wp( 'sentinel block 203.0.113.64/28 --reason=race-cloudflare' );
+wp( 'sentinel settings-set cloudflare.account_id ' . str_repeat( 'a', 32 ) );
+wp( 'sentinel settings-set cloudflare.list_id ' . str_repeat( 'b', 32 ) );
+wp_php( '$c->get( SentinelShield\Firewall\CloudflareSync::class )->set_token( "race-token" );' );
+wp( 'sentinel settings-set cloudflare.sync 1' );
+@unlink( "$cf_dir/calls.log" );
+$syncs  = max( 2, min( $workers, 6 ) );
+$checks = 2;
+$env    = array_merge( getenv(), array( 'SENTINEL_SHIELD_RACE_CF' => $cf_dir, 'SENTINEL_SHIELD_RACE_CF_BARRIER' => (string) ( $syncs + $checks ) ) );
+$procs  = array();
+$streams = array();
+for ( $i = 0; $i < $syncs + $checks; $i++ ) {
+	$cmd     = $i < $syncs
+		? array( 'wp', '--path=' . $wp_path, 'sentinel', 'cloudflare-sync' )
+		: array( 'wp', '--path=' . $wp_path, 'eval', 'do_action( SentinelShield\Firewall\CloudflareSync::CHECK );' );
+	$procs[] = proc_open( $cmd, array( 1 => array( 'pipe', 'w' ), 2 => array( 'pipe', 'w' ) ), $pipes, null, $env );
+	$streams[] = $pipes;
+}
+$codes = array();
+foreach ( $procs as $i => $proc ) {
+	$text      = stream_get_contents( $streams[ $i ][1] ) . stream_get_contents( $streams[ $i ][2] );
+	$codes[ $i ] = proc_close( $proc );
+	if ( 0 !== $codes[ $i ] ) {
+		echo '    worker ' . $i . ': ' . trim( $text ) . "\n";
+	}
+}
+$calls = array_map( static fn( string $l ): array => (array) json_decode( $l, true ), array_filter( explode( "\n", (string) @file_get_contents( "$cf_dir/calls.log" ) ) ) );
+$puts  = array_values( array_filter( $calls, static fn( array $c ): bool => 'PUT' === $c[0] ) );
+$overlaps = 0;
+foreach ( $puts as $a => $x ) {
+	foreach ( $puts as $b => $y ) {
+		$overlaps += $a < $b && $x[3] < $y[4] && $y[3] < $x[4] ? 1 : 0;
+	}
+}
+$synced = count( array_filter( array_slice( $codes, 0, $syncs ), static fn( int $c ): bool => 0 === $c ) );
+0 === $overlaps && $synced === $syncs && count( $puts ) === $syncs
+	? $pass( "$syncs simultaneous syncs and $checks confirmation checks: " . count( $puts ) . ' uploads, one at a time, every sync done' )
+	: $fail( "Cloudflare: $overlaps overlapping uploads, $synced of $syncs syncs done, " . count( $puts ) . ' uploads' );
+wp_php( '$c->get( SentinelShield\Firewall\CloudflareSync::class )->check_operation();' );
+$state = json_decode( wp_php( 'echo wp_json_encode( SentinelShield\Firewall\CloudflareSync::state() );' ), true );
+$held  = (array) json_decode( (string) @file_get_contents( "$cf_dir/list.json" ), true );
+'active' === ( $state['status'] ?? '' ) && (int) ( $state['count'] ?? -1 ) === count( $held ) && count( $held ) > 0
+	? $pass( 'Cloudflare: the state says active with ' . count( $held ) . ' items, as the list holds' )
+	: $fail( 'Cloudflare: state ' . ( $state['status'] ?? '?' ) . ' with ' . ( $state['count'] ?? '?' ) . ' items, the list holds ' . count( $held ) );
 
 foreach ( array( 'race_backup', 'race_totp', 'race_passkey', 'race_confirm', 'race_bf' ) as $login ) {
 	wp( 'user delete ' . $login . ' --yes' );

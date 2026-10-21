@@ -11,6 +11,7 @@ namespace SentinelShield\Audit;
 
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Settings;
+use SentinelShield\Support\Deadline;
 use SentinelShield\Support\Mailer;
 use SentinelShield\Support\Mutex;
 use SentinelShield\Support\Throttle;
@@ -33,10 +34,12 @@ defined( 'ABSPATH' ) || exit;
  */
 final class AuditExporter {
 
-	public const CRON   = 'sentinel_shield_audit_export';
-	public const STATE  = 'sentinel_shield_audit_state';
-	public const SECRET = 'sentinel_shield_audit_secret';
-	public const BATCH  = 200;
+	public const CRON      = 'sentinel_shield_audit_export';
+	public const HEARTBEAT = 'sentinel_shield_heartbeat';
+	public const STATE     = 'sentinel_shield_audit_state';
+	public const SECRET    = 'sentinel_shield_audit_secret';
+	public const BATCH     = 200;
+	public const TIMEOUT   = 10;
 
 	/**
 	 * Event types left out of the "security events" scope (high volume).
@@ -74,6 +77,7 @@ final class AuditExporter {
 	public function register(): void {
 		add_action( 'sentinel_shield_event_logged', array( $this, 'on_event' ), 10, 3 );
 		add_action( self::CRON, array( $this, 'cron' ) );
+		add_action( self::HEARTBEAT, array( $this, 'cron_heartbeat' ) );
 	}
 
 	/**
@@ -81,6 +85,32 @@ final class AuditExporter {
 	 */
 	public function cron(): void {
 		$this->run();
+	}
+
+	/**
+	 * Scheduled heartbeat: its own hourly job, so a slow monitoring service
+	 * never takes time from database housekeeping (or the other way round).
+	 */
+	public function cron_heartbeat(): void {
+		$this->heartbeat();
+	}
+
+	/**
+	 * Keeps the background jobs scheduled (called by hourly maintenance):
+	 * the heartbeat while a URL is set, and a delivery run while events wait
+	 * and none is scheduled (a lost cron event must not stall delivery).
+	 */
+	public function ensure_scheduled(): void {
+		if ( '' !== (string) $this->settings->get( 'audit.heartbeat_url', '' ) ) {
+			if ( ! wp_next_scheduled( self::HEARTBEAT ) ) {
+				wp_schedule_event( time() + MINUTE_IN_SECONDS, 'hourly', self::HEARTBEAT );
+			}
+		} else {
+			wp_clear_scheduled_hook( self::HEARTBEAT );
+		}
+		if ( '' !== $this->webhook() && ! wp_next_scheduled( self::CRON ) && null !== $this->retention_cursor() && $this->pending( (int) $this->retention_cursor() ) ) {
+			wp_schedule_single_event( max( time(), (int) ( self::state()['next_try'] ?? 0 ) ), self::CRON );
+		}
 	}
 
 	/**
@@ -173,24 +203,55 @@ final class AuditExporter {
 	/**
 	 * Sends pending events in batches until done, out of time, or failing.
 	 *
-	 * @param float $budget Seconds.
+	 * Runs under the audit_export lock. Before each batch and again before
+	 * recording it as delivered, the lock is confirmed (Mutex::renew()); a
+	 * worker that lost it stops without touching the state, and the state is
+	 * only advanced from the cursor it read (compare-and-set), so two workers
+	 * can never both move the chain on. A batch sent by a worker that then
+	 * lost the lock is sent again by the next one, with the same sequence
+	 * numbers and hashes (delivery is at least once; receivers drop repeats by
+	 * seq). No batch starts with less than a few seconds left, request
+	 * timeouts are capped to the time left, and when time runs out with
+	 * events waiting the next run is scheduled.
+	 *
+	 * @param float|Deadline $budget Seconds, or a deadline.
 	 * @return array<string, mixed> The state afterwards.
 	 */
-	public function run( $budget = 15.0 ): array {
+	public function run( float|Deadline $budget = 15.0 ): array {
 		if ( '' === $this->webhook() || ! Mutex::acquire( 'audit_export', 0 ) ) {
 			return self::state();
 		}
+		$deadline = $budget instanceof Deadline ? $budget : Deadline::in( (float) $budget );
 		try {
-			$until = microtime( true ) + (float) $budget;
 			do {
-				Mutex::renew( 'audit_export' );
-				$state = self::state();
-				$rows  = $this->pending( (int) ( $state['cursor'] ?? $this->start_cursor() ) );
+				$timeout = $deadline->timeout( self::TIMEOUT );
+				if ( ! Mutex::renew( 'audit_export' ) ) {
+					return self::state();
+				}
+				$state  = self::state();
+				$cursor = (int) ( $state['cursor'] ?? $this->start_cursor() );
+				$rows   = $this->pending( $cursor );
 				if ( ! $rows ) {
 					break;
 				}
+				if ( 0 === $timeout ) {
+					// Out of time with events waiting: continue soon.
+					$deadline->cut();
+					if ( ! wp_next_scheduled( self::CRON ) ) {
+						wp_schedule_single_event( time() + MINUTE_IN_SECONDS, self::CRON );
+					}
+					break;
+				}
 				[ $events, $seq, $hash ] = self::chain( $rows, (int) ( $state['seq'] ?? 0 ), (string) ( $state['hash'] ?? '' ) );
-				$result                  = $this->post( $events );
+				$result                  = $this->post( $events, $timeout );
+				do_action( 'sentinel_shield_checkpoint', 'audit:sent' );
+				if ( ! Mutex::renew( 'audit_export' ) ) {
+					return self::state(); // Lost meanwhile: the new holder decides (and resends this batch).
+				}
+				$state = self::state();
+				if ( (int) ( $state['cursor'] ?? $cursor ) !== $cursor ) {
+					return $state; // Moved on by someone else.
+				}
 				if ( true !== $result ) {
 					$failures          = (int) ( $state['failures'] ?? 0 ) + 1;
 					$state['failures'] = $failures;
@@ -213,7 +274,7 @@ final class AuditExporter {
 				$state['error']    = '';
 				update_site_option( self::STATE, $state );
 				$full = count( $rows ) === self::BATCH;
-			} while ( $full && microtime( true ) < $until );
+			} while ( $full );
 			return self::state();
 		} finally {
 			Mutex::release( 'audit_export' );
@@ -365,9 +426,10 @@ final class AuditExporter {
 	/**
 	 * POSTs a batch. Returns true, or the error message.
 	 *
-	 * @param list<array<string, mixed>> $events Events with chain.
+	 * @param list<array<string, mixed>> $events  Events with chain.
+	 * @param int                        $timeout Seconds.
 	 */
-	private function post( array $events ): string|bool {
+	private function post( array $events, int $timeout = self::TIMEOUT ): string|bool {
 		$body     = (string) wp_json_encode(
 			array(
 				'site'   => home_url( '/' ),
@@ -381,7 +443,7 @@ final class AuditExporter {
 			$this->webhook(),
 			array(
 				'method'  => 'POST',
-				'timeout' => 10,
+				'timeout' => $timeout,
 				'headers' => array(
 					'Content-Type'                => 'application/json',
 					'X-Sentinel-Shield-Signature' => 't=' . $time . ',v1=' . hash_hmac( 'sha256', $time . '.' . $body, self::secret() ),
@@ -425,7 +487,7 @@ final class AuditExporter {
 	}
 
 	/**
-	 * Hourly heartbeat ping; records the result.
+	 * Heartbeat ping (its own hourly job); records the result.
 	 */
 	public function heartbeat(): void {
 		$url = (string) $this->settings->get( 'audit.heartbeat_url', '' );
@@ -436,7 +498,7 @@ final class AuditExporter {
 			$url,
 			array(
 				'method'  => 'GET',
-				'timeout' => 10,
+				'timeout' => self::TIMEOUT,
 			)
 		);
 		$ok                 = ! is_wp_error( $response ) && (int) wp_remote_retrieve_response_code( $response ) < 400;
