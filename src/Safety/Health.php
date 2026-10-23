@@ -18,6 +18,7 @@ use SentinelShield\Firewall\FeedSnapshot;
 use SentinelShield\TwoFactor\WebAuthn;
 use SentinelShield\Feeds\FeedUpdater;
 use SentinelShield\Geo\CountryDatabase;
+use SentinelShield\Lockdown\Advisories;
 use SentinelShield\Lockdown\FileIntegrity;
 use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Modules\MaintenanceModule;
@@ -279,6 +280,22 @@ final class Health {
 				/* translators: %d: number of findings. */
 				? sprintf( _n( '%d finding needs attention on the Malware Lockdown page.', '%d findings need attention on the Malware Lockdown page.', $alerts, 'sentinel-shield' ), $alerts )
 				: __( 'No open critical findings or warnings.', 'sentinel-shield' )
+		);
+
+		// PHP2Shell (CVE-2026-109618, CVE-2026-109619): only updating PHP fixes it.
+		$php = Advisories::php_status_now();
+		$add(
+			'php',
+			__( 'PHP security fixes', 'sentinel-shield' ),
+			'fixed' === $php['state'] ? 'ok' : 'warn',
+			'fixed' === $php['state']
+				/* translators: %s: PHP version. */
+				? sprintf( __( 'PHP %s has the PHP2Shell fixes.', 'sentinel-shield' ), PHP_VERSION )
+				: ( 'vulnerable' === $php['state']
+					/* translators: 1: PHP version, 2: fixed version. */
+					? sprintf( __( 'PHP %1$s has the PHP2Shell flaws (CVE-2026-109618, CVE-2026-109619), which let anyone run code on the server and are being exploited. Ask your host to update to %2$s or later.', 'sentinel-shield' ), PHP_VERSION, $php['fixed'] )
+					/* translators: %s: PHP version. */
+					: sprintf( __( 'PHP %s is a distribution build or a branch without an upstream fix; check its changelog for CVE-2026-109618 and CVE-2026-109619 (PHP2Shell).', 'sentinel-shield' ), PHP_VERSION ) )
 		);
 
 		// Persistent object cache.

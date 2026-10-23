@@ -486,4 +486,47 @@ return array(
 		'why'         => 'an old snapshot written to uploads after the upgrade cleanup stays there',
 		'integration' => 'EarlyGateTest',
 	),
+	// October 2026 incidents.
+	array(
+		'file'        => 'src/Lockdown/Advisories.php',
+		'find'        => "return 'UpdraftCentral backdoor trigger parameter';",
+		'replace'     => 'return null;',
+		'why'         => 'the backdoor trigger parameter passes',
+		'integration' => 'AdvisoriesTest',
+	),
+	array(
+		'file'        => 'src/Lockdown/Advisories.php',
+		'find'        => "if ( '' !== \$fixed && version_compare( \$base, \$fixed, '>=' ) ) {",
+		'replace'     => "if ( '' !== \$fixed && version_compare( \$base, \$fixed, '>' ) ) {",
+		'why'         => 'the first fixed PHP release counts as vulnerable',
+		'integration' => 'AdvisoriesTest',
+	),
+	array(
+		'file'        => 'src/Lockdown/RequestGuard.php',
+		'find'        => "if ( Advisories::is_attack_ip( \$ip ) && ! \$this->gate->is_protected( \$ip ) ) {",
+		'replace'     => 'if ( Advisories::is_attack_ip( $ip ) ) {',
+		'why'         => 'allowlisted addresses are refused as campaign addresses',
+		'integration' => 'AdvisoriesTest',
+	),
+	array(
+		'file'        => 'src/Lockdown/Hardening.php',
+		'find'        => "if ( 'updraftcentral' === \$channel ) {",
+		'replace'     => 'if ( false ) {',
+		'why'         => 'plugins installed through UpdraftCentral commands raise no alert',
+		'integration' => 'AdvisoriesTest',
+	),
+	array(
+		'file'        => 'src/Lockdown/IntegrityScanner.php',
+		'find'        => "\$in_window = 0 === \$written || \$written >= Advisories::RANKMATH_WINDOW[0];",
+		'replace'     => '$in_window = false;',
+		'why'         => 'a Rank Math PRO copy from the backdoor window is graded probably clean',
+		'integration' => 'AdvisoriesTest',
+	),
+	array(
+		'file'        => 'src/Lockdown/IntegrityScanner.php',
+		'find'        => "\$old_keys = count( array_filter( \$keys, static fn( \$k ): bool => is_array( \$k ) && (int) ( \$k['created'] ?? 0 ) < Advisories::UPDRAFT_CUTOFF ) );",
+		'replace'     => '$old_keys = 0;',
+		'why'         => 'UpdraftCentral keys from before the theft are not reported',
+		'integration' => 'AdvisoriesTest',
+	),
 );

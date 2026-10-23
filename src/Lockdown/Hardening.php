@@ -76,8 +76,12 @@ final class Hardening {
 			add_filter( 'wp_handle_sideload_prefilter', array( UploadGuard::class, 'filter' ) );
 			add_action( 'sentinel_shield_upload_blocked', array( $this, 'log_upload' ), 10, 2 );
 		}
-		if ( $on( 'block_chain_rpc' ) ) {
+		if ( $on( 'block_chain_rpc' ) || $on( 'block_malware_hosts' ) ) {
 			add_filter( 'pre_http_request', array( $this, 'filter_http' ), 0, 3 );
+		}
+		if ( $on( 'alert_plugin_changes' ) ) {
+			add_action( 'upgrader_process_complete', array( $this, 'on_upgrader' ), 10, 2 );
+			add_action( 'activated_plugin', array( $this, 'on_activated' ), 10, 2 );
 		}
 		if ( $on( 'protect_self' ) ) {
 			add_filter( 'pre_update_option_active_plugins', array( $this, 'keep_active' ), 10, 2 );
@@ -226,7 +230,7 @@ final class Hardening {
 	}
 
 	/**
-	 * Blocks WordPress HTTP API requests to blockchain RPC gateways.
+	 * Blocks WordPress HTTP API requests to known malware hosts and blockchain RPC gateways.
 	 *
 	 * @param false|array<mixed>|\WP_Error $pre  Short-circuit value.
 	 * @param array<string, mixed>         $args Request arguments.
@@ -237,7 +241,8 @@ final class Hardening {
 		if ( false !== $pre ) {
 			return $pre;
 		}
-		$why = OutboundGuard::match( $url, $args );
+		$malware = $this->settings->get( 'lockdown.block_malware_hosts', false ) ? Advisories::outbound_match( $url ) : null;
+		$why     = $malware ?? ( $this->settings->get( 'lockdown.block_chain_rpc', false ) ? OutboundGuard::match( $url, $args ) : null );
 		if ( null === $why ) {
 			return $pre;
 		}
@@ -255,7 +260,140 @@ final class Hardening {
 				)
 			);
 		}
-		return new \WP_Error( 'sentinel_shield_blocked_outbound', __( 'Blocked by Sentinel Shield: requests to blockchain gateways are disabled on this site.', 'sentinel-shield' ) );
+		return new \WP_Error(
+			'sentinel_shield_blocked_outbound',
+			null !== $malware
+				? __( 'Blocked by Sentinel Shield: this host is known to serve malware.', 'sentinel-shield' )
+				: __( 'Blocked by Sentinel Shield: requests to blockchain gateways are disabled on this site.', 'sentinel-shield' )
+		);
+	}
+
+	/**
+	 * Logs plugin installs (and alerts on suspicious ones).
+	 *
+	 * @param mixed                $upgrader WP_Upgrader instance.
+	 * @param array<string, mixed> $extra    What was done.
+	 */
+	public function on_upgrader( mixed $upgrader, array $extra ): void {
+		if ( 'plugin' !== ( $extra['type'] ?? '' ) || 'install' !== ( $extra['action'] ?? '' ) || ! is_object( $upgrader ) || ! method_exists( $upgrader, 'plugin_info' ) ) {
+			return;
+		}
+		$file = (string) $upgrader->plugin_info();
+		if ( '' !== $file ) {
+			$this->plugin_changed( $file, 'installed' );
+		}
+	}
+
+	/**
+	 * Logs plugin activations (and alerts on suspicious ones).
+	 *
+	 * @param string $plugin  Plugin file.
+	 * @param bool   $network Network-wide.
+	 */
+	public function on_activated( string $plugin, bool $network = false ): void {
+		$this->plugin_changed( $plugin, $network ? 'network-activated' : 'activated' );
+	}
+
+	/**
+	 * Through which channel the current request changes the site.
+	 */
+	public static function channel(): string {
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Presence check only.
+		if ( RequestGuard::is_updraftcentral( $_POST ) ) {
+			return 'updraftcentral';
+		}
+		if ( defined( 'WP_CLI' ) && WP_CLI ) {
+			return 'cli';
+		}
+		if ( defined( 'REST_REQUEST' ) && REST_REQUEST ) {
+			return 'rest';
+		}
+		if ( defined( 'XMLRPC_REQUEST' ) && XMLRPC_REQUEST ) {
+			return 'xmlrpc';
+		}
+		if ( wp_doing_cron() ) {
+			return 'cron';
+		}
+		return 'web';
+	}
+
+	/**
+	 * Logs a plugin install or activation; emails when it looks like a takeover.
+	 *
+	 * @param string $file   Plugin file relative to the plugins folder.
+	 * @param string $action installed|activated|network-activated.
+	 */
+	private function plugin_changed( string $file, string $action ): void {
+		$path = WP_PLUGIN_DIR . '/' . $file;
+		$code = is_file( $path ) ? (string) file_get_contents( $path, false, null, 0, 262144 ) : ''; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Local file inspection.
+		$name = '';
+		if ( is_file( $path ) ) {
+			require_once ABSPATH . 'wp-admin/includes/plugin.php';
+			$name = (string) ( get_plugin_data( $path, false, false )['Name'] ?? '' );
+		}
+		$markers = array_values( array_filter( Advisories::code_markers(), static fn( array $m ): bool => 'critical' === $m[1] && (bool) preg_match( $m[0], $code ) ) );
+		$channel = self::channel();
+		$user    = wp_get_current_user();
+		$labels  = array(
+			'updraftcentral' => __( 'an UpdraftCentral remote command', 'sentinel-shield' ),
+			'cli'            => __( 'WP-CLI', 'sentinel-shield' ),
+			'rest'           => __( 'the REST API', 'sentinel-shield' ),
+			'xmlrpc'         => __( 'XML-RPC', 'sentinel-shield' ),
+			'cron'           => __( 'a scheduled task', 'sentinel-shield' ),
+			'web'            => __( 'the dashboard or a web request', 'sentinel-shield' ),
+		);
+		$by      = $user->exists()
+			/* translators: 1: login, 2: user ID, 3: channel. */
+			? sprintf( __( '%1$s (ID %2$d) through %3$s', 'sentinel-shield' ), $user->user_login, $user->ID, $labels[ $channel ] )
+			/* translators: %s: channel. */
+			: sprintf( __( 'no logged-in user, through %s', 'sentinel-shield' ), $labels[ $channel ] );
+		$why = array();
+		if ( $markers ) {
+			$why[] = implode( '; ', array_column( $markers, 2 ) );
+		}
+		if ( 'updraftcentral' === $channel ) {
+			$why[] = __( 'sent as an UpdraftCentral remote command, the way the backdoors of 18 and 19 October 2026 were installed', 'sentinel-shield' );
+		}
+		if ( ! $user->exists() && 'cli' !== $channel ) {
+			$why[] = __( 'no logged-in user did this', 'sentinel-shield' );
+		}
+		$this->log(
+			'lockdown_plugin_change',
+			/* translators: 1: action, 2: plugin name, 3: file, 4: who. */
+			mb_substr( sprintf( __( 'Plugin %1$s: %2$s (%3$s), by %4$s', 'sentinel-shield' ), $action, '' !== $name ? $name : $file, $file, $by ) . ( $why ? ' — ' . implode( '; ', $why ) : '' ), 0, 255 ),
+			array(
+				'plugin'  => $file,
+				'action'  => $action,
+				'channel' => $channel,
+				'risky'   => (bool) $why,
+			)
+		);
+		if ( ! $why || ! Throttle::once( 'lockdown_plugin_mail_' . md5( $file . $action ), HOUR_IN_SECONDS ) ) {
+			return;
+		}
+		$lines = array(
+			/* translators: 1: action, 2: site URL. */
+			sprintf( __( 'A plugin was %1$s on %2$s in a way that looks like a takeover.', 'sentinel-shield' ), $action, home_url( '/' ) ),
+			'',
+			/* translators: %s: plugin name and file. */
+			sprintf( __( 'Plugin: %s', 'sentinel-shield' ), ( '' !== $name ? $name . ' ' : '' ) . '(' . $file . ')' ),
+			/* translators: %s: who. */
+			sprintf( __( 'By: %s', 'sentinel-shield' ), $by ),
+			/* translators: %s: IP address. */
+			sprintf( __( 'From IP: %s', 'sentinel-shield' ), ( $this->ip )() ),
+			/* translators: %s: reasons. */
+			sprintf( __( 'Why this alert: %s', 'sentinel-shield' ), implode( '; ', $why ) ),
+			'',
+			__( 'If you did not do this, delete the plugin, check the Users screen for new accounts, change administrator passwords, and run the malware scan:', 'sentinel-shield' ),
+			Admin::url( 'sentinel-shield-lockdown' ),
+		);
+		Mailer::send(
+			(string) get_site_option( 'admin_email' ),
+			/* translators: %s: site name. */
+			sprintf( __( '[%s] Suspicious plugin install', 'sentinel-shield' ), wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ) ),
+			implode( "\n", $lines ),
+			'alert'
+		);
 	}
 
 	/**

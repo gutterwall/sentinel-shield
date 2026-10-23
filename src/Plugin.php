@@ -26,6 +26,7 @@ use SentinelShield\Geo\LoginGeoGuard;
 use SentinelShield\Lockdown\AdminRegistry;
 use SentinelShield\Lockdown\FileIntegrity;
 use SentinelShield\Lockdown\Hardening;
+use SentinelShield\Lockdown\RequestGuard;
 use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockout\LockoutService;
 use SentinelShield\Lockout\RepositoryBlockWriter;
@@ -169,6 +170,16 @@ final class Plugin {
 				$c->get( Settings::class ),
 				$c->get( AdminRegistry::class ),
 				$c->get( EventRepository::class ),
+				static fn(): string => (string) $c->get( 'client_ip' )
+			)
+		);
+		$c->set(
+			RequestGuard::class,
+			static fn( Container $c ): RequestGuard => new RequestGuard(
+				$c->get( Settings::class ),
+				$c->get( EventRepository::class ),
+				static fn(): bool => $c->get( SafetyGuard::class )->is_bypassed(),
+				$c->get( Gate::class ),
 				static fn(): string => (string) $c->get( 'client_ip' )
 			)
 		);

@@ -135,17 +135,22 @@ final class Settings {
 				'dbip'       => false,
 				'server_var' => '',
 			),
-			// Malware lockdown measures are opt-in except the alerts, which change nothing.
+			// Malware lockdown measures are opt-in except the alerts, which change nothing,
+			// and the incident filters, which only refuse traffic that no legitimate site sends.
 			'lockdown'   => array(
-				'disable_file_editor' => false,
-				'block_installs'      => false,
-				'block_php_uploads'   => false,
-				'admin_lock'          => false,
-				'protect_self'        => false,
-				'block_chain_rpc'     => false,
-				'alert_admin_changes' => true,
-				'scan_email'          => true,
-				'integrity_checks'    => true,
+				'disable_file_editor'  => false,
+				'block_installs'       => false,
+				'block_php_uploads'    => false,
+				'admin_lock'           => false,
+				'protect_self'         => false,
+				'block_chain_rpc'      => false,
+				'block_malware_hosts'  => true,
+				'block_indicators'     => true,
+				'block_updraftcentral' => false,
+				'alert_admin_changes'  => true,
+				'alert_plugin_changes' => true,
+				'scan_email'           => true,
+				'integrity_checks'     => true,
 			),
 			'modules'    => array(
 				'ip_gate'      => array(

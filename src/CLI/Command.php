@@ -1320,6 +1320,48 @@ final class Command {
 	}
 
 	/**
+	 * Approves a scan finding as it is now (it comes back if it changes), or withdraws an approval.
+	 *
+	 * Use the id column of `wp sentinel scan --all`. Approve only what you have
+	 * checked, for example a PHP build whose package changelog lists the fix.
+	 *
+	 * ## OPTIONS
+	 *
+	 * <id>
+	 * : Finding ID.
+	 *
+	 * [--undo]
+	 * : Withdraw the approval instead.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp sentinel approve-finding 0f3c2a9d8e7b6a5f4e3d2c1b0a998877
+	 *
+	 * @subcommand approve-finding
+	 * @param array<int, string>    $args       Positional.
+	 * @param array<string, string> $assoc_args Named.
+	 */
+	public function approve_finding( array $args, array $assoc_args ): void {
+		$id = (string) $args[0];
+		if ( isset( $assoc_args['undo'] ) ) {
+			IntegrityScanner::unapprove( $id ) ? WP_CLI::success( "Approval of $id withdrawn." ) : WP_CLI::error( "$id is not approved." );
+			return;
+		}
+		$finding = IntegrityScanner::approve( $id, 0 );
+		if ( null === $finding ) {
+			WP_CLI::error( "$id is not in the last scan report, or cannot be approved." );
+		}
+		$this->c->get( EventRepository::class )->log(
+			'config_change',
+			array(
+				'module' => 'lockdown',
+				'reason' => mb_substr( 'Scan finding approved with WP-CLI: ' . $finding['title'], 0, 255 ),
+			)
+		);
+		WP_CLI::success( 'Approved: ' . $finding['title'] );
+	}
+
+	/**
 	 * Verifies WordPress core and plugin files against WordPress.org checksums. Read-only.
 	 *
 	 * Runs a complete pass now (no time slices). Exits with status 1 when

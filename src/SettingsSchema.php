@@ -653,47 +653,67 @@ final class SettingsSchema {
 		);
 
 		$lockdown = array(
-			'disable_file_editor' => array(
+			'disable_file_editor'  => array(
 				__( 'Disable the plugin and theme file editor', 'sentinel-shield' ),
 				__( 'Removes Appearance → Theme File Editor and Plugins → Plugin File Editor for everyone, like DISALLOW_FILE_EDIT. A stolen admin login can then not be used to paste a backdoor into a theme, which is how SC\'s theme copy is often planted.', 'sentinel-shield' ),
 				true,
 			),
-			'block_installs'      => array(
+			'block_installs'       => array(
 				__( 'Block installing and uploading plugins and themes', 'sentinel-shield' ),
 				__( 'Nobody can add new plugins or themes from the admin (updates still work). SC installs itself as a fake plugin; turn this off briefly when you need to install something.', 'sentinel-shield' ),
 				null,
 			),
-			'block_php_uploads'   => array(
+			'block_php_uploads'    => array(
 				__( 'Block PHP in uploads', 'sentinel-shield' ),
 				__( 'Rejects uploads whose name or content is a script (including double extensions such as shell.php.jpg and .htaccess/.user.ini files) and, on Apache, adds rules to uploads/.htaccess so PHP files there cannot run. On nginx, add the rule shown on the Malware Lockdown page to your server configuration.', 'sentinel-shield' ),
 				true,
 			),
-			'admin_lock'          => array(
+			'admin_lock'           => array(
 				__( 'Administrator lock', 'sentinel-shield' ),
 				__( 'Only approved administrator accounts keep admin rights; any other account with admin powers (such as one SC writes straight into the database) is treated as having none until approved on the Malware Lockdown page. When first switched on, every administrator shown on the Users screen is approved, hidden ones are not. Recover with: wp sentinel approve-admin <user>. To fix the list in a file instead, define SENTINEL_SHIELD_ADMINS in wp-config.php (see Documentation).', 'sentinel-shield' ),
 				true,
 			),
-			'protect_self'        => array(
+			'protect_self'         => array(
 				__( 'Protect Sentinel Shield from being switched off by code', 'sentinel-shield' ),
 				__( 'SC deactivates and deletes security plugins. With this on, Sentinel Shield can only be deactivated or deleted by an administrator from the Plugins screen, during an update, or with WP-CLI.', 'sentinel-shield' ),
 				true,
 			),
-			'block_chain_rpc'     => array(
+			'block_chain_rpc'      => array(
 				__( 'Block blockchain command channels', 'sentinel-shield' ),
 				__( 'Stops the site from contacting public Ethereum and BNB Chain RPC gateways and from sending blockchain JSON-RPC calls (eth_call), which SC uses to fetch its commands. Each attempt is logged with the file that made it. Leave off if a plugin on this site legitimately talks to a blockchain.', 'sentinel-shield' ),
 				true,
 			),
-			'alert_admin_changes' => array(
+			'block_malware_hosts'  => array(
+				__( 'Block known malware servers', 'sentinel-shield' ),
+				__( 'Stops the site from contacting hosts that recent WordPress malware gets its commands from (currently rank1cdn.com, used by the Rank Math PRO 3.0.123 backdoor, CVE-2026-111862). Each attempt is logged with the file that made it. Only requests made through WordPress can be stopped; the scan looks for the host in code as well.', 'sentinel-shield' ),
+				true,
+			),
+			'block_indicators'     => array(
+				__( 'Refuse requests carrying attack markers', 'sentinel-shield' ),
+				__( 'Answers 403 and logs requests that carry the trigger parameter of the backdoor plugins installed through stolen UpdraftCentral keys (October 2026), that come from that campaign\'s addresses (unless allowlisted), or that send a malformed PHP session cookie as PHP2Shell probes do (CVE-2026-109618/109619). The PHP2Shell attack itself runs before any plugin, so only updating PHP prevents it; this shows the probes. Not affected by test mode.', 'sentinel-shield' ),
+				true,
+			),
+			'block_updraftcentral' => array(
+				__( 'Refuse UpdraftCentral remote commands', 'sentinel-shield' ),
+				__( 'Answers 403 to every UpdraftCentral remote command (the signed messages UpdraftPlus accepts on any URL). Turn this on if you do not manage this site from UpdraftCentral: in October 2026 stolen UpdraftCentral keys were used to install backdoor plugins. Backups to remote storage are not affected.', 'sentinel-shield' ),
+				null,
+			),
+			'alert_admin_changes'  => array(
 				__( 'Alert on new administrator accounts', 'sentinel-shield' ),
 				__( 'Logs and emails the site admin address whenever an account becomes an administrator through WordPress. Accounts written directly into the database are caught by the scan instead.', 'sentinel-shield' ),
 				true,
 			),
-			'scan_email'          => array(
+			'alert_plugin_changes' => array(
+				__( 'Log plugin installs and alert on suspicious ones', 'sentinel-shield' ),
+				__( 'Logs every plugin install and activation with who did it and through which channel (dashboard, WP-CLI, REST API, a scheduled task, an UpdraftCentral remote command). Emails the site admin address when the plugin contains a known backdoor marker, arrived through an UpdraftCentral command, or was installed with no logged-in user.', 'sentinel-shield' ),
+				true,
+			),
+			'scan_email'           => array(
 				__( 'Email new malware scan findings', 'sentinel-shield' ),
 				__( 'The scan runs twice a day. New critical findings and warnings are logged; with this on they are also emailed to the site admin address. The same applies to the file integrity check.', 'sentinel-shield' ),
 				true,
 			),
-			'integrity_checks'    => array(
+			'integrity_checks'     => array(
 				__( 'Verify core and plugin files against WordPress.org checksums', 'sentinel-shield' ),
 				__( 'Once a day, every WordPress core file and every file of plugins hosted on WordPress.org is compared with the hash WordPress.org publishes for the installed version, and core folders are checked for files no release contains. Changed or added files are reported on the Malware Lockdown page. Large sites are checked in slices over several minutes. The site asks WordPress.org for the checksums of your WordPress and plugin versions (as update checks already do); nothing about visitors is sent. Themes, premium plugins and single-file plugins cannot be verified this way and are listed as such.', 'sentinel-shield' ),
 				true,

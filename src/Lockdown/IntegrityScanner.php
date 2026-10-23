@@ -125,6 +125,7 @@ final class IntegrityScanner {
 			'hooks'          => array( __( 'Login and hiding hooks', 'sentinel-shield' ), __( 'SC hooks into logins to capture credentials and into admin screens to hide itself.', 'sentinel-shield' ) ),
 			'shm'            => array( __( 'Shared memory', 'sentinel-shield' ), __( 'SC keeps a copy of itself in System V shared memory, which survives file and database cleanup.', 'sentinel-shield' ) ),
 			'outbound'       => array( __( 'Blockchain command channel', 'sentinel-shield' ), __( 'SC reads its instructions from an Ethereum smart contract through public RPC gateways.', 'sentinel-shield' ) ),
+			'advisories'     => array( __( 'Recent incidents', 'sentinel-shield' ), __( 'Traces of incidents exploited against WordPress sites in October 2026: the Rank Math PRO 3.0.123 backdoor, backdoor plugins installed through stolen UpdraftCentral keys, and the PHP2Shell flaws in PHP.', 'sentinel-shield' ) ),
 		);
 	}
 
@@ -287,6 +288,7 @@ final class IntegrityScanner {
 			array( '/[A-Za-z0-9+\/]{4000,}/', 'warning', __( 'contains a large encoded blob', 'sentinel-shield' ) ),
 			array( '/(?:\\\\x[0-9a-fA-F]{2}){16,}/', 'warning', __( 'contains heavily escaped strings', 'sentinel-shield' ) ),
 		);
+		$rules = array_merge( $rules, Advisories::code_markers() );
 		$out   = array();
 		foreach ( $rules as [ $pattern, $severity, $reason ] ) {
 			if ( preg_match( $pattern, $code ) ) {
@@ -295,6 +297,9 @@ final class IntegrityScanner {
 		}
 		if ( preg_match( '/mu-plugins/i', $code ) && preg_match( '/\b(?:file_put_contents|fwrite|copy|rename)\s*\(/i', $code ) ) {
 			$out[] = array( __( 'writes files into mu-plugins', 'sentinel-shield' ), 'warning' );
+		}
+		if ( preg_match( '/\bbase64_decode\s*\(/i', $code ) && preg_match( '/\bord\s*\([^;]{0,120}\^|\^\s*ord\s*\(/i', $code ) ) {
+			$out[] = array( __( 'XOR-decodes a base64 payload', 'sentinel-shield' ), 'warning' );
 		}
 		return $out;
 	}
@@ -654,7 +659,7 @@ final class IntegrityScanner {
 			}
 		} elseif ( '.user.ini' === $name || 'php.ini' === $name ) {
 			$this->file_finding( 'stray_files', $path, 'warning', __( 'A PHP settings file inside uploads can switch on an auto-prepend loader for that folder.', 'sentinel-shield' ) );
-		} elseif ( preg_match( '/^[0-9a-f]{8,}\.zip$/i', $name ) ) {
+		} elseif ( preg_match( '/^[0-9a-f]{8,}\.zip$/i', $name ) || str_ends_with( strtolower( $name ), '.cache' ) ) {
 			$this->stray( $path, $name, false );
 		}
 	}
@@ -671,6 +676,8 @@ final class IntegrityScanner {
 			$this->file_finding( 'stray_files', $path, 'critical', __( 'Hidden (dot-prefixed) PHP file. SC loads its first stage from a file like this.', 'sentinel-shield' ) );
 		} elseif ( $wp_content && preg_match( '/^[0-9a-f]{8,}\.php$/i', $name ) ) {
 			$this->file_finding( 'stray_files', $path, 'warning', __( 'Randomly named PHP file in wp-content, like the SC shim that loads its hidden loader.', 'sentinel-shield' ) );
+		} elseif ( str_ends_with( strtolower( $name ), '.cache' ) ) {
+			$this->php_cache_file( $path );
 		} elseif ( preg_match( '/^[0-9a-f]{8,}\.zip$/i', $name ) ) {
 			$this->add(
 				'stray_files',
@@ -865,6 +872,317 @@ final class IntegrityScanner {
 				'outbound-off'
 			);
 		}
+	}
+
+	/**
+	 * Traces of the incidents listed in Advisories.
+	 */
+	private function check_advisories(): void {
+		$plugins = get_plugins();
+		$traces  = $this->advisory_rankmath( $plugins );
+		$this->advisory_updraft( $plugins );
+		$this->advisory_accounts();
+		$this->advisory_ssh();
+		$this->advisory_php();
+		if ( $traces ) {
+			$this->advisory_deep_search();
+		}
+	}
+
+	/**
+	 * Rank Math PRO 3.0.123 and what its backdoor leaves behind.
+	 *
+	 * @param array<string, array<string, mixed>> $plugins Installed plugins.
+	 * @return bool Whether there are signs the backdoor ran here.
+	 */
+	private function advisory_rankmath( array $plugins ): bool {
+		global $wpdb;
+		$traces = false;
+		foreach ( $plugins as $file => $data ) {
+			$is_pro = 'rank-math-pro.php' === basename( $file ) || (bool) preg_match( '/^Rank Math (?:SEO )?PRO$/i', trim( (string) ( $data['Name'] ?? '' ) ) );
+			if ( ! $is_pro || '3.0.123' !== (string) ( $data['Version'] ?? '' ) ) {
+				continue;
+			}
+			$written   = (int) @filemtime( WP_PLUGIN_DIR . '/' . $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Vanished file: treated as unknown.
+			$in_window = 0 === $written || $written >= Advisories::RANKMATH_WINDOW[0];
+			$traces    = $traces || $in_window;
+			$this->add(
+				'advisories',
+				$in_window ? 'critical' : 'warning',
+				/* translators: %s: plugin file. */
+				sprintf( __( 'Rank Math PRO 3.0.123 is installed (%s)', 'sentinel-shield' ), $file ),
+				( $in_window
+					/* translators: %s: date and time (UTC). */
+					? sprintf( __( 'Its files were written on %s, after the backdoored build appeared (20:02 UTC on 15 October 2026). Treat the site as compromised: restore a backup from before then if you can; otherwise delete the whole plugin folder (deactivating is not enough), deal with every other finding in this list, change every password and key the site holds, and install 3.0.124 from your rankmath.com account.', 'sentinel-shield' ), $written ? gmdate( 'Y-m-d H:i', $written ) . ' UTC' : '?' )
+					/* translators: %s: date and time (UTC). */
+					: sprintf( __( 'Its files were written on %s, before the backdoored build appeared, so this copy is probably clean. Update to 3.0.124 from your rankmath.com account.', 'sentinel-shield' ), gmdate( 'Y-m-d H:i', $written ) . ' UTC' ) )
+					. ' CVE-2026-111862.',
+				'rankmath:' . $file,
+				md5( $file . '|' . $written )
+			);
+		}
+
+		$names = Advisories::RANKMATH_OPTIONS;
+		$found = (array) $wpdb->get_col( $wpdb->prepare( 'SELECT option_name FROM %i WHERE option_name IN (' . implode( ',', array_fill( 0, count( $names ), '%s' ) ) . ')', $wpdb->options, ...$names ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- Read-only scan; the placeholders are generated.
+		if ( $found ) {
+			$traces = true;
+			$this->add(
+				'advisories',
+				'critical',
+				/* translators: %s: option names. */
+				sprintf( __( 'Options written by the Rank Math PRO backdoor: %s', 'sentinel-shield' ), implode( ', ', $found ) ),
+				__( 'These option names belong to the backdoor shipped in Rank Math PRO 3.0.123 (CVE-2026-111862). Delete them after removing the rank-math-pro folder, and look for the other traces listed here: administrators named wpsupport_…, PHP in .cache files, wp-includes/class-wp-cache-util.php, changed .htaccess files, scheduled tasks and SSH keys.', 'sentinel-shield' ),
+				'rankmath-options'
+			);
+		}
+
+		$fake = ABSPATH . WPINC . '/' . Advisories::RANKMATH_FAKE_CORE;
+		if ( is_file( $fake ) ) {
+			$traces = true;
+			$this->file_finding( 'advisories', $fake, 'critical', __( 'WordPress has no such core file. The Rank Math PRO backdoor plants it as a disguised copy of itself.', 'sentinel-shield' ) );
+		}
+
+		foreach ( $this->config_dirs() as $dir ) {
+			$file = $dir . '/.htaccess';
+			if ( ! is_file( $file ) ) {
+				continue;
+			}
+			$text = $this->read( $file );
+			if ( preg_match( '/^[^\n#]*\b(?:AddHandler|AddType)\b[^\n#]*php[^\n#]*\.cache\b/mi', $text ) || preg_match( '/<Files(?:Match)?\s[^>]*cache[^>]*>(?:(?!<\/Files).){0,500}?\b(?:SetHandler|ForceType|AddHandler)\b[^\n]*php/is', $text ) ) {
+				$traces = true;
+				$this->add(
+					'advisories',
+					'critical',
+					/* translators: %s: file path. */
+					sprintf( __( '%s makes .cache files run as PHP', 'sentinel-shield' ), CronInspector::relative( $file ) ),
+					__( 'The Rank Math PRO backdoor adds this rule so the PHP it hides in .cache files can be requested over the web. Remove the rule and the .cache files with PHP in them.', 'sentinel-shield' ),
+					'htaccess-cache:' . $file,
+					self::fingerprint( $file )
+				);
+			}
+		}
+		return $traces;
+	}
+
+	/**
+	 * Classifies a .cache file: PHP code in one is how the Rank Math PRO backdoor hides.
+	 *
+	 * @param string $path Path.
+	 */
+	private function php_cache_file( string $path ): void {
+		if ( ! preg_match( '/<\?(?:php\b|=)/i', $this->read( $path ) ) ) {
+			return;
+		}
+		$this->file_finding( 'advisories', $path, 'warning', __( 'This .cache file contains PHP code. The Rank Math PRO backdoor hides PHP in .cache files and changes .htaccess so they run; caching plugins do not need PHP in them.', 'sentinel-shield' ) );
+	}
+
+	/**
+	 * Searches plugins, must-use plugins and themes for the Rank Math PRO
+	 * backdoor's markers, which it copies into other plugins and themes. Only
+	 * run when other traces were found; WP-CLI runs it to the end.
+	 */
+	private function advisory_deep_search(): void {
+		$own   = wp_normalize_path( dirname( SENTINEL_SHIELD_FILE ) );
+		$rules = array_slice( Advisories::code_markers(), 0, 3 );
+		$hits  = 0;
+		foreach ( array_unique( array( WP_PLUGIN_DIR, WPMU_PLUGIN_DIR, get_theme_root() ) ) as $root ) {
+			if ( ! is_dir( $root ) ) {
+				continue;
+			}
+			$skip = str_starts_with( $own, wp_normalize_path( $root ) . '/' ) ? array( substr( $own, strlen( wp_normalize_path( $root ) ) + 1 ) ) : array();
+			$walk = new FileWalk( $root, $skip );
+			$done = $walk->run(
+				'',
+				function ( string $path, string $rel ) use ( $rules, &$hits ): void {
+					if ( ! preg_match( '/\.(?:php[0-9]?|phtml|cache|inc)$/i', $rel ) ) {
+						return;
+					}
+					$code = $this->read( $path );
+					foreach ( $rules as [ $pattern, , $reason ] ) {
+						if ( preg_match( $pattern, $code ) ) {
+							++$hits;
+							$this->add(
+								'advisories',
+								'critical',
+								/* translators: %s: file path. */
+								sprintf( __( 'Rank Math PRO backdoor code in %s', 'sentinel-shield' ), CronInspector::relative( $path ) ),
+								/* translators: %s: what was found. */
+								sprintf( __( 'Found: %s. The backdoor copies itself into other plugins, themes (inc/, includes/, lib/) and must-use plugins. Replace the affected plugin or theme with a fresh copy.', 'sentinel-shield' ), $reason ),
+								'file:' . $path,
+								self::fingerprint( $path )
+							);
+							return;
+						}
+					}
+				},
+				fn(): bool => microtime( true ) > $this->deadline
+			);
+			if ( ! $done ) {
+				$this->truncated[] = 'advisories';
+				break;
+			}
+		}
+	}
+
+	/**
+	 * UpdraftPlus versions and keys exposed by the UpdraftCentral incident, and its backdoor plugins.
+	 *
+	 * @param array<string, array<string, mixed>> $plugins Installed plugins.
+	 */
+	private function advisory_updraft( array $plugins ): void {
+		foreach ( $plugins as $file => $data ) {
+			$code    = $this->read( WP_PLUGIN_DIR . '/' . $file );
+			$markers = array_values( array_filter( Advisories::code_markers(), static fn( array $m ): bool => 'critical' === $m[1] && (bool) preg_match( $m[0], $code ) ) );
+			$named   = in_array( strtolower( trim( (string) ( $data['Name'] ?? '' ) ) ), array_map( 'strtolower', Advisories::UPDRAFT_PLUGIN_NAMES ), true );
+			if ( $markers || $named ) {
+				$this->add(
+					'advisories',
+					$markers ? 'critical' : 'warning',
+					/* translators: %s: plugin name. */
+					sprintf( __( 'Plugin matching the UpdraftCentral backdoors: %s', 'sentinel-shield' ), (string) ( $data['Name'] ?? $file ) ),
+					/* translators: %s: plugin file. */
+					sprintf( __( 'File: wp-content/plugins/%s.', 'sentinel-shield' ), $file ) . ' '
+						. ( $markers
+							/* translators: %s: what was found. */
+							? sprintf( __( 'Found: %s.', 'sentinel-shield' ), implode( '; ', array_column( $markers, 2 ) ) )
+							: __( 'Its name is one of the 99 used by the plugins installed through stolen UpdraftCentral keys on 18 and 19 October 2026. Approve it if you installed it yourself.', 'sentinel-shield' ) )
+						. ' ' . __( 'These plugins create an account with a known password when a secret parameter is requested. Delete the plugin and any account it created, and change administrator passwords.', 'sentinel-shield' ),
+					'updraft-plugin:' . $file,
+					self::fingerprint( WP_PLUGIN_DIR . '/' . $file )
+				);
+			}
+
+			if ( 'updraftplus.php' !== basename( $file ) ) {
+				continue;
+			}
+			$version  = (string) ( $data['Version'] ?? '' );
+			$keys     = get_site_option( 'updraft_central_localkeys' );
+			$keys     = is_array( $keys ) ? $keys : array();
+			$old_keys = count( array_filter( $keys, static fn( $k ): bool => is_array( $k ) && (int) ( $k['created'] ?? 0 ) < Advisories::UPDRAFT_CUTOFF ) );
+			if ( Advisories::updraft_forgeable( $version ) ) {
+				$severity = 'critical';
+				/* translators: %s: version. */
+				$detail = sprintf( __( 'UpdraftPlus %s accepts forged UpdraftCentral commands without any key (CVE-2026-10795), which attackers still try. Update to 1.26.13 (Premium 2.26.13) or later now.', 'sentinel-shield' ), $version );
+			} elseif ( Advisories::updraft_outdated( $version ) && $keys ) {
+				$severity = 'critical';
+				/* translators: 1: version, 2: number of keys. */
+				$detail = sprintf( __( 'UpdraftPlus %1$s still accepts the %2$d UpdraftCentral connection key(s) on this site. Keys stolen from TeamUpdraft were used on 18 and 19 October 2026 to install backdoor plugins. Update to 1.26.13 (Premium 2.26.13), which disconnects keys from before the incident, then reconnect.', 'sentinel-shield' ), $version, count( $keys ) );
+			} elseif ( $old_keys > 0 ) {
+				$severity = 'warning';
+				/* translators: %d: number of keys. */
+				$detail = sprintf( __( '%d UpdraftCentral connection key(s) on this site were created before the TeamUpdraft incident (22:00 BST, 18 October 2026). Delete them under Settings → UpdraftPlus → Advanced Tools → UpdraftCentral and reconnect.', 'sentinel-shield' ), $old_keys );
+			} elseif ( Advisories::updraft_outdated( $version ) ) {
+				$severity = 'notice';
+				/* translators: %s: version. */
+				$detail = sprintf( __( 'UpdraftPlus %s is older than 1.26.13 (Premium 2.26.13). This site has no UpdraftCentral keys, so the incident does not reach it, but update anyway.', 'sentinel-shield' ), $version );
+			} else {
+				continue;
+			}
+			$this->add(
+				'advisories',
+				$severity,
+				/* translators: %s: version. */
+				sprintf( __( 'UpdraftPlus %s and the UpdraftCentral key theft', 'sentinel-shield' ), $version ),
+				$detail . ' ' . __( 'If you do not use UpdraftCentral, "Refuse UpdraftCentral remote commands" on the Malware Lockdown tab blocks the channel entirely.', 'sentinel-shield' ),
+				'updraft:' . $file,
+				md5( $version . '|' . count( $keys ) . '|' . $old_keys )
+			);
+		}
+	}
+
+	/**
+	 * Accounts created by the incidents' backdoors.
+	 */
+	private function advisory_accounts(): void {
+		global $wpdb;
+		$logins = Advisories::UPDRAFT_LOGINS;
+		$rows   = (array) $wpdb->get_results( $wpdb->prepare( 'SELECT ID, user_login, user_email, user_registered FROM %i WHERE user_login IN (' . implode( ',', array_fill( 0, count( $logins ), '%s' ) ) . ') OR user_login LIKE %s OR user_email LIKE %s ORDER BY ID LIMIT 50', $wpdb->users, ...array_merge( $logins, array( $wpdb->esc_like( 'wpsupport_' ) . '%', '%' . $wpdb->esc_like( '@wp-mail.net' ) ) ) ), ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare, WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- Read-only scan; the placeholders are generated.
+		foreach ( $rows as $row ) {
+			$updraft = in_array( strtolower( (string) $row['user_login'] ), $logins, true );
+			$this->add(
+				'advisories',
+				'critical',
+				/* translators: 1: login, 2: user ID, 3: email. */
+				sprintf( __( 'Account created by a known backdoor: %1$s (ID %2$d, %3$s)', 'sentinel-shield' ), $row['user_login'], $row['ID'], $row['user_email'] ),
+				( $updraft
+					? __( 'This login was created by the plugins installed through stolen UpdraftCentral keys; its password is known to the attackers.', 'sentinel-shield' )
+					: __( 'Administrators named wpsupport_… or with a @wp-mail.net address are created by the Rank Math PRO backdoor (CVE-2026-111862).', 'sentinel-shield' ) )
+					. ' ' . __( 'Delete the account (attribute its content to someone else) and change every administrator password.', 'sentinel-shield' ),
+				'backdoor-user:' . $row['ID'],
+				md5( $row['ID'] . '|' . $row['user_login'] . '|' . $row['user_email'] )
+			);
+		}
+		foreach ( $this->admins->privileged_users() as $user ) {
+			if ( str_ends_with( strtolower( (string) $user['email'] ), '@example.com' ) ) {
+				$this->add(
+					'advisories',
+					'warning',
+					/* translators: 1: login, 2: user ID. */
+					sprintf( __( 'Administrator with an @example.com address: %1$s (ID %2$d)', 'sentinel-shield' ), $user['login'], $user['id'] ),
+					__( 'example.com cannot receive mail, so no real person uses it. The accounts created through stolen UpdraftCentral keys used it, with names such as "System Team" or "Web Tech". Approve this if it is a test account you made.', 'sentinel-shield' ),
+					'example-admin:' . $user['id'],
+					md5( $user['id'] . '|' . $user['login'] . '|' . $user['email'] )
+				);
+			}
+		}
+	}
+
+	/**
+	 * SSH keys of the account PHP runs as, which the Rank Math PRO backdoor adds to.
+	 */
+	private function advisory_ssh(): void {
+		if ( ! function_exists( 'posix_getpwuid' ) || ! function_exists( 'posix_geteuid' ) ) {
+			return;
+		}
+		$info = posix_getpwuid( posix_geteuid() );
+		$home = is_array( $info ) ? $info['dir'] : '';
+		$file = $home . '/.ssh/authorized_keys';
+		if ( '' === $home || ! @is_file( $file ) || ! @is_readable( $file ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- open_basedir may forbid the home folder.
+			return;
+		}
+		$text    = $this->read( $file );
+		$keys    = (int) preg_match_all( '/^\s*(?:[a-z0-9-]+=\S*\s+)*(?:ssh-|ecdsa-|sk-)/mi', $text );
+		$changed = (int) @filemtime( $file ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- See above.
+		if ( 0 === $keys ) {
+			return;
+		}
+		$this->add(
+			'advisories',
+			$changed >= Advisories::RANKMATH_WINDOW[0] ? 'warning' : 'notice',
+			/* translators: 1: number of keys, 2: account name. */
+			sprintf( _n( '%1$d SSH key can log in as %2$s, the account PHP runs as', '%1$d SSH keys can log in as %2$s, the account PHP runs as', $keys, 'sentinel-shield' ), $keys, is_array( $info ) ? $info['name'] : '?' ),
+			/* translators: 1: file, 2: date. */
+			sprintf( __( '%1$s was last changed on %2$s. The Rank Math PRO backdoor adds its own key here. Approve this if you recognize every key; you will be told if the file changes. A plugin cannot read crontabs: also run "crontab -l" as this account and look for lines tagged #ms6v46.', 'sentinel-shield' ), $file, gmdate( 'Y-m-d H:i', $changed ) . ' UTC' ),
+			'ssh-keys',
+			md5( $text )
+		);
+	}
+
+	/**
+	 * Whether this PHP build has the PHP2Shell fixes.
+	 */
+	private function advisory_php(): void {
+		$status = Advisories::php_status_now();
+		if ( 'fixed' === $status['state'] ) {
+			return;
+		}
+		$gaps = Advisories::php_stopgaps( 'ini_get' );
+		$this->add(
+			'advisories',
+			'vulnerable' === $status['state'] ? 'critical' : 'warning',
+			'vulnerable' === $status['state']
+				/* translators: 1: PHP version, 2: fixed version. */
+				? sprintf( __( 'PHP %1$s has the PHP2Shell flaws (fixed in %2$s)', 'sentinel-shield' ), PHP_VERSION, $status['fixed'] )
+				/* translators: %s: PHP version. */
+				: sprintf( __( 'PHP %s: PHP2Shell fix not confirmed', 'sentinel-shield' ), PHP_VERSION ),
+			( 'vulnerable' === $status['state']
+				? __( 'CVE-2026-109618 and CVE-2026-109619 let an unauthenticated request run code on the server before WordPress loads, and are being exploited. Ask your host to update PHP now.', 'sentinel-shield' )
+				: __( 'This PHP comes from a distribution package or a branch with no upstream fix, so its version number does not show whether the PHP2Shell fixes (CVE-2026-109618, CVE-2026-109619) were backported. Check the package changelog for those CVE numbers, then approve this finding.', 'sentinel-shield' ) )
+				/* translators: 1: server API, 2: list of settings. */
+				. ' ' . sprintf( __( 'Server API: %1$s. Until PHP is updated, set in php.ini or the PHP-FPM pool (not .user.ini) and restart PHP: %2$s, and limit request body size at the web server.', 'sentinel-shield' ), PHP_SAPI, $gaps ? implode( ', ', $gaps ) : __( 'the recommended settings are already in place', 'sentinel-shield' ) ),
+			'php2shell',
+			md5( PHP_VERSION . '|' . PHP_SAPI . '|' . implode( ',', $gaps ) )
+		);
 	}
 
 	/**

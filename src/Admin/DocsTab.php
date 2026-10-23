@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace SentinelShield\Admin;
 
 use SentinelShield\Container;
+use SentinelShield\Lockdown\Advisories;
 use SentinelShield\Lockdown\AdminRegistry;
 use SentinelShield\Settings;
 use SentinelShield\SettingsSchema;
@@ -226,9 +227,15 @@ final class DocsTab {
 		$this->section(
 			__( 'What it does not do', 'sentinel-shield' ),
 			array(
-				__( 'Sentinel Shield blocks by IP address, account and country, hardens logins, and detects tampering. It has no vulnerability database: it does not tell you which installed plugins or themes have known security holes, and it has no virtual patches for them. It does not inspect request contents for attacks such as SQL injection or cross-site scripting, so an exploit sent from an address that is not on a blocklist reaches WordPress. It cannot absorb a volumetric DDoS attack, which has to be stopped upstream (your host or a CDN). It does not make backups or remove malware for you. Use it alongside updates, backups kept off the server and, where needed, those services.', 'sentinel-shield' ),
+				__( 'Sentinel Shield blocks by IP address, account and country, hardens logins, and detects tampering. It has no vulnerability database: it does not tell you which installed plugins or themes have known security holes, and it has no virtual patches for them. The exception is a short list of incidents being exploited against WordPress sites (listed below), whose traces the scan looks for and whose marker requests and servers the lockdown measures refuse. It does not inspect request contents for attacks such as SQL injection or cross-site scripting, so an exploit sent from an address that is not on a blocklist reaches WordPress. It cannot absorb a volumetric DDoS attack, which has to be stopped upstream (your host or a CDN). It does not make backups or remove malware for you. Use it alongside updates, backups kept off the server and, where needed, those services.', 'sentinel-shield' ),
 			)
 		);
+		$incidents = array();
+		foreach ( Advisories::incidents() as $incident ) {
+			/* translators: 1: title, 2: date, 3: CVE numbers or empty, 4: summary, 5: source URL. */
+			$incidents[] = sprintf( __( '%1$s (%2$s%3$s). %4$s Source: %5$s', 'sentinel-shield' ), $incident['title'], $incident['date'], '' !== $incident['cve'] ? ', ' . $incident['cve'] : '', $incident['summary'], $incident['source'] );
+		}
+		$this->section( __( 'Recent incidents it checks for', 'sentinel-shield' ), $incidents );
 		echo '</div>';
 	}
 

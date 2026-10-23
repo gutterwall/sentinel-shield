@@ -237,4 +237,29 @@ final class CliCommandTest extends \WP_UnitTestCase {
 		$verify = $this->wp( 'verify' );
 		$this->assertTrue( null === $verify['error'] || str_contains( (string) $verify['error'], 'WordPress.org' ), (string) $verify['error'] );
 	}
+
+	public function test_scan_findings_can_be_approved_from_the_command_line(): void {
+		$dir = WP_PLUGIN_DIR . '/ss-cli-nav-hub';
+		mkdir( $dir );
+		file_put_contents( $dir . '/ss-cli-nav-hub.php', "<?php\n/*\nPlugin Name: Nav Hub\nVersion: 1.0\n*/\n" );
+		wp_clean_plugins_cache( false );
+		try {
+			$scan = $this->wp( 'scan', array(), array( 'format' => 'json' ) );
+			$this->assertSame( 1, $scan['halt'], 'Warnings make the scan exit with 1.' );
+			$hub = array_values( array_filter( $scan['items'], static fn( array $row ): bool => str_contains( (string) $row['title'], 'Nav Hub' ) ) );
+			$this->assertCount( 1, $hub );
+			$this->assertNotNull( $this->wp( 'approve_finding', array( 'no-such-id' ) )['error'] );
+			$this->assertStringContainsString( 'Approved: ', $this->wp( 'approve_finding', array( $hub[0]['id'] ) )['out'] );
+			$again = $this->wp( 'scan', array(), array( 'format' => 'json' ) );
+			$this->assertSame( array(), array_filter( $again['items'], static fn( array $row ): bool => str_contains( (string) $row['title'], 'Nav Hub' ) ) );
+			$this->assertStringContainsString( 'withdrawn', $this->wp( 'approve_finding', array( $hub[0]['id'] ), array( 'undo' => true ) )['out'] );
+			$this->assertNotNull( $this->wp( 'approve_finding', array( $hub[0]['id'] ), array( 'undo' => true ) )['error'] );
+		} finally {
+			unlink( $dir . '/ss-cli-nav-hub.php' );
+			rmdir( $dir );
+			wp_clean_plugins_cache( false );
+			delete_site_option( \SentinelShield\Lockdown\IntegrityScanner::BASELINE_OPTION );
+			delete_site_option( \SentinelShield\Lockdown\IntegrityScanner::REPORT_OPTION );
+		}
+	}
 }

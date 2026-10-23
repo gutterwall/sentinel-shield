@@ -4,7 +4,7 @@ Tags: security, firewall, two-factor, brute force, login
 Requires at least: 6.4
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.8.6
+Stable tag: 0.9.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -33,6 +33,7 @@ Sentinel Shield is a self-hosted security plugin. It runs on your server, needs 
 
 * A read-only scan, twice a day, of the places takeover malware such as "SC" hides: prepend loaders, drop-ins, must-use plugins, hidden plugins and administrators, database triggers, PHP in uploads, encoded payloads, suspicious scheduled tasks and hooks.
 * A daily file integrity check of WordPress core and WordPress.org plugins against the checksums WordPress.org publishes.
+* Checks for incidents being exploited right now (October 2026: the Rank Math PRO 3.0.123 backdoor, backdoor plugins installed through stolen UpdraftCentral keys, the PHP2Shell flaws in PHP): their files, options, accounts and settings are reported by the scan, their trigger requests and malware servers are refused, and plugin installs are logged with an alert when one looks like a takeover.
 * Opt-in measures: an administrator lock (only approved accounts keep admin rights, optionally fixed in wp-config.php), file editor and installs off, PHP blocked in uploads, and alerts on new administrators.
 
 **Monitoring and tools**
@@ -54,7 +55,7 @@ Settings → Documentation in the plugin explains every feature and setting with
 
 Sentinel Shield blocks by IP address, account and country, hardens logins and detects tampering. It does not include:
 
-* a vulnerability database: it does not warn about known holes in installed plugins and themes, and has no virtual patches for them;
+* a vulnerability database: it does not warn about known holes in installed plugins and themes, and has no virtual patches for them (except the short list of actively exploited incidents on Settings → Documentation, whose traces it looks for);
 * request payload inspection: it does not look for SQL injection, cross-site scripting or similar attacks inside requests, so an exploit sent from an address that is not blocked reaches WordPress;
 * DDoS protection: volumetric attacks have to be stopped upstream by your host or a CDN;
 * backups or malware removal.
@@ -77,7 +78,7 @@ Nothing below is contacted unless stated as a default or you switch it on.
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.8.6.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.9.0.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
@@ -199,6 +200,17 @@ No. Test mode only records what would have been blocked. Use it to validate sett
 
 == Changelog ==
 
+= 0.9.0 =
+Detection and prevention for the incidents exploited against WordPress sites in the week of 16 to 23 October 2026. The malware scan has a new check, "Recent incidents", and the Malware Lockdown tab four new settings (three on by default; they only refuse traffic no legitimate site sends).
+* Rank Math PRO 3.0.123 supply-chain backdoor (CVE-2026-111862): the scan reports Rank Math PRO 3.0.123 (critical when its files were written after the bad build appeared at 20:02 UTC on 15 October), the backdoor's three options, the fake core file wp-includes/class-wp-cache-util.php, .htaccess rules that run .cache files as PHP, .cache files containing PHP, administrators named wpsupport_… or with @wp-mail.net addresses, and SSH keys of the account PHP runs as. When any of these is found, plugins, must-use plugins and themes are searched for the backdoor's code. New code signatures: its XOR key, its server, its crontab tag, base64 payloads decoded with XOR, and proc_open.
+* "Block known malware servers" (on): requests from the site to rank1cdn.com, the backdoor's server, are refused and logged with the file that made them. Separate from the blockchain gateway setting.
+* UpdraftCentral key theft (18 and 19 October): the scan reports plugins carrying the backdoors' marker text or trigger parameter (critical) or one of their names (warning, can be approved), the accounts they create, administrators with @example.com addresses, UpdraftPlus versions that accept forged commands (before 1.26.5 / 2.26.5) or still accept the stolen keys (before 1.26.13 / 2.26.13, with keys stored), and keys created before the theft.
+* "Refuse requests carrying attack markers" (on): the backdoors' trigger parameter and the campaign's two addresses (unless allowlisted) get a 403 and an event. "Refuse UpdraftCentral remote commands" (off): for sites not managed from UpdraftCentral.
+* "Log plugin installs and alert on suspicious ones" (on): every plugin install and activation is logged with the account and channel (dashboard, WP-CLI, REST API, XML-RPC, scheduled task, UpdraftCentral command). The site admin is emailed when the plugin carries a backdoor marker, arrived through an UpdraftCentral command, or was installed with no logged-in user.
+* PHP2Shell (CVE-2026-109618, CVE-2026-109619): the scan and the health card report a PHP build older than 8.2.35, 8.3.36, 8.4.27 or 8.5.12 (critical) or a distribution build whose fix cannot be told from its version (warning; approve it once the changelog confirms the backport), with the stopgap settings still missing (session.upload_progress.enabled, fatal_error_backtraces). Malformed PHPSESSID cookies, which the probes send, are refused and logged. The attack runs before any plugin loads: only updating PHP prevents it.
+* Settings → Documentation lists the incidents with their sources.
+The new measures work while the Malware Lockdown module is on, like the other lockdown measures.
+
 = 0.8.6 =
 Stabilization from a sixth review: deadlines, lost locks and Cloudflare concurrency. No new features.
 * Hourly housekeeping keeps to its time budget as a deadline: no step or database batch starts after it, a policy build starts only if the last one would fit (otherwise its own background job builds now), and whatever is left continues five minutes later. The report lists the steps that waited.
@@ -319,6 +331,9 @@ Security fixes from a code review:
 * Phase 1: core framework, client IP detection, IP rules, lockout engine, lockout safety, test mode tooling, events, WP-CLI.
 
 == Upgrade Notice ==
+
+= 0.9.0 =
+Detects and blocks the Rank Math PRO backdoor, the UpdraftCentral backdoor plugins and PHP2Shell probes (October 2026), and alerts on suspicious plugin installs. Turn on the Malware Lockdown module if it is off, then run the scan.
 
 = 0.8.6 =
 Housekeeping keeps to its time budget, work that lost its lock stops safely, and Cloudflare list updates run one at a time. No settings change.

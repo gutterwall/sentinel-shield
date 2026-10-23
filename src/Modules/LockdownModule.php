@@ -15,6 +15,7 @@ use SentinelShield\Lockdown\AdminRegistry;
 use SentinelShield\Lockdown\FileIntegrity;
 use SentinelShield\Lockdown\Hardening;
 use SentinelShield\Lockdown\IntegrityScanner;
+use SentinelShield\Lockdown\RequestGuard;
 use SentinelShield\Lockdown\UploadGuard;
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Settings;
@@ -49,6 +50,7 @@ final class LockdownModule implements ModuleInterface {
 	 * @param Container $container Services.
 	 */
 	public function register( Container $container ): void {
+		$container->get( RequestGuard::class )->enforce();
 		$container->get( Hardening::class )->register();
 		$scan = static function () use ( $container ): void {
 			self::after_scan( $container, $container->get( IntegrityScanner::class )->run(), true );
