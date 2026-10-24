@@ -329,7 +329,6 @@ final class FileIntegrityTest extends \WP_UnitTestCase {
 	public function test_only_one_slice_runs_at_a_time(): void {
 		$other = new \wpdb( DB_USER, DB_PASSWORD, DB_NAME, DB_HOST );
 		$name  = new \ReflectionMethod( \SentinelShield\Support\Mutex::class, 'db_name' );
-		$name->setAccessible( true );
 		$other->get_var( $other->prepare( 'SELECT GET_LOCK(%s, 0)', $name->invoke( null, 'integrity_scan' ) ) );
 		$verifier = $this->verifier( self::core_md5(), array() );
 		$verifier->start( true );

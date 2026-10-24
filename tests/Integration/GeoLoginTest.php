@@ -78,7 +78,6 @@ final class GeoLoginTest extends \WP_UnitTestCase {
 		Plugin::instance()->container()->get( RuleCache::class )->flush();
 		// Log throttling remembers IPs for the whole PHP process.
 		$seen = new \ReflectionProperty( Throttle::class, 'seen' );
-		$seen->setAccessible( true );
 		$seen->setValue( null, array() );
 		$this->ip      = '8.8.8.8';
 		$this->server  = array();

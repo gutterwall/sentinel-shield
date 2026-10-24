@@ -60,7 +60,6 @@ final class BruteForceTest extends \WP_UnitTestCase {
 		$wpdb->query( $wpdb->prepare( 'DELETE FROM %i', $c->get( LoginAttemptRepository::class )->table() ) );
 		$c->get( RuleCache::class )->flush();
 		$seen = new \ReflectionProperty( Throttle::class, 'seen' );
-		$seen->setAccessible( true );
 		$seen->setValue( null, array() );
 		$this->locks       = array();
 		$this->lock_result = 'real';

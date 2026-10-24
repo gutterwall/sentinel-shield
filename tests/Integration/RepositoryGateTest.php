@@ -138,7 +138,6 @@ final class RepositoryGateTest extends \WP_UnitTestCase {
 	public function test_unlock_requests_are_limited_per_ip(): void {
 		$service = Plugin::instance()->container()->get( \SentinelShield\Unlock\UnlockService::class );
 		$ask     = new \ReflectionMethod( $service, 'request_locked' );
-		$ask->setAccessible( true );
 		delete_site_transient( 'sentinel_shield_unlock_rl_' . md5( '203.0.113.31' ) );
 		for ( $i = 0; $i < 3; $i++ ) {
 			$this->assertSame( 'generic', $ask->invoke( $service, '203.0.113.31', 'nobody@example.org', 'generic' )['message'] );

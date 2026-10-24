@@ -40,13 +40,11 @@ final class CronMonitorTest extends \WP_UnitTestCase {
 
 	private function reset_recorder(): void {
 		$prop = new \ReflectionProperty( CronRecorder::class, 'active' );
-		$prop->setAccessible( true );
 		$prop->setValue( null, null );
 	}
 
 	private function recorder(): CronRecorder {
 		$prop = new \ReflectionProperty( CronRecorder::class, 'active' );
-		$prop->setAccessible( true );
 		return $prop->getValue();
 	}
 
@@ -111,7 +109,6 @@ final class CronMonitorTest extends \WP_UnitTestCase {
 		wp_schedule_single_event( time() + 3600, 'ss_test_filter' );
 		CronRecorder::maybe_start();
 		$prop = new \ReflectionProperty( CronRecorder::class, 'active' );
-		$prop->setAccessible( true );
 		$this->assertNull( $prop->getValue() );
 	}
 

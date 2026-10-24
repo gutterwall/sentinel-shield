@@ -107,7 +107,6 @@ final class PerformanceTest extends \WP_UnitTestCase {
 		// Another worker is compiling: this request asks the database instead.
 		$other = new \wpdb( DB_USER, DB_PASSWORD, DB_NAME, DB_HOST );
 		$name  = new \ReflectionMethod( \SentinelShield\Support\Mutex::class, 'db_name' );
-		$name->setAccessible( true );
 		$other->get_var( $other->prepare( 'SELECT GET_LOCK(%s, 0)', $name->invoke( null, 'feed_snapshot' ) ) );
 		$lookup = $cache->feeds( array( 'spamhaus_drop' ) );
 		$this->assertNotInstanceOf( FeedSnapshot::class, $lookup );
@@ -134,7 +133,6 @@ final class PerformanceTest extends \WP_UnitTestCase {
 		$id   = $repo->add( 'block', Cidr::parse( '203.0.113.77' ), 'perf', 'manual' );
 		$gate = $c->get( Gate::class );
 		$hit  = new \ReflectionMethod( Gate::class, 'count_hit' );
-		$hit->setAccessible( true );
 		$hits = static fn(): int => (int) $repo->find_exact( 'block', Cidr::parse( '203.0.113.77' ) )['hits'];
 
 		// No persistent cache: written only for logged requests.

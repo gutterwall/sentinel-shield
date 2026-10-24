@@ -74,7 +74,6 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 	 */
 	private static function lock_name( string $name ): string {
 		$method = new \ReflectionMethod( Mutex::class, 'db_name' );
-		$method->setAccessible( true );
 		return (string) $method->invoke( null, $name );
 	}
 
@@ -179,9 +178,7 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 		$service = $c->get( UnlockService::class );
 		$tokens  = $c->get( TokenRepository::class );
 		$method  = new \ReflectionMethod( UnlockService::class, 'request_locked' );
-		$method->setAccessible( true );
 		$mail    = new \ReflectionMethod( UnlockService::class, 'mail_link' );
-		$mail->setAccessible( true );
 		// What handle_request() does: decide under the lock, send after it.
 		$request = static function ( string $ip, string $email ) use ( $method, $mail, $service ): string {
 			$out = (array) $method->invoke( $service, $ip, $email, 'generic' );
@@ -256,7 +253,6 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 		wp_set_current_user( $admin->ID );
 		$actions = new Actions( Plugin::instance()->container() );
 		$method  = new \ReflectionMethod( Actions::class, 'keep_own_twofa_login' );
-		$method->setAccessible( true );
 		$keep = static fn( array $twofa ): array => (array) $method->invoke( $actions, array( 'twofa' => $twofa ) )['twofa'];
 
 		$this->assertTrue( $keep( array( 'required' => 'privileged', 'email' => false ) )['email'] );
@@ -359,7 +355,6 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 		wp_set_current_user( $user->ID );
 		$page    = new \SentinelShield\Admin\TwoFactorPage( Plugin::instance()->container() );
 		$confirm = new \ReflectionMethod( $page, 'confirm_identity' );
-		$confirm->setAccessible( true );
 		$try = static function ( array $post ) use ( $confirm, $page, $user ): bool {
 			$_POST = $post;
 			try {
@@ -424,7 +419,6 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 		$users->add_passkey( $user->ID, $rp->verify_registration( \SentinelShield\TwoFactor\WebAuthn::unb64u( $resp['client'] ), \SentinelShield\TwoFactor\WebAuthn::unb64u( $resp['attestation'] ), $reg ), 'Key', time() );
 		$page    = new \SentinelShield\Admin\TwoFactorPage( Plugin::instance()->container() );
 		$confirm = new \ReflectionMethod( $page, 'confirm_identity' );
-		$confirm->setAccessible( true );
 		$try = static function ( int $expires = 300 ) use ( $confirm, $page, $user, $key ): bool {
 			$challenge = \SentinelShield\TwoFactor\WebAuthn::challenge();
 			update_user_meta(
@@ -451,7 +445,6 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 			// The confirmation card asks the browser for verification too.
 			ob_start();
 			$card = new \ReflectionMethod( $page, 'reauth_card' );
-			$card->setAccessible( true );
 			$card->invoke( $page, get_userdata( $user->ID ) );
 			$html = (string) ob_get_clean();
 			$this->assertStringContainsString( '&quot;userVerification&quot;:&quot;required&quot;', $html );
@@ -469,7 +462,6 @@ final class ReviewRegressionTest extends \WP_UnitTestCase {
 		wp_set_current_user( $user->ID );
 		$page    = new \SentinelShield\Admin\TwoFactorPage( Plugin::instance()->container() );
 		$confirm = new \ReflectionMethod( $page, 'confirm_identity' );
-		$confirm->setAccessible( true );
 		$try    = static function ( array $post ) use ( $confirm, $page, $user ): bool {
 			$_POST = $post;
 			try {

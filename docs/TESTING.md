@@ -154,8 +154,8 @@ wp sentinel settings-import backup.json
 | Job | What it checks |
 |---|---|
 | Coding standards, static analysis, audit, secrets and build | phpcs (WordPress standards, PHP 8.1 compatibility); PHPStan level 6 with WordPress and WP-CLI stubs, no baseline; `composer audit`; gitleaks over the whole git history; the settings reference; a release build whose zip every later job tests |
-| Unit tests | PHP 8.1, 8.2, 8.3 and 8.4 |
-| Integration | WordPress 6.4 and latest, single site and multisite, PHP 8.1 to 8.4, MySQL 8 and MariaDB 11.4 (which also exercises the row-lock fallback path in tests that force it) |
+| Unit tests | PHP 8.1, 8.2, 8.3, 8.4 and 8.5 |
+| Integration | WordPress 6.4 and latest, single site and multisite, PHP 8.1 to 8.5, MySQL 8 and MariaDB 11.4 and 11.8 (which also exercises the row-lock fallback path in tests that force it) |
 | Object cache | The integration tests with Redis as persistent object cache, including the eviction, stale-cache and "cache never answers" tests |
 | Coverage | Line coverage with PCOV: unit and integration tests (single site and multisite) in-process, and the early firewall inside the PHP servers its HTTP tests start, reported separately and combined. HTML and Clover reports are kept as artifacts; `bin/coverage-check.php --require=lines` fails the job when any area drops below its floor in `tests/coverage-baseline.json`, when the report is missing or empty, or when a source file of an area has no line data |
 | Mutation tests | `bin/mutation-test.php` applies 64 deliberate defects from `tests/mutations.php` (weakened comparisons, expiry checks, capability and nonce checks, replay guards, lock checks, removed verification, ignored deadlines, work continuing after a lost lock, unserialized Cloudflare updates) one at a time; the tests must fail for every one |

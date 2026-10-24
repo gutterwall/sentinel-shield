@@ -33,7 +33,6 @@ final class AdminAllowlistTest extends \WP_UnitTestCase {
 		$wpdb->query( $wpdb->prepare( 'DELETE FROM %i', $this->repo->table() ) );
 		$c->get( RuleCache::class )->flush();
 		$prop = new \ReflectionProperty( Throttle::class, 'seen' );
-		$prop->setAccessible( true );
 		$prop->setValue( null, array() );
 	}
 

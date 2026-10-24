@@ -42,7 +42,6 @@ final class AuditTest extends \WP_UnitTestCase {
 			delete_site_option( $option );
 		}
 		$seen = new \ReflectionProperty( Throttle::class, 'seen' );
-		$seen->setAccessible( true );
 		$seen->setValue( null, array() );
 		$this->sent   = array();
 		$this->status = 200;

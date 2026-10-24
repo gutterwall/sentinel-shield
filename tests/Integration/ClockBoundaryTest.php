@@ -110,8 +110,6 @@ final class ClockBoundaryTest extends \WP_UnitTestCase {
 		global $wpdb;
 		$row  = new \ReflectionMethod( Mutex::class, 'acquire_row' );
 		$name = new \ReflectionMethod( Mutex::class, 'db_name' );
-		$row->setAccessible( true );
-		$name->setAccessible( true );
 		$key = '_' . $name->invoke( null, 'clock_test' );
 		try {
 			$wpdb->insert(
