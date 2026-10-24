@@ -127,6 +127,10 @@ final class TwoFactorUnitTest extends TestCase {
 	}
 
 	public function test_secret_box(): void {
+		if ( ! function_exists( 'sodium_crypto_secretbox' ) ) {
+			// Without the extension, WordPress's sodium_compat provides it: TwoFactorTest covers that path.
+			$this->markTestSkipped( 'PHP has no sodium extension.' );
+		}
 		$calls = 0;
 		$box   = new SecretBox(
 			static function () use ( &$calls ): string {

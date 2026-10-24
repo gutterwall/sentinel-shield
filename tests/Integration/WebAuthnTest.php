@@ -193,6 +193,10 @@ final class WebAuthnTest extends \WP_UnitTestCase {
 <?php
 define( 'ABSPATH', sys_get_temp_dir() . '/' );
 require $argv[1] . '/vendor/autoload.php';
+// As WordPress does (wp-includes/compat.php) on a PHP without the sodium extension.
+if ( ! function_exists( 'sodium_crypto_box' ) ) {
+	require $argv[3] . 'wp-includes/sodium_compat/autoload.php';
+}
 use SentinelShield\TwoFactor\WebAuthn;
 $in  = json_decode( file_get_contents( $argv[2] ), true );
 $rp  = new WebAuthn( 'shop.example.test', array( 'https://shop.example.test' ), 'Shop' );
@@ -210,7 +214,7 @@ PHP;
 		$file = get_temp_dir() . 'ss-noopenssl-' . wp_generate_password( 6, false ) . '.php';
 		file_put_contents( $file, $script );
 		try {
-			$cmd = sprintf( '%s -d disable_functions=openssl_verify,openssl_pkey_get_public %s %s %s 2>&1', escapeshellarg( PHP_BINARY ), escapeshellarg( $file ), escapeshellarg( dirname( __DIR__, 2 ) ), escapeshellarg( $input ) );
+			$cmd = sprintf( '%s -d disable_functions=openssl_verify,openssl_pkey_get_public %s %s %s %s 2>&1', escapeshellarg( PHP_BINARY ), escapeshellarg( $file ), escapeshellarg( dirname( __DIR__, 2 ) ), escapeshellarg( $input ), escapeshellarg( ABSPATH ) );
 			exec( $cmd, $lines, $code );
 		} finally {
 			wp_delete_file( $file );
