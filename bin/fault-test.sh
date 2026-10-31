@@ -48,12 +48,19 @@ for STEP in gate:ranges_written gate:manifest_replaced gate:before_state; do
 	IP="198.51.100.$((60 + N))"; N=$((N + 1))
 	STATUS=$(killed_at "$STEP" "\$c->get( SentinelShield\\Repository\\BlockRepository::class )->add( 'block', SentinelShield\\Net\\Cidr::parse( '$IP' ), 'fault', 'manual' ); \$c->get( SentinelShield\\Firewall\\RuleCache::class )->flush(); \$c->get( SentinelShield\\Firewall\\EarlyGate::class )->rebuild();")
 	[ "$STATUS" = 137 ] || fail "$STEP: the worker was not killed (exit $STATUS)"
+	# Checked before any page load. A page load can still run a due WP-Cron job
+	# (maintenance publishes pending changes) in the meantime: the change may then
+	# be marked published only if the published files really hold it.
+	PENDING=$(php_in_wp 'if ( $c->get( EarlyGate::class )->publication()["pending"] ) { echo "pending"; } else { $s = get_site_option( EarlyGate::STATE ); echo $s["generation"] === $s["published"] && FeedSnapshot::read_set( $s["files"]["block"] )->contains( inet_pton( "'"$IP"'" ) ) ? "published" : "false"; }')
+	case $PENDING in
+		pending) pass "killed at $STEP: the change is still marked unpublished" ;;
+		published) pass "killed at $STEP: the change is marked published, and a background job did publish it" ;;
+		*) fail "killed at $STEP: the change is marked as published" ;;
+	esac
 	[ "$(policy_intact)" = intact ] && pass "killed at $STEP: the published policy is complete" || fail "killed at $STEP: the policy on disk is broken"
 	if [ -n "$URL" ]; then
 		[ "$(early 203.0.113.9)" = early ] && [ "$(code 198.51.100.200)" = 200 ] && pass "killed at $STEP: the early firewall still blocks and admits correctly" || fail "killed at $STEP: wrong answers over HTTP"
 	fi
-	PENDING=$(php_in_wp 'echo $c->get( EarlyGate::class )->publication()["pending"] ? "pending" : "done";')
-	[ "$PENDING" = pending ] && pass "killed at $STEP: the change is still marked unpublished" || fail "killed at $STEP: the change is marked as published"
 	# What the background job does: the pending change is built (now, or after the debounce).
 	php_in_wp '$g = $c->get( EarlyGate::class ); $g->rebuild_if_dirty(); $n = wp_next_scheduled( EarlyGate::EXPIRY_HOOK ); if ( $g->publication()["pending"] && $n && $n <= time() + EarlyGate::DEBOUNCE ) { do_action( EarlyGate::EXPIRY_HOOK ); }' >/dev/null
 	OK=$(php_in_wp '$s = get_site_option( EarlyGate::STATE ); echo $s["generation"] === $s["published"] && FeedSnapshot::read_set( $s["files"]["block"] )->contains( inet_pton( "'"$IP"'" ) ) && ! $c->get( EarlyGate::class )->publication()["pending"] ? "yes" : "no";')
