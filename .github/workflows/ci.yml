@@ -38,7 +38,7 @@ jobs:
     name: Coding standards, static analysis, audit, secrets and build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: shivammathur/setup-php@v2
@@ -87,7 +87,7 @@ jobs:
       matrix:
         php: ['8.1', '8.2', '8.3', '8.4', '8.5']
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
@@ -121,13 +121,13 @@ jobs:
           MYSQL_DATABASE: wordpress_test
         ports: ['3306:3306']
         options: >-
-          --health-cmd="mysqladmin ping -proot || mariadb-admin ping -proot"
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot || mariadb-admin ping -h 127.0.0.1 -proot"
           --health-interval=5s --health-timeout=5s --health-retries=20
     env:
       WP_TESTS_DIR: /tmp/wp-tests/tests-lib
       WP_MULTISITE: ${{ matrix.multisite }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
@@ -150,7 +150,7 @@ jobs:
           MYSQL_DATABASE: wordpress_test
         ports: ['3306:3306']
         options: >-
-          --health-cmd="mysqladmin ping -proot"
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
           --health-interval=5s --health-timeout=5s --health-retries=20
       redis:
         image: redis:7
@@ -161,7 +161,7 @@ jobs:
     env:
       WP_TESTS_DIR: /tmp/wp-tests/tests-lib
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
@@ -191,12 +191,12 @@ jobs:
           MYSQL_DATABASE: wordpress_test
         ports: ['3306:3306']
         options: >-
-          --health-cmd="mysqladmin ping -proot"
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
           --health-interval=5s --health-timeout=5s --health-retries=20
     env:
       WP_TESTS_DIR: /tmp/wp-tests/tests-lib
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
@@ -228,12 +228,12 @@ jobs:
           MYSQL_DATABASE: wordpress_test
         ports: ['3306:3306']
         options: >-
-          --health-cmd="mysqladmin ping -proot"
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
           --health-interval=5s --health-timeout=5s --health-retries=20
     env:
       WP_TESTS_DIR: /tmp/wp-tests/tests-lib
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
@@ -255,10 +255,10 @@ jobs:
           MYSQL_DATABASE: wordpress
         ports: ['3306:3306']
         options: >-
-          --health-cmd="mysqladmin ping -proot"
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
           --health-interval=5s --health-timeout=5s --health-retries=20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
@@ -349,13 +349,13 @@ jobs:
           MYSQL_DATABASE: wordpress
         ports: ['3306:3306']
         options: >-
-          --health-cmd="mysqladmin ping -proot"
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
           --health-interval=5s --health-timeout=5s --health-retries=20
     env:
       SITE: /tmp/site
       STACK_DIR: /tmp/stack
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: nginx, Apache and PHP 8.3 with PHP-FPM from Ubuntu
         run: |
           sudo apt-get update -q
@@ -436,10 +436,10 @@ jobs:
           MYSQL_DATABASE: layout
         ports: ['3306:3306']
         options: >-
-          --health-cmd="mysqladmin ping -proot"
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
           --health-interval=5s --health-timeout=5s --health-retries=20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
@@ -467,12 +467,12 @@ jobs:
           MYSQL_DATABASE: wordpress_test
         ports: ['3306:3306']
         options: >-
-          --health-cmd="mysqladmin ping -proot"
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
           --health-interval=5s --health-timeout=5s --health-retries=20
     env:
       WP_TESTS_DIR: /tmp/wp-tests/tests-lib
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
@@ -513,6 +513,6 @@ jobs:
           unzip -p dist/sentinel-shield-*.zip sentinel-shield/build.json | tee /tmp/build.json
           grep -q "\"commit\": *\"$GITHUB_SHA\"" /tmp/build.json
           (cd dist && sha256sum -c sentinel-shield-*.zip.sha256)
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/sentinel-shield-*.zip
