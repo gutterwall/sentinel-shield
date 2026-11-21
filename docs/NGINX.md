@@ -72,7 +72,17 @@ Apache equivalent, in `wp-content/plugins/sentinel-shield/.htaccess`:
 RedirectMatch 404 ^/wp-content/plugins/sentinel-shield/(tests|vendor|docs)/
 ```
 
-## 4. System cron (optional)
+## 4. Refuse the update folder (CVE-2026-119977)
+
+WordPress unpacks updates in `wp-content/upgrade/`. During a core update the new release's installer sits there for a few seconds, and anyone who requests it can point the site at their own database (fixed in WordPress 7.1.4 and the matching security releases of older branches; exploited since 28 October 2026). Those requests run the installer's own files and never load WordPress, so no plugin can refuse them. On Apache and LiteSpeed the setting "Refuse web access to the update folder" writes the rule into `wp-content/.htaccess`; nginx ignores that file, so add this to the `server {}` block (adjust the path if the content folder is moved; the Malware Lockdown page shows the exact rule for the site):
+
+```nginx
+location ^~ /wp-content/upgrade/ { deny all; }
+```
+
+`^~` makes nginx use this location instead of any regex location (such as `location ~ \.php$`), so the staged installer is never passed to PHP. Check with `curl -I https://example.com/wp-content/upgrade/`: the answer must be 403. Do not put a `.htaccess` inside `wp-content/upgrade/` itself; older WordPress empties that folder before unpacking.
+
+## 5. System cron (optional)
 
 The plugin's hourly housekeeping uses WP-Cron. Requests to `wp-cron.php` from the server's own IP are never blocked. For reliability on low-traffic sites:
 

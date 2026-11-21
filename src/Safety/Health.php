@@ -298,6 +298,19 @@ final class Health {
 					: sprintf( __( 'PHP %s is a distribution build or a branch without an upstream fix; check its changelog for CVE-2026-109618 and CVE-2026-109619 (PHP2Shell).', 'sentinel-shield' ), PHP_VERSION ) )
 		);
 
+		// CVE-2026-119977: the installer staged during core updates.
+		$core = Advisories::core_status( (string) get_bloginfo( 'version' ) );
+		$add(
+			'core',
+			__( 'WordPress security fixes', 'sentinel-shield' ),
+			'fixed' === $core['state'] ? 'ok' : 'bad',
+			'fixed' === $core['state']
+				/* translators: %s: WordPress version. */
+				? sprintf( __( 'WordPress %s has the fix for the update-folder installer race (CVE-2026-119977).', 'sentinel-shield' ), get_bloginfo( 'version' ) )
+				/* translators: 1: WordPress version, 2: fixed version. */
+				: sprintf( __( 'WordPress %1$s can be taken over while it updates (CVE-2026-119977, exploited). Update to %2$s or later; keep the update folder refused while you do.', 'sentinel-shield' ), get_bloginfo( 'version' ), '' !== $core['fixed'] ? $core['fixed'] : '7.1.4' )
+		);
+
 		// Persistent object cache.
 		$add(
 			'cache',

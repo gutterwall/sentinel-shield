@@ -13,6 +13,7 @@ use SentinelShield\Cron\CronControl;
 use SentinelShield\Feeds\FeedUpdater;
 use SentinelShield\Geo\GeoUpdater;
 use SentinelShield\Firewall\RuleCache;
+use SentinelShield\Lockdown\UpgradeDirGuard;
 use SentinelShield\Lockdown\UploadGuard;
 use SentinelShield\Modules\LockdownModule;
 use SentinelShield\Modules\MaintenanceModule;
@@ -90,6 +91,7 @@ final class Installer {
 		}
 		// Without the plugin the rules would be unmanaged; reactivating re-adds them on the next settings save.
 		UploadGuard::sync_htaccess( false );
+		UpgradeDirGuard::sync_htaccess( false );
 		// Without the plugin nothing would keep the other layers in step: the early
 		// firewall stops (no snapshot), server files are emptied, Cloudflare is cleared.
 		EarlyGate::deactivate();

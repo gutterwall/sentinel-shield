@@ -1,6 +1,7 @@
 <?php
 /**
- * October 2026 incidents: Rank Math PRO backdoor, UpdraftCentral key theft, PHP2Shell.
+ * Incidents since October 2026: Rank Math PRO backdoor, UpdraftCentral key theft, PHP2Shell,
+ * the core update-folder race, the Quick Page/Post Redirect backdoor and exploited plugins.
  *
  * @package SentinelShield
  */
@@ -16,6 +17,8 @@ use SentinelShield\Lockdown\Advisories;
 use SentinelShield\Lockdown\Hardening;
 use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockdown\RequestGuard;
+use SentinelShield\Lockdown\UpgradeDirGuard;
+use SentinelShield\Modules\LockdownModule;
 use SentinelShield\Net\Cidr;
 use SentinelShield\Plugin;
 use SentinelShield\Repository\BlockRepository;
@@ -46,6 +49,7 @@ final class AdvisoriesTest extends \WP_UnitTestCase {
 
 	private const XOR_KEY = 'xmm' . 'qhn';
 	private const CNC     = 'rank1' . 'cdn.com';
+	private const QPPR    = 'anad' . 'net.com';
 
 	public function set_up(): void {
 		parent::set_up();
@@ -214,7 +218,8 @@ final class AdvisoriesTest extends \WP_UnitTestCase {
 		$this->assertTrue( Advisories::updraft_outdated( '2.26.12.1' ) );
 		$this->assertFalse( Advisories::updraft_outdated( '2.26.13' ) );
 		$this->assertFalse( Advisories::updraft_outdated( '3.0.0' ), 'Unknown major versions are not judged.' );
-		$this->assertCount( 3, Advisories::incidents() );
+		$this->assertCount( 6, Advisories::incidents() );
+		$this->assertSame( array( 'exploited-plugins', 'quick-page-post-redirect', 'core-upgrade-race', 'php2shell', 'updraftcentral', 'rankmath-pro' ), array_column( Advisories::incidents(), 'id' ), 'Newest first.' );
 	}
 
 	public function test_signatures_include_incident_markers(): void {
@@ -418,6 +423,7 @@ final class AdvisoriesTest extends \WP_UnitTestCase {
 		$this->assertTrue( $settings->get( 'lockdown.alert_plugin_changes' ) );
 		$this->assertFalse( $settings->get( 'lockdown.block_updraftcentral' ) );
 		$this->assertFalse( $settings->get( 'lockdown.block_chain_rpc' ) );
+		$this->assertTrue( $settings->get( 'lockdown.block_upgrade_dir' ), 'No visitor needs the update folder.' );
 	}
 
 	public function test_malware_hosts_are_blocked_without_the_blockchain_setting(): void {
@@ -496,5 +502,200 @@ final class AdvisoriesTest extends \WP_UnitTestCase {
 		$this->assertSame( 'updraftcentral', Hardening::channel() );
 		unset( $_POST['udrpc_message'] );
 		$this->assertSame( 'web', Hardening::channel() );
+	}
+
+	public function test_core_versions(): void {
+		$this->assertSame( 'vulnerable', Advisories::core_status( '7.1.3' )['state'] );
+		$this->assertSame( '7.1.4', Advisories::core_status( '7.1.3' )['fixed'] );
+		$this->assertSame( 'fixed', Advisories::core_status( '7.1.4' )['state'] );
+		$this->assertSame( 'fixed', Advisories::core_status( '7.1.5' )['state'] );
+		$this->assertSame( 'vulnerable', Advisories::core_status( '7.1' )['state'], 'x.y.0 is spelled without the zero.' );
+		$this->assertSame( 'vulnerable', Advisories::core_status( '7.1.4-RC1' )['state'], 'Release candidates came before the fix.' );
+		$this->assertSame( 'fixed', Advisories::core_status( '7.2-alpha-61234' )['state'], 'Later branches have the fix.' );
+		$this->assertSame( 'vulnerable', Advisories::core_status( '6.9.10' )['state'] );
+		$this->assertSame( 'fixed', Advisories::core_status( '6.9.11' )['state'], 'Backports count.' );
+		$this->assertSame( 'vulnerable', Advisories::core_status( '6.4.13' )['state'] );
+		$this->assertSame( 'fixed', Advisories::core_status( '6.4.14' )['state'] );
+		$this->assertSame( 'vulnerable', Advisories::core_status( '6.3.5' )['state'] );
+		$this->assertSame( 'vulnerable', Advisories::core_status( 'garbage' )['state'] );
+
+		$this->assertSame( 'outdated', Advisories::php_session_status( '8.4.27' )['state'] );
+		$this->assertSame( '8.4.28', Advisories::php_session_status( '8.4.27' )['fixed'] );
+		$this->assertSame( 'fixed', Advisories::php_session_status( '8.4.28' )['state'] );
+		$this->assertSame( 'fixed', Advisories::php_session_status( '8.6.0' )['state'] );
+		$this->assertSame( 'unknown', Advisories::php_session_status( '8.3.6', '', true )['state'] );
+		$this->assertSame( 'unknown', Advisories::php_session_status( '8.1.30' )['state'] );
+		$this->assertSame( 'unknown', Advisories::php_session_status( 'x' )['state'] );
+	}
+
+	public function test_exploited_plugin_list(): void {
+		$this->assertSame( '6.2.4', Advisories::exploited_plugin( 'contact-form-7', '6.2.3' )['fixed'] ?? null );
+		$this->assertNull( Advisories::exploited_plugin( 'contact-form-7', '6.2.4' ) );
+		$this->assertNull( Advisories::exploited_plugin( 'contact-form-7', '6.1.5' ), 'Before the flaw was introduced.' );
+		$this->assertNotNull( Advisories::exploited_plugin( 'Contact-Form-7', '6.2' ), 'Folder names are compared case-insensitively.' );
+		$this->assertNotNull( Advisories::exploited_plugin( 'ameliabooking', '9.9.1' ) );
+		$this->assertNull( Advisories::exploited_plugin( 'ameliabooking', '2.1' ), 'The free 2.x line is not Amelia Pro.' );
+		$this->assertNotNull( Advisories::exploited_plugin( 'wp-libre-form', '1.5.0.1' ), 'No fix: every version up to the last affected one.' );
+		$this->assertNull( Advisories::exploited_plugin( 'wp-libre-form', '1.5.0.2' ) );
+		$this->assertNotNull( Advisories::exploited_plugin( 's2member', '260927' ) );
+		$this->assertNull( Advisories::exploited_plugin( 's2member', '261106' ) );
+		$this->assertNull( Advisories::exploited_plugin( 'elementor', '' ), 'No version, no judgement.' );
+		$this->assertNull( Advisories::exploited_plugin( 'hello-dolly', '1.0' ) );
+		$this->assertSame( 'warning', Advisories::exploited_plugin( 'elementor', '4.3.5' )['severity'] ?? null, 'Reflected XSS needs a click.' );
+		foreach ( Advisories::EXPLOITED_PLUGINS as $folder => $entry ) {
+			$this->assertMatchesRegularExpression( '/^[a-z0-9-]+$/', $folder );
+			$this->assertContains( $entry['severity'], array( 'critical', 'warning' ) );
+			$this->assertTrue( '' !== $entry['fixed'] || isset( $entry['last'] ), "$folder needs a fix or a last affected version." );
+		}
+	}
+
+	public function test_exploited_plugins_are_reported(): void {
+		$this->plugin( 'contact-form-7', 'Contact Form 7', '6.2.2' );
+		$this->plugin( 'local-sync', 'WP Duplicate', '1.1.11' );
+		$this->plugin( 'latepoint', 'LatePoint', '5.7.8' );
+		$findings = $this->scan();
+		$cf7      = self::find( $findings, 'Contact Form 7 6.2.2' );
+		$this->assertSame( 'critical', $cf7['severity'] );
+		$this->assertStringContainsString( '6.2.4', $cf7['title'] );
+		$this->assertStringContainsString( 'wp-content/plugins/contact-form-7/contact-form-7.php', $cf7['detail'] );
+		$dup = self::find( $findings, 'WP Duplicate 1.1.11' );
+		$this->assertStringContainsString( 'no fix', $dup['title'] );
+		$this->assertStringContainsString( 'CVE-2026-123751', $dup['detail'] );
+		$this->assertSame( array(), array_filter( $findings, static fn( array $f ): bool => str_contains( (string) $f['title'], 'LatePoint' ) ), 'A fixed version is not reported.' );
+
+		// Approved for this version only: an older version comes back.
+		$this->assertNotNull( IntegrityScanner::approve( $cf7['id'], 1 ) );
+		$this->assertSame( 'ok', self::find( $this->scan(), 'Contact Form 7 6.2.2' )['severity'] );
+	}
+
+	public function test_quick_page_post_redirect_backdoor(): void {
+		$main = $this->plugin( Advisories::QUICKPPR_SLUG, 'Quick Page/Post Redirect Plugin', '5.2.2' );
+		$this->put( dirname( $main ) . '/updater/Puc/v4p10/Factory.php', "<?php\n// update checker\n" );
+		$finding = self::find( $this->scan(), 'Quick Page/Post Redirect Plugin 5.2.2' );
+		$this->assertSame( 'critical', $finding['severity'] );
+		$this->assertStringContainsString( 'no clean version', $finding['detail'] );
+		$this->assertStringNotContainsString( 'tampered', $finding['detail'] );
+
+		// 5.2.4 (never published on WordPress.org) without the updater folder is not reported.
+		$this->plugin( Advisories::QUICKPPR_SLUG, 'Quick Page/Post Redirect Plugin', '5.2.4' );
+		wp_delete_file( dirname( $main ) . '/updater/Puc/v4p10/Factory.php' );
+		foreach ( array( '/updater/Puc/v4p10', '/updater/Puc', '/updater' ) as $sub ) {
+			rmdir( dirname( $main ) . $sub );
+		}
+		$this->assertSame( array(), array_filter( $this->scan(), static fn( array $f ): bool => str_contains( (string) $f['title'], 'Quick Page' ) ) );
+
+		// Its server in any code is critical, and is not mistaken for the UpdraftCentral backdoors.
+		$this->plugin( 'ss-redirects', 'Redirects', '1.0', '$u = "https://w.' . self::QPPR . '/bro/3/";' );
+		$sev = IntegrityScanner::worst( IntegrityScanner::signatures( (string) file_get_contents( WP_PLUGIN_DIR . '/ss-redirects/ss-redirects.php' ) ), 'ok' );
+		$this->assertSame( 'critical', $sev );
+		$this->assertSame( array(), array_filter( $this->scan(), static fn( array $f ): bool => str_contains( (string) $f['title'], 'UpdraftCentral' ) ) );
+
+		$this->assertSame( 'malware host ' . self::QPPR, Advisories::outbound_match( 'https://w.' . self::QPPR . '/bro/3/' ) );
+	}
+
+	public function test_vulnerable_core_is_reported(): void {
+		global $wp_version;
+		$real       = $wp_version;
+		$wp_version = '7.1.3'; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- Restored below.
+		try {
+			$finding = self::find( $this->scan(), 'WordPress 7.1.3' );
+			$this->assertSame( 'critical', $finding['severity'] );
+			$this->assertStringContainsString( '7.1.4', $finding['title'] );
+			$rows = ( new Health( Plugin::instance()->container() ) )->checks();
+			$row  = array_values( array_filter( $rows, static fn( array $r ): bool => 'core' === $r['id'] ) );
+			$this->assertSame( 'bad', $row[0]['state'] ?? null );
+			$wp_version = '6.9.11'; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- Restored below.
+			$this->assertSame( array(), array_filter( $this->scan(), static fn( array $f ): bool => str_starts_with( (string) $f['title'], 'WordPress ' ) ) );
+		} finally {
+			$wp_version = $real; // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- Restoring.
+		}
+	}
+
+	public function test_update_folder_leftovers(): void {
+		$dir = WP_CONTENT_DIR . '/upgrade';
+		$this->put( "$dir/index.php", "<?php\n// Silence is golden.\n" );
+		$this->assertSame( array(), array_filter( $this->scan(), static fn( array $f ): bool => str_contains( (string) $f['title'], 'upgrade' ) ), 'index.php alone is normal.' );
+
+		$this->put( "$dir/wordpress-7.1.3/wordpress/wp-admin/setup-config.php", "<?php\n// installer\n" );
+		$this->put( "$dir/wordpress-7.1.3/wordpress/wp-settings.php", "<?php\n" );
+		$left = self::find( $this->scan(), 'Leftover update files in wp-content/upgrade/wordpress-7.1.3' );
+		$this->assertSame( 'warning', $left['severity'] );
+		$this->assertStringContainsString( 'setup-config.php', $left['detail'] );
+
+		$this->put( "$dir/wordpress-7.1.3/wordpress/wp-config.php", "<?php\ndefine( 'DB_HOST', '198.51.100.7' );\n" );
+		$staged = self::find( $this->scan(), 'wp-config.php inside the update folder' );
+		$this->assertSame( 'critical', $staged['severity'] );
+		$this->assertStringContainsString( 'wordpress-7.1.3/wordpress/wp-config.php', $staged['title'] );
+	}
+
+	public function test_update_folder_probe(): void {
+		$this->put( WP_CONTENT_DIR . '/upgrade/index.php', "<?php\n" );
+		$code   = 200;
+		$asked  = array();
+		$answer = static function ( mixed $pre, array $args, string $url ) use ( &$code, &$asked ): mixed {
+			$asked[] = $url;
+			return array(
+				'headers'  => array(),
+				'body'     => '',
+				'response' => array(
+					'code'    => $code,
+					'message' => '',
+				),
+				'cookies'  => array(),
+			);
+		};
+		add_filter( 'pre_http_request', $answer, 10, 3 );
+		try {
+			$this->assertSame( 'open', UpgradeDirGuard::probe() );
+			$this->assertSame( content_url( 'upgrade/' ), $asked[0] );
+			$open = self::find( $this->scan(), 'can be reached from the web' );
+			$this->assertSame( 'warning', $open['severity'] );
+			$code = 403;
+			$this->assertSame( 'refused', UpgradeDirGuard::probe() );
+			$this->assertSame( array(), array_filter( $this->scan(), static fn( array $f ): bool => str_contains( (string) $f['title'], 'reached from the web' ) ) );
+			$code = 404;
+			$this->assertSame( 'refused', UpgradeDirGuard::probe() );
+			$code = 502;
+			$this->assertSame( 'unknown', UpgradeDirGuard::probe(), 'A broken loopback proves nothing.' );
+		} finally {
+			remove_filter( 'pre_http_request', $answer, 10 );
+		}
+		$fail = static fn(): \WP_Error => new \WP_Error( 'http_request_failed', 'loopback refused' );
+		add_filter( 'pre_http_request', $fail );
+		$this->assertSame( 'unknown', UpgradeDirGuard::probe() );
+		remove_filter( 'pre_http_request', $fail );
+	}
+
+	public function test_update_folder_rules(): void {
+		$path   = UpgradeDirGuard::htaccess_path();
+		$before = is_file( $path ) ? (string) file_get_contents( $path ) : null;
+		try {
+			file_put_contents( $path, "# Someone else's rule\nOptions -Indexes\n" );
+			update_site_option( Settings::OPTION, array( 'lockdown' => array( 'block_upgrade_dir' => true ) ) );
+			LockdownModule::on_settings_saved( Plugin::instance()->container() );
+			$this->assertTrue( UpgradeDirGuard::htaccess_installed() );
+			$text = (string) file_get_contents( $path );
+			$this->assertStringContainsString( 'RedirectMatch 403 ^' . preg_quote( UpgradeDirGuard::content_path(), '#' ) . '/upgrade(?:/|$)', $text );
+			$this->assertStringContainsString( 'Options -Indexes', $text, 'Other rules are kept.' );
+			$this->assertSame( 'location ^~ ' . UpgradeDirGuard::content_path() . '/upgrade/ { deny all; }', UpgradeDirGuard::nginx_rule() );
+			$this->assertSame( 1, preg_match( '#' . substr( UpgradeDirGuard::htaccess_lines()[2], strlen( "\tRedirectMatch 403 " ) ) . '#', UpgradeDirGuard::content_path() . '/upgrade/wordpress-7.1.4/wordpress/wp-admin/setup-config.php' ) );
+			$this->assertSame( 1, preg_match( '#' . substr( UpgradeDirGuard::htaccess_lines()[2], strlen( "\tRedirectMatch 403 " ) ) . '#', UpgradeDirGuard::content_path() . '/upgrade' ) );
+			$this->assertSame( 0, preg_match( '#' . substr( UpgradeDirGuard::htaccess_lines()[2], strlen( "\tRedirectMatch 403 " ) ) . '#', UpgradeDirGuard::content_path() . '/upgrades-gallery/a.jpg' ) );
+
+			// Off, or the module off: removed, the rest kept.
+			update_site_option( Settings::OPTION, array( 'lockdown' => array( 'block_upgrade_dir' => false ) ) );
+			LockdownModule::on_settings_saved( Plugin::instance()->container() );
+			$this->assertFalse( UpgradeDirGuard::htaccess_installed() );
+			$this->assertSame( "# Someone else's rule\nOptions -Indexes\n", (string) file_get_contents( $path ) );
+
+			// A file holding only our block is deleted with it.
+			wp_delete_file( $path );
+			$this->assertTrue( UpgradeDirGuard::sync_htaccess( true ) );
+			$this->assertTrue( UpgradeDirGuard::sync_htaccess( false ) );
+			$this->assertFileDoesNotExist( $path );
+			$this->assertTrue( UpgradeDirGuard::sync_htaccess( false ), 'Nothing to remove is fine.' );
+		} finally {
+			null === $before ? ( is_file( $path ) && wp_delete_file( $path ) ) : file_put_contents( $path, $before );
+		}
 	}
 }

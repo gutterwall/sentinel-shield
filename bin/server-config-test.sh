@@ -2,7 +2,9 @@
 # Live web server test of the generated blocklist files: nginx and Apache
 # load them, enforce them (blocked address refused, an allowlisted address
 # inside a blocked range let through, others let through) and stop enforcing
-# them after the policy is emptied and the server reloads.
+# them after the policy is emptied and the server reloads. Also checks that
+# the update folder rules (wp-content/.htaccess, the nginx rule shown) refuse
+# wp-content/upgrade/ and nothing else.
 #
 # Usage: bin/server-config-test.sh <wordpress-path>
 #   NGINX_BIN=/usr/sbin/nginx APACHE_BIN=/usr/sbin/apache2 APACHE_MODULES=/usr/lib/apache2/modules
@@ -167,6 +169,81 @@ EOF
 	"$APACHE_BIN" -f "$T/apache/httpd.conf" -k stop; sleep 0.5; rm -f "$T/apache/httpd.pid"
 else
 	echo "Apache: skipped (no binary at $APACHE_BIN or no modules in $APACHE_MODULES)"
+fi
+
+# The update folder (CVE-2026-119977): the rules the plugin writes refuse it,
+# with and without mod_alias, and the nginx rule it shows does the same.
+echo "Update folder rules"
+"${WP[@]}" sentinel settings-set lockdown.block_upgrade_dir 1 >/dev/null
+CONTENT=$("${WP[@]}" eval 'echo SentinelShield\Lockdown\UpgradeDirGuard::content_path();')
+HTACCESS=$("${WP[@]}" eval 'echo SentinelShield\Lockdown\UpgradeDirGuard::htaccess_path();')
+NGINX_RULE=$("${WP[@]}" eval 'echo SentinelShield\Lockdown\UpgradeDirGuard::nginx_rule();')
+grep -q '# BEGIN Sentinel Shield upgrade folder' "$HTACCESS" && pass "the plugin wrote $HTACCESS" || fail "no rules in $HTACCESS"
+W=$T/www-upgrade
+mkdir -p "$W$CONTENT/upgrade/wordpress-7.1.4/wordpress/wp-admin" "$W$CONTENT/uploads" "$W$CONTENT/upgrades-gallery"
+echo installer > "$W$CONTENT/upgrade/wordpress-7.1.4/wordpress/wp-admin/setup-config.php"
+echo silence > "$W$CONTENT/upgrade/index.php"
+echo ok > "$W$CONTENT/uploads/ok.html"
+echo ok > "$W$CONTENT/upgrades-gallery/ok.html"
+cp "$HTACCESS" "$W$CONTENT/.htaccess"
+path_code() { curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$1$2"; }
+expect_code() { # port path expected label
+	local got
+	got=$(path_code "$1" "$2")
+	[ "$got" = "$3" ] && pass "$4" || fail "$4: $2 answered $got, expected $3"
+}
+check_upgrade_dir() { # port name
+	expect_code "$1" "$CONTENT/upgrade/wordpress-7.1.4/wordpress/wp-admin/setup-config.php" 403 "$2: the staged installer is refused"
+	expect_code "$1" "$CONTENT/upgrade/" 403 "$2: the folder itself is refused"
+	expect_code "$1" "$CONTENT/uploads/ok.html" 200 "$2: the rest of the content folder is served"
+	expect_code "$1" "$CONTENT/upgrades-gallery/ok.html" 200 "$2: a folder whose name only starts with 'upgrade' is served"
+}
+if [ "${SKIP_NGINX:-0}" != 1 ] && [ -x "$NGINX_BIN" ]; then
+	port_free 18083
+	mkdir -p "$T/nginx-u"
+	{
+		echo "pid $T/nginx-u/nginx.pid;"
+		echo "error_log $T/nginx-u/error.log notice;"
+		echo "events { worker_connections 64; }"
+		echo "http {"
+		echo "	access_log off;"
+		echo "	client_body_temp_path $T/nginx-u/body; proxy_temp_path $T/nginx-u/proxy; fastcgi_temp_path $T/nginx-u/fcgi;"
+		echo "	uwsgi_temp_path $T/nginx-u/uwsgi; scgi_temp_path $T/nginx-u/scgi;"
+		echo "	server {"
+		echo "		listen 127.0.0.1:18083;"
+		echo "		root $W;"
+		echo "		$NGINX_RULE"
+		echo '		location ~ \.php$ { default_type text/plain; }'
+		echo "	}"
+		echo "}"
+	} > "$T/nginx-u/nginx.conf"
+	"$NGINX_BIN" -p "$T/nginx-u" -c "$T/nginx-u/nginx.conf"
+	for i in $(seq 1 50); do [ "$(path_code 18083 /)" != 000 ] && break; sleep 0.1; done
+	check_upgrade_dir 18083 "nginx (the rule shown, above a PHP location)"
+	kill "$(cat "$T/nginx-u/nginx.pid")"
+fi
+if [ "${SKIP_APACHE:-0}" != 1 ] && [ -x "$APACHE_BIN" ] && [ -f "$APACHE_MODULES/mod_alias.so" ]; then
+	for ALIAS in with without; do
+		port_free 18084
+		mkdir -p "$T/apache-u"
+		: > "$T/apache-u/error.log"
+		{
+			echo "ServerRoot $T/apache-u"; echo "ServerName localhost"; echo "Listen 127.0.0.1:18084"
+			echo "PidFile $T/apache-u/httpd.pid"; echo "ErrorLog $T/apache-u/error.log"; echo "Mutex file:$T/apache-u"
+			echo "LoadModule mpm_event_module $APACHE_MODULES/mod_mpm_event.so"
+			echo "LoadModule authz_core_module $APACHE_MODULES/mod_authz_core.so"
+			[ $ALIAS = with ] && echo "LoadModule alias_module $APACHE_MODULES/mod_alias.so"
+			echo "<IfModule !mod_unixd.c>"; echo "LoadModule unixd_module $APACHE_MODULES/mod_unixd.so"; echo "</IfModule>"
+			echo "DocumentRoot $W"
+			echo "<Directory $W>"; echo "AllowOverride All"; echo "Require all granted"; echo "</Directory>"
+		} > "$T/apache-u/httpd.conf"
+		"$APACHE_BIN" -t -f "$T/apache-u/httpd.conf" >/dev/null 2>&1 || { "$APACHE_BIN" -t -f "$T/apache-u/httpd.conf"; fail "Apache rejects the test configuration"; }
+		"$APACHE_BIN" -f "$T/apache-u/httpd.conf" -k start
+		for i in $(seq 1 50); do [ "$(path_code 18084 /)" != 000 ] && break; sleep 0.1; done
+		check_upgrade_dir 18084 "Apache $ALIAS mod_alias (wp-content/.htaccess)"
+		if grep -i 'htaccess' "$T/apache-u/error.log" >&2; then fail "Apache $ALIAS mod_alias: .htaccess errors"; fi
+		"$APACHE_BIN" -f "$T/apache-u/httpd.conf" -k stop; sleep 0.5; rm -f "$T/apache-u/httpd.pid"
+	done
 fi
 
 "${WP[@]}" eval 'global $wpdb; $r = SentinelShield\Plugin::instance()->container()->get( SentinelShield\Repository\BlockRepository::class ); $wpdb->query( $wpdb->prepare( "DELETE FROM %i WHERE reason = %s", $r->table(), "server-config-test" ) );' >/dev/null

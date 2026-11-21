@@ -125,7 +125,7 @@ final class IntegrityScanner {
 			'hooks'          => array( __( 'Login and hiding hooks', 'sentinel-shield' ), __( 'SC hooks into logins to capture credentials and into admin screens to hide itself.', 'sentinel-shield' ) ),
 			'shm'            => array( __( 'Shared memory', 'sentinel-shield' ), __( 'SC keeps a copy of itself in System V shared memory, which survives file and database cleanup.', 'sentinel-shield' ) ),
 			'outbound'       => array( __( 'Blockchain command channel', 'sentinel-shield' ), __( 'SC reads its instructions from an Ethereum smart contract through public RPC gateways.', 'sentinel-shield' ) ),
-			'advisories'     => array( __( 'Recent incidents', 'sentinel-shield' ), __( 'Traces of incidents exploited against WordPress sites in October 2026: the Rank Math PRO 3.0.123 backdoor, backdoor plugins installed through stolen UpdraftCentral keys, and the PHP2Shell flaws in PHP.', 'sentinel-shield' ) ),
+			'advisories'     => array( __( 'Recent incidents', 'sentinel-shield' ), __( 'Traces of incidents exploited against WordPress sites since October 2026: the Rank Math PRO 3.0.123 backdoor, backdoor plugins installed through stolen UpdraftCentral keys, the PHP2Shell flaws in PHP, the WordPress update-folder installer race (CVE-2026-119977), the Quick Page/Post Redirect backdoor, and installed versions of plugins whose flaws are being exploited.', 'sentinel-shield' ) ),
 		);
 	}
 
@@ -859,8 +859,8 @@ final class IntegrityScanner {
 				'outbound',
 				'critical',
 				/* translators: %d: count. */
-				sprintf( _n( 'Blocked %d attempt to contact a blockchain gateway in the last 7 days', 'Blocked %d attempts to contact blockchain gateways in the last 7 days', $blocked, 'sentinel-shield' ), $blocked ),
-				__( 'SC reads its commands from a smart contract this way. The Events log shows which URL was requested.', 'sentinel-shield' ),
+				sprintf( _n( 'Blocked %d attempt to contact a malware server or blockchain gateway in the last 7 days', 'Blocked %d attempts to contact malware servers or blockchain gateways in the last 7 days', $blocked, 'sentinel-shield' ), $blocked ),
+				__( 'Code on this site tried to reach a host that malware gets its commands from: a blockchain gateway (SC reads its commands from a smart contract) or a known backdoor server (rank1cdn.com, anadnet.com). The Events log shows which URL was requested and the file that made the request.', 'sentinel-shield' ),
 				'outbound-blocked'
 			);
 		} elseif ( ! $this->settings->get( 'lockdown.block_chain_rpc', false ) ) {
@@ -884,6 +884,8 @@ final class IntegrityScanner {
 		$this->advisory_accounts();
 		$this->advisory_ssh();
 		$this->advisory_php();
+		$this->advisory_core();
+		$this->advisory_plugins( $plugins );
 		if ( $traces ) {
 			$this->advisory_deep_search();
 		}
@@ -983,7 +985,7 @@ final class IntegrityScanner {
 	 */
 	private function advisory_deep_search(): void {
 		$own   = wp_normalize_path( dirname( SENTINEL_SHIELD_FILE ) );
-		$rules = array_slice( Advisories::code_markers(), 0, 3 );
+		$rules = Advisories::rankmath_markers();
 		$hits  = 0;
 		foreach ( array_unique( array( WP_PLUGIN_DIR, WPMU_PLUGIN_DIR, get_theme_root() ) ) as $root ) {
 			if ( ! is_dir( $root ) ) {
@@ -1032,7 +1034,7 @@ final class IntegrityScanner {
 	private function advisory_updraft( array $plugins ): void {
 		foreach ( $plugins as $file => $data ) {
 			$code    = $this->read( WP_PLUGIN_DIR . '/' . $file );
-			$markers = array_values( array_filter( Advisories::code_markers(), static fn( array $m ): bool => 'critical' === $m[1] && (bool) preg_match( $m[0], $code ) ) );
+			$markers = array_values( array_filter( Advisories::updraft_markers(), static fn( array $m ): bool => (bool) preg_match( $m[0], $code ) ) );
 			$named   = in_array( strtolower( trim( (string) ( $data['Name'] ?? '' ) ) ), array_map( 'strtolower', Advisories::UPDRAFT_PLUGIN_NAMES ), true );
 			if ( $markers || $named ) {
 				$this->add(
@@ -1164,6 +1166,7 @@ final class IntegrityScanner {
 	private function advisory_php(): void {
 		$status = Advisories::php_status_now();
 		if ( 'fixed' === $status['state'] ) {
+			$this->advisory_php_session();
 			return;
 		}
 		$gaps = Advisories::php_stopgaps( 'ini_get' );
@@ -1183,6 +1186,166 @@ final class IntegrityScanner {
 			'php2shell',
 			md5( PHP_VERSION . '|' . PHP_SAPI . '|' . implode( ',', $gaps ) )
 		);
+	}
+
+	/**
+	 * The session serializer flaw fixed on 19 November 2026 (CVE-2026-115560), on PHP builds that have the PHP2Shell fixes.
+	 */
+	private function advisory_php_session(): void {
+		$ini    = (string) php_ini_loaded_file();
+		$status = Advisories::php_session_status( PHP_VERSION, PHP_EXTRA_VERSION, Advisories::is_distribution_build( '' === $ini ? (string) php_ini_scanned_files() : $ini ) );
+		if ( 'outdated' !== $status['state'] ) {
+			return; // Distribution builds were already asked to confirm the PHP2Shell backports; one approval is enough.
+		}
+		$gaps = Advisories::php_stopgaps( 'ini_get' );
+		$this->add(
+			'advisories',
+			$gaps ? 'warning' : 'notice',
+			/* translators: 1: PHP version, 2: fixed version. */
+			sprintf( __( 'PHP %1$s: security update %2$s is available', 'sentinel-shield' ), PHP_VERSION, $status['fixed'] ),
+			__( 'The PHP releases of 19 November 2026 fix CVE-2026-115560, a flaw in session upload progress that can run code when a site switches the session serializer at run time. Ask your host to update PHP.', 'sentinel-shield' )
+				. ' ' . ( $gaps
+					/* translators: %s: list of settings. */
+					? sprintf( __( 'Until then, set %s in php.ini or the PHP-FPM pool (not .user.ini) and restart PHP.', 'sentinel-shield' ), implode( ', ', $gaps ) )
+					: __( 'Session upload progress is already off here, which blocks it.', 'sentinel-shield' ) ),
+			'php-session',
+			md5( PHP_VERSION . '|' . implode( ',', $gaps ) )
+		);
+	}
+
+	/**
+	 * The update-folder installer race (CVE-2026-119977): the WordPress version,
+	 * what is left in wp-content/upgrade/, and whether the web can reach it.
+	 */
+	private function advisory_core(): void {
+		$version = (string) get_bloginfo( 'version' );
+		$status  = Advisories::core_status( $version );
+		if ( 'vulnerable' === $status['state'] ) {
+			$this->add(
+				'advisories',
+				'critical',
+				/* translators: 1: WordPress version, 2: fixed version. */
+				sprintf( __( 'WordPress %1$s can be taken over during its next update (fixed in %2$s)', 'sentinel-shield' ), $version, '' !== $status['fixed'] ? $status['fixed'] : '7.1.4' ),
+				__( 'CVE-2026-119977: while a core update runs, the new release\'s installer sits in wp-content/upgrade/ under a predictable name, and anyone who requests it in those seconds can point the site at their own database. Exploited since 28 October 2026. Update WordPress now. The update that installs the fix still runs the old code once, so keep "Refuse web access to the update folder" on (Apache, LiteSpeed) or add the nginx rule first.', 'sentinel-shield' ),
+				'core-upgrade-race',
+				md5( $version )
+			);
+		}
+
+		$dir = trailingslashit( WP_CONTENT_DIR ) . 'upgrade';
+		if ( ! is_dir( $dir ) ) {
+			return;
+		}
+		$staged = array(); // Installer files and configs, by top-level entry.
+		$php    = array(); // Other PHP files, by top-level entry.
+		$walk   = new FileWalk( $dir );
+		$walk->run(
+			'',
+			static function ( string $path, string $rel ) use ( &$staged, &$php ): void {
+				$top = explode( '/', $rel )[0];
+				if ( 'index.php' === $rel ) {
+					return;
+				}
+				if ( preg_match( '#(?:^|/)(?:wp-config|setup-config)\.php$#i', $rel ) || preg_match( '#(?:^|/)wp-admin/install\.php$#i', $rel ) ) {
+					$staged[ $top ][] = $rel;
+				} elseif ( preg_match( '/\.(?:php[0-9]?|phtml|phar|pht)$/i', $rel ) ) {
+					$php[ $top ][] = $rel;
+				}
+			},
+			fn(): bool => microtime( true ) > $this->deadline
+		);
+		foreach ( array_unique( array_merge( array_keys( $staged ), array_keys( $php ) ) ) as $top ) {
+			$files  = array_merge( $staged[ $top ] ?? array(), $php[ $top ] ?? array() );
+			$config = array_values( array_filter( $files, static fn( string $f ): bool => (bool) preg_match( '#(?:^|/)wp-config\.php$#i', $f ) ) );
+			$this->add(
+				'advisories',
+				$config ? 'critical' : 'warning',
+				$config
+					/* translators: %s: path. */
+					? sprintf( __( 'wp-config.php inside the update folder: wp-content/upgrade/%s', 'sentinel-shield' ), $config[0] )
+					/* translators: 1: folder, 2: number of PHP files. */
+					: sprintf( _n( 'Leftover update files in wp-content/upgrade/%1$s (%2$d PHP file)', 'Leftover update files in wp-content/upgrade/%1$s (%2$d PHP files)', count( $files ), 'sentinel-shield' ), $top, count( $files ) ),
+				( $config
+					? __( 'No WordPress release contains a wp-config.php. One here is what the CVE-2026-119977 attack writes through the staged installer, and the next file copy of an update puts it in place of your own. Compare the wp-config.php in the site root with your backup now (database host, name and user, table prefix), delete this copy and the folder, and check for administrators you do not know.', 'sentinel-shield' )
+					: __( 'WordPress removes what it unpacks here when an update finishes; files that stay behind come from an update that failed, or were put here. While the folder is reachable from the web, a leftover installer can be run by anyone. Delete the folder unless an update is running right now.', 'sentinel-shield' ) )
+					/* translators: %s: list of files. */
+					. ' ' . sprintf( __( 'Files: %s.', 'sentinel-shield' ), implode( ', ', array_slice( $files, 0, 5 ) ) . ( count( $files ) > 5 ? ', …' : '' ) ),
+				'upgrade-dir:' . $top,
+				md5( implode( '|', $files ) )
+			);
+		}
+
+		if ( 'open' === UpgradeDirGuard::probe() ) {
+			global $is_apache;
+			$this->add(
+				'advisories',
+				'warning',
+				__( 'The update folder wp-content/upgrade/ can be reached from the web', 'sentinel-shield' ),
+				__( 'A request to it was answered instead of refused. During a core update the installer sits there (CVE-2026-119977), and those requests never load WordPress, so only the web server can refuse them.', 'sentinel-shield' )
+					. ' ' . ( empty( $is_apache )
+						/* translators: %s: nginx rule. */
+						? sprintf( __( 'For nginx, add this to the server block, above any location that runs PHP, and reload: %s', 'sentinel-shield' ), UpgradeDirGuard::nginx_rule() )
+						: __( 'Turn on "Refuse web access to the update folder" on the Malware Lockdown tab; if it is on, wp-content/.htaccess could not be written or the server ignores it (AllowOverride).', 'sentinel-shield' ) ),
+				'upgrade-dir-open',
+				md5( content_url( 'upgrade/' ) ) // Approvable where the host's configuration cannot be changed.
+			);
+		}
+	}
+
+	/**
+	 * Installed plugins whose flaws are being exploited, and the Quick Page/Post Redirect backdoor.
+	 *
+	 * @param array<string, array<string, mixed>> $plugins Installed plugins.
+	 */
+	private function advisory_plugins( array $plugins ): void {
+		foreach ( $plugins as $file => $data ) {
+			$folder  = str_contains( $file, '/' ) ? dirname( $file ) : basename( $file, '.php' );
+			$version = (string) ( $data['Version'] ?? '' );
+			$name    = (string) ( $data['Name'] ?? $file );
+
+			if ( Advisories::QUICKPPR_SLUG === $folder ) {
+				$path     = WP_PLUGIN_DIR . '/' . $file;
+				$tampered = Advisories::QUICKPPR_MD5 === (string) @md5_file( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- Unreadable is simply not a match.
+				$updater  = is_dir( WP_PLUGIN_DIR . '/' . $folder . '/updater' );
+				$range    = version_compare( $version, Advisories::QUICKPPR_VERSIONS[0], '>=' ) && version_compare( $version, Advisories::QUICKPPR_VERSIONS[1], '<=' );
+				if ( $tampered || $updater || $range ) {
+					$this->add(
+						'advisories',
+						'critical',
+						/* translators: %s: version. */
+						sprintf( __( 'Quick Page/Post Redirect Plugin %s carries a backdoor (CVE-2026-126697)', 'sentinel-shield' ), $version ),
+						( $tampered ? __( 'Its main file is the tampered 5.2.3 build that injects content from w.anadnet.com into pages shown to visitors.', 'sentinel-shield' ) . ' ' : '' )
+							. __( 'Versions 5.2.1 to 5.2.3 carry a hidden updater that installs code from anadnet.com instead of WordPress.org. The plugin was closed on WordPress.org and no clean version can be downloaded. Note your redirects, delete the plugin and use another redirect plugin; then check the other plugins, themes and administrators for changes.', 'sentinel-shield' ),
+						'quickppr:' . $file,
+						md5( $version . '|' . self::fingerprint( $path ) )
+					);
+				}
+				continue;
+			}
+
+			$hit = Advisories::exploited_plugin( $folder, $version );
+			if ( null === $hit ) {
+				continue;
+			}
+			$this->add(
+				'advisories',
+				$hit['severity'],
+				'' === $hit['fixed']
+					/* translators: 1: plugin name, 2: version, 3: flaw. */
+					? sprintf( __( '%1$s %2$s: exploited %3$s, no fix', 'sentinel-shield' ), $name, $version, $hit['flaw'] )
+					/* translators: 1: plugin name, 2: version, 3: flaw, 4: fixed version. */
+					: sprintf( __( '%1$s %2$s: exploited %3$s (fixed in %4$s)', 'sentinel-shield' ), $name, $version, $hit['flaw'], $hit['fixed'] ),
+				( '' !== $hit['cve'] ? $hit['cve'] . ': ' : '' )
+					. ( '' === $hit['fixed']
+						? __( 'attacks on this flaw were reported in November 2026, and no fixed version exists. Deactivate and delete the plugin, then look through the other findings and the uploads folder for files it may have let in.', 'sentinel-shield' )
+						/* translators: %s: fixed version. */
+						: sprintf( __( 'attacks on this flaw were reported between late October and mid-November 2026. Update the plugin to %s or later now, then look through the other findings for traces of an earlier break-in.', 'sentinel-shield' ), $hit['fixed'] ) )
+					/* translators: %s: plugin file. */
+					. ' ' . sprintf( __( 'File: wp-content/plugins/%s.', 'sentinel-shield' ), $file ),
+				'exploited-plugin:' . $folder,
+				md5( $version )
+			);
+		}
 	}
 
 	/**

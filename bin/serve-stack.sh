@@ -97,6 +97,7 @@ http {
 		listen 127.0.0.1:$PORT;
 		root $ROOT;
 		index index.php;
+		location ^~ /wp-content/upgrade/ { deny all; }
 		location / { try_files \$uri \$uri/ /index.php?\$args; }
 		location ~ \.php\$ {
 			try_files \$uri =404;

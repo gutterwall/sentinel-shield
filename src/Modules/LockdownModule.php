@@ -16,6 +16,7 @@ use SentinelShield\Lockdown\FileIntegrity;
 use SentinelShield\Lockdown\Hardening;
 use SentinelShield\Lockdown\IntegrityScanner;
 use SentinelShield\Lockdown\RequestGuard;
+use SentinelShield\Lockdown\UpgradeDirGuard;
 use SentinelShield\Lockdown\UploadGuard;
 use SentinelShield\Repository\EventRepository;
 use SentinelShield\Settings;
@@ -132,7 +133,7 @@ final class LockdownModule implements ModuleInterface {
 
 	/**
 	 * Applies settings that change files or approvals. Always hooked (even with the
-	 * module off) so switching the module off also removes the uploads rules.
+	 * module off) so switching the module off also removes the uploads and update folder rules.
 	 *
 	 * @param Container $container Services.
 	 */
@@ -141,6 +142,7 @@ final class LockdownModule implements ModuleInterface {
 		$settings->refresh();
 		$active = $settings->is_enabled() && $settings->is_module_enabled( 'lockdown' );
 		UploadGuard::sync_htaccess( $active && (bool) $settings->get( 'lockdown.block_php_uploads', false ) );
+		UpgradeDirGuard::sync_htaccess( $active && (bool) $settings->get( 'lockdown.block_upgrade_dir', true ) );
 		$admins = $container->get( AdminRegistry::class );
 		if ( $active && $settings->get( 'lockdown.admin_lock', false ) && ! $admins->approvals() ) {
 			// First switch-on: approve the admins the Users screen shows, never hidden ones.

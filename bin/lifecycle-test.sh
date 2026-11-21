@@ -82,6 +82,8 @@ install_zip "$NEW"
 "${WP[@]}" plugin activate sentinel-shield >/dev/null && site_ok && pass "activates; the site and the login page load" || fail "activation or the site failed"
 [ "$(tables)" -ge 6 ] && pass "its tables exist ($(tables))" || fail "tables missing ($(tables))"
 [ "$(jobs)" -ge 1 ] && pass "its scheduled jobs exist ($(jobs))" || fail "no scheduled jobs"
+upgrade_rule() { grep -q '# BEGIN Sentinel Shield upgrade folder' "$WP_PATH/wp-content/.htaccess" 2>/dev/null; }
+upgrade_rule && pass "wp-content/.htaccess refuses the update folder (on by default)" || fail "no update folder rule in wp-content/.htaccess"
 configure
 [ -f "$DATA/gate.json" ] && grep -q 'deny 203.0.113.0/24' "$DATA/nginx-deny.conf" && [ -f "$WP_PATH/wp-content/mu-plugins/sentinel-shield-early-gate.php" ] \
 	&& pass "configured: early firewall loader, snapshot and server files written" || fail "configuration did not write its files"
@@ -92,6 +94,7 @@ echo "Deactivation"
 [ ! -e "$WP_PATH/wp-content/mu-plugins/sentinel-shield-early-gate.php" ] && [ ! -e "$DATA/gate.json" ] && pass "the early firewall is gone (loader and snapshot)" || fail "the early firewall is still installed"
 [ -f "$DATA/nginx-deny.conf" ] && ! grep -q '^deny' "$DATA/nginx-deny.conf" && [ -f "$DATA/apache-deny.conf" ] && grep -q 'Require all granted' "$DATA/apache-deny.conf" \
 	&& pass "server files remain as empty includes (nginx and Apache keep loading)" || fail "server files missing or still blocking"
+! upgrade_rule && pass "the update folder rule is removed" || fail "the update folder rule is still in wp-content/.htaccess"
 # The plugin's commands are gone while it is inactive: look at the database.
 [ "$("${WP[@]}" option get sentinel_shield_settings --format=json 2>/dev/null | php -r '$s = json_decode( stream_get_contents( STDIN ), true ); echo empty( $s["firewall"]["server_files"] ) ? 0 : 1;')" = 1 ] \
 	&& [ "$(q "SELECT COUNT(*) FROM ${prefix}sentinel_ip_rules WHERE label = '203.0.113.0/24'")" = 1 ] \
@@ -138,6 +141,7 @@ for ZIP in "${OLD[@]}"; do
 	DBV=$(php_in_wp 'echo get_site_option( "sentinel_shield_db_version" ) . "|" . SentinelShield\Install\Schema::VERSION;')
 	[ "${DBV%%|*}" = "${DBV##*|}" ] && pass "$VERSION -> new: database migrations ran (schema ${DBV##*|})" || fail "$VERSION -> new: schema ${DBV%%|*}, expected ${DBV##*|}"
 	state_kept && pass "$VERSION -> new: settings, rules and two-factor carried over" || fail "$VERSION -> new: data lost"
+	upgrade_rule && pass "$VERSION -> new: the update folder rule is written without a settings save" || fail "$VERSION -> new: no update folder rule"
 	"${WP[@]}" sentinel early-gate rebuild >/dev/null
 	OK=$(php_in_wp '$s = get_site_option( SentinelShield\Firewall\EarlyGate::STATE ); echo $s["generation"] === $s["published"] && "" === $s["error"] ? "yes" : $s["error"];')
 	[ "$OK" = yes ] && pass "$VERSION -> new: the policy publishes" || fail "$VERSION -> new: publication failed: $OK"

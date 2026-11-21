@@ -128,7 +128,7 @@ login_error | grep -q 'two-factor' && ! grep -qi 'set-cookie: wordpress_logged_i
 "${WP[@]}" sentinel settings-set twofa.required none >/dev/null
 rm -f "$OUT.h"
 
-echo "Incident markers (October 2026)"
+echo "Incident markers (October and November 2026)"
 LOCKDOWN_WAS=$("${WP[@]}" sentinel settings-get modules.lockdown.enabled 2>/dev/null || echo false)
 "${WP[@]}" sentinel settings-set modules.lockdown.enabled true >/dev/null
 CODE=$(get 198.51.100.40 "$HOME_URL/?_9f5696=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')")
@@ -153,6 +153,18 @@ CODE=$(get 198.51.100.42 -d 'udrpc_message=x' "$HOME_URL/")
 if "${WP[@]}" sentinel scan --format=csv > "$OUT" 2>&1; then fail "scan missed the Rank Math PRO backdoor option"; fi
 grep -q 'Rank Math PRO backdoor' "$OUT" && pass "scan reports the Rank Math PRO backdoor option" || fail "scan output lacks the Rank Math PRO finding"
 "${WP[@]}" option delete _uf6qdn2hmm >/dev/null
+UPGRADE_DIR=$("${WP[@]}" eval 'echo WP_CONTENT_DIR;')/upgrade
+UPGRADE_EXISTED=$([ -d "$UPGRADE_DIR" ] && echo 1 || echo 0)
+mkdir -p "$UPGRADE_DIR/wordpress-smoke/wordpress"
+echo '<?php // smoke test' > "$UPGRADE_DIR/wordpress-smoke/wordpress/wp-config.php"
+if "${WP[@]}" sentinel scan --format=csv > "$OUT" 2>&1; then fail "scan missed a wp-config.php in the update folder"; fi
+grep -q 'wp-config.php inside the update folder' "$OUT" && pass "scan reports a wp-config.php staged in wp-content/upgrade/ (CVE-2026-119977)" || fail "scan output lacks the update folder finding"
+rm -rf "$UPGRADE_DIR/wordpress-smoke"
+[ "$UPGRADE_EXISTED" = 1 ] || rmdir "$UPGRADE_DIR" 2>/dev/null || true
+CODE=$("${WP[@]}" eval '$r = wp_remote_get( "https://w.anad" . "net.com/bro/3/" ); echo is_wp_error( $r ) ? $r->get_error_code() : "sent";')
+[ "$CODE" = sentinel_shield_blocked_outbound ] && pass "requests to anadnet.com (Quick Page/Post Redirect backdoor) are refused" || fail "anadnet.com request: $CODE"
+# The refusal is logged, and the scan would rightly flag it for 7 days: remove the test's own event.
+"${WP[@]}" eval 'global $wpdb; $r = SentinelShield\Plugin::instance()->container()->get( SentinelShield\Repository\EventRepository::class ); $wpdb->query( $wpdb->prepare( "DELETE FROM %i WHERE event = %s AND reason LIKE %s", $r->table(), "lockdown_outbound", "%anad" . "net.com%" ) );' >/dev/null
 "${WP[@]}" sentinel settings-set modules.lockdown.enabled "$LOCKDOWN_WAS" >/dev/null
 
 echo "Health"
@@ -167,6 +179,10 @@ PHP_FINDING=$(grep 'PHP2Shell' "$OUT" | grep -oE '[0-9a-f]{32}' | tail -1 || tru
 if [ -n "$PHP_FINDING" ]; then
 	"${WP[@]}" sentinel approve-finding "$PHP_FINDING" >/dev/null && echo "  note this server's PHP is not confirmed fixed for PHP2Shell; finding approved for the test"
 fi
+# Same for a PHP release newer than this server's, and for PHP's built-in server, which has no server rules.
+for HOST_FINDING in $(grep -E 'security update [0-9.]+ is available|can be reached from the web' "$OUT" | grep -oE '[0-9a-f]{32}' || true); do
+	"${WP[@]}" sentinel approve-finding "$HOST_FINDING" >/dev/null && echo "  note host finding approved for the test: $(grep "$HOST_FINDING" "$OUT" | cut -c1-100)"
+done
 "${WP[@]}" sentinel scan > "$OUT" 2>&1 && pass "malware scan: clean" || fail "malware scan reported problems"
 if [ "$OFFLINE" = 0 ]; then
 	"${WP[@]}" sentinel verify > "$OUT" 2>&1 && pass "core and plugins match WordPress.org checksums" || fail "checksum verification reported problems"

@@ -668,6 +668,11 @@ final class SettingsSchema {
 				__( 'Rejects uploads whose name or content is a script (including double extensions such as shell.php.jpg and .htaccess/.user.ini files) and, on Apache, adds rules to uploads/.htaccess so PHP files there cannot run. On nginx, add the rule shown on the Malware Lockdown page to your server configuration.', 'sentinel-shield' ),
 				true,
 			),
+			'block_upgrade_dir'    => array(
+				__( 'Refuse web access to the update folder', 'sentinel-shield' ),
+				__( 'WordPress unpacks updates in wp-content/upgrade/, and during a core update that folder holds a copy of the installer that anyone can run (CVE-2026-119977, exploited since October 2026). No visitor needs the folder. On Apache and LiteSpeed this adds rules to wp-content/.htaccess that answer 403 to it; WordPress updates are not affected, since they read the folder from disk. These requests never load WordPress, so no plugin can refuse them any other way: on nginx, add the rule shown on the Malware Lockdown page to your server configuration.', 'sentinel-shield' ),
+				true,
+			),
 			'admin_lock'           => array(
 				__( 'Administrator lock', 'sentinel-shield' ),
 				__( 'Only approved administrator accounts keep admin rights; any other account with admin powers (such as one SC writes straight into the database) is treated as having none until approved on the Malware Lockdown page. When first switched on, every administrator shown on the Users screen is approved, hidden ones are not. Recover with: wp sentinel approve-admin <user>. To fix the list in a file instead, define SENTINEL_SHIELD_ADMINS in wp-config.php (see Documentation).', 'sentinel-shield' ),
@@ -685,7 +690,7 @@ final class SettingsSchema {
 			),
 			'block_malware_hosts'  => array(
 				__( 'Block known malware servers', 'sentinel-shield' ),
-				__( 'Stops the site from contacting hosts that recent WordPress malware gets its commands from (currently rank1cdn.com, used by the Rank Math PRO 3.0.123 backdoor, CVE-2026-111862). Each attempt is logged with the file that made it. Only requests made through WordPress can be stopped; the scan looks for the host in code as well.', 'sentinel-shield' ),
+				__( 'Stops the site from contacting hosts that recent WordPress malware gets its commands from (currently rank1cdn.com, used by the Rank Math PRO 3.0.123 backdoor, CVE-2026-111862, and anadnet.com, used by the Quick Page/Post Redirect Plugin backdoor, CVE-2026-126697). Each attempt is logged with the file that made it. Only requests made through WordPress can be stopped; the scan looks for the host in code as well.', 'sentinel-shield' ),
 				true,
 			),
 			'block_indicators'     => array(

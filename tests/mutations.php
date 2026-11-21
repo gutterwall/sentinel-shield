@@ -529,4 +529,47 @@ return array(
 		'why'         => 'UpdraftCentral keys from before the theft are not reported',
 		'integration' => 'AdvisoriesTest',
 	),
+	// November 2026 incidents.
+	array(
+		'file'        => 'src/Lockdown/Advisories.php',
+		'find'        => "\$state = version_compare( \$version, \$fixed, '>=' ) ? 'fixed' : 'vulnerable';",
+		'replace'     => "\$state = version_compare( \$version, \$fixed, '>' ) ? 'fixed' : 'vulnerable';",
+		'why'         => 'the first fixed WordPress release counts as vulnerable to the update-folder race',
+		'integration' => 'AdvisoriesTest',
+	),
+	array(
+		'file'        => 'src/Lockdown/Advisories.php',
+		'find'        => "if ( null === \$entry || '' === trim( \$version ) || version_compare( \$version, \$entry['min'], '<' ) ) {",
+		'replace'     => "if ( null === \$entry || '' === trim( \$version ) ) {",
+		'why'         => 'plugin versions from before an exploited flaw was introduced are reported',
+		'integration' => 'AdvisoriesTest',
+	),
+	array(
+		'file'        => 'src/Lockdown/IntegrityScanner.php',
+		'find'        => "if ( 'index.php' === \$rel ) {",
+		'replace'     => 'if ( false ) {',
+		'why'         => 'the index.php WordPress keeps in the update folder is reported',
+		'integration' => 'AdvisoriesTest',
+	),
+	array(
+		'file'        => 'src/Lockdown/IntegrityScanner.php',
+		'find'        => "\$config ? 'critical' : 'warning',",
+		'replace'     => "'warning',",
+		'why'         => 'a wp-config.php staged in the update folder is only a warning',
+		'integration' => 'AdvisoriesTest',
+	),
+	array(
+		'file'        => 'src/Lockdown/UpgradeDirGuard.php',
+		'find'        => "if ( 403 === \$code || 404 === \$code ) {",
+		'replace'     => 'if ( 403 === $code ) {',
+		'why'         => 'a 404 for the existing update folder counts as reachable',
+		'integration' => 'AdvisoriesTest',
+	),
+	array(
+		'file'        => 'src/Lockdown/UpgradeDirGuard.php',
+		'find'        => "\$pattern = '^' . preg_quote( self::content_path(), '#' ) . '/upgrade(?:/|\$)';",
+		'replace'     => "\$pattern = '^' . preg_quote( self::content_path(), '#' ) . '/upgrade';",
+		'why'         => 'the rule also refuses folders whose names only start with upgrade',
+		'integration' => 'AdvisoriesTest',
+	),
 );

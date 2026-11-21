@@ -4,7 +4,7 @@ Tags: security, firewall, two-factor, brute force, login
 Requires at least: 6.4
 Tested up to: 7.1
 Requires PHP: 8.1
-Stable tag: 0.9.0
+Stable tag: 0.10.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -33,7 +33,7 @@ Sentinel Shield is a self-hosted security plugin. It runs on your server, needs 
 
 * A read-only scan, twice a day, of the places takeover malware such as "SC" hides: prepend loaders, drop-ins, must-use plugins, hidden plugins and administrators, database triggers, PHP in uploads, encoded payloads, suspicious scheduled tasks and hooks.
 * A daily file integrity check of WordPress core and WordPress.org plugins against the checksums WordPress.org publishes.
-* Checks for incidents being exploited right now (October 2026: the Rank Math PRO 3.0.123 backdoor, backdoor plugins installed through stolen UpdraftCentral keys, the PHP2Shell flaws in PHP): their files, options, accounts and settings are reported by the scan, their trigger requests and malware servers are refused, and plugin installs are logged with an alert when one looks like a takeover.
+* Checks for incidents being exploited right now (October and November 2026: the Rank Math PRO 3.0.123 backdoor, backdoor plugins installed through stolen UpdraftCentral keys, the PHP2Shell flaws in PHP, the WordPress update-folder installer race CVE-2026-119977, the Quick Page/Post Redirect backdoor, and a short list of plugins whose flaws are being exploited): their files, options, accounts and settings are reported by the scan, their trigger requests and malware servers are refused, the update folder is kept off the web, and plugin installs are logged with an alert when one looks like a takeover.
 * Opt-in measures: an administrator lock (only approved accounts keep admin rights, optionally fixed in wp-config.php), file editor and installs off, PHP blocked in uploads, and alerts on new administrators.
 
 **Monitoring and tools**
@@ -78,7 +78,7 @@ Nothing below is contacted unless stated as a default or you switch it on.
 
 == Installation ==
 
-1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.9.0.zip` (or unzip it into `/wp-content/plugins/`).
+1. In WordPress go to Plugins → Add New → Upload Plugin and choose `sentinel-shield-0.10.0.zip` (or unzip it into `/wp-content/plugins/`).
 2. Activate it (on multisite: Network Activate). The plugin starts in **test mode**; nothing is blocked yet and your IP is allowlisted.
 3. Go to Sentinel Shield → Settings → IP Detection and confirm "Detected IP" matches your real public IP. If your site is behind Cloudflare or a load balancer, choose the matching preset.
 4. Review Sentinel Shield → Events for "would block" entries.
@@ -199,6 +199,17 @@ No. As checked in October 2026 (terms can change; each list links to its own on 
 No. Test mode only records what would have been blocked. Use it to validate settings, then turn it off. Malware Lockdown measures are the exception: they are always enforced once switched on.
 
 == Changelog ==
+
+= 0.10.0 =
+Detection and prevention for the incidents exploited against WordPress sites between 23 October and 21 November 2026. One new setting on the Malware Lockdown tab, on by default (it only refuses requests no visitor needs).
+* WordPress core update-folder race (CVE-2026-119977, in CISA's exploited list since 3 November): during a core update the installer sits in wp-content/upgrade/ and anyone who reaches it can take the site over. These requests never load WordPress, so no plugin firewall sees them. New setting "Refuse web access to the update folder" (on): on Apache and LiteSpeed, rules in wp-content/.htaccess answer 403 for wp-content/upgrade/ (with or without mod_alias); on nginx the Malware Lockdown page and docs/NGINX.md show the rule to add. Sites updating from 0.9.0 get the rules without a settings save.
+* The scan reports a WordPress version older than its branch's fixed release (7.1.4, 7.0.8, 6.9.11 … 6.4.14; critical), a wp-config.php inside wp-content/upgrade/ (critical: no release contains one, the attack writes it), other leftover PHP files there (warning), and an update folder the web can still reach (a request from the site itself; warning, approvable where the host cannot be changed). The health card has a "WordPress security fixes" row.
+* Quick Page/Post Redirect Plugin backdoor (CVE-2026-126697): the scan reports versions 5.2.1 to 5.2.3, its hidden updater folder and the tampered 5.2.3 main file (critical); anadnet.com in any code is a new critical signature, and "Block known malware servers" refuses requests to it.
+* Exploited plugins: the scan reports installed versions of about twenty plugins whose flaws were labelled as exploited between 30 October and 16 November (Contact Form 7 6.2 to 6.2.3, Gravity Forms, WP Project Manager, FunnelKit Automations, Uncanny Toolkit, WP Social, LatePoint, WP Data Access, Amelia Pro, SliceWP, ACF Extended PRO, s2Member, Ultra Addons for Contact Form 7, Checkout Files Upload, BuddyBoss App, AutomatorWP Webhooks, wpForo, Bricksforge, Elementor, and WP Libre Form and WP Duplicate, which have no fix), with the version that fixes them. This is the short incident list, not a vulnerability database.
+* PHP: the 19 November releases (8.2.36, 8.3.37, 8.4.28, 8.5.13) fix CVE-2026-115560 in session upload progress; on upstream builds older than these the scan suggests the update and the stopgap setting.
+* Settings → Documentation lists the three new incidents with their sources.
+* Fix: a request refused by "Block known malware servers" was reported by the scan as a blockchain gateway attempt; the finding now names both kinds.
+Testing (not shipped): integration tests for each check, 6 more mutants, the update-folder rules on real nginx and Apache (with and without mod_alias) in bin/server-config-test.sh, smoke-test checks, and 0.9.0 added to the upgrade matrix.
 
 = 0.9.0 =
 Detection and prevention for the incidents exploited against WordPress sites in the week of 16 to 23 October 2026. The malware scan has a new check, "Recent incidents", and the Malware Lockdown tab four new settings (three on by default; they only refuse traffic no legitimate site sends).
@@ -331,6 +342,9 @@ Security fixes from a code review:
 * Phase 1: core framework, client IP detection, IP rules, lockout engine, lockout safety, test mode tooling, events, WP-CLI.
 
 == Upgrade Notice ==
+
+= 0.10.0 =
+Keeps wp-content/upgrade/ off the web (WordPress core CVE-2026-119977) and detects the Quick Page/Post Redirect backdoor and plugins exploited in November 2026. On nginx, add the rule shown on the Malware Lockdown page. Update WordPress itself to 7.1.4 or later.
 
 = 0.9.0 =
 Detects and blocks the Rank Math PRO backdoor, the UpdraftCentral backdoor plugins and PHP2Shell probes (October 2026), and alerts on suspicious plugin installs. Turn on the Malware Lockdown module if it is off, then run the scan.

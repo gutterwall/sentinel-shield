@@ -13,6 +13,7 @@ use SentinelShield\Container;
 use SentinelShield\Lockdown\AdminRegistry;
 use SentinelShield\Lockdown\FileIntegrity;
 use SentinelShield\Lockdown\IntegrityScanner;
+use SentinelShield\Lockdown\UpgradeDirGuard;
 use SentinelShield\Lockdown\UploadGuard;
 use SentinelShield\Settings;
 use SentinelShield\SettingsSchema;
@@ -447,6 +448,16 @@ final class LockdownPage {
 			if ( empty( $is_apache ) ) {
 				echo '<li>' . esc_html__( 'This server does not look like Apache, so .htaccess may be ignored. For nginx, add this to the server block:', 'sentinel-shield' ) . '<br><code>' . esc_html( UploadGuard::nginx_rule() ) . '</code></li>';
 			}
+		}
+		if ( $settings->get( 'lockdown.block_upgrade_dir', true ) ) {
+			if ( UpgradeDirGuard::htaccess_installed() ) {
+				echo '<li>' . View::pill( __( 'In place', 'sentinel-shield' ), 'ok' ) . ' ' . esc_html__( 'wp-content/.htaccess refuses web access to the update folder, wp-content/upgrade/ (Apache and LiteSpeed; CVE-2026-119977).', 'sentinel-shield' ) . '</li>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.
+			} else {
+				echo '<li>' . View::pill( __( 'Missing', 'sentinel-shield' ), 'warn' ) . ' ' . esc_html__( 'wp-content/.htaccess could not be written, so the update folder may be reachable from the web. Save the lockdown settings again, or check folder permissions.', 'sentinel-shield' ) . '</li>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.
+			}
+		}
+		if ( empty( $is_apache ) ) {
+			echo '<li>' . esc_html__( 'This server does not look like Apache. On nginx, refuse the update folder (CVE-2026-119977) by adding this to the server block, above any location that runs PHP:', 'sentinel-shield' ) . '<br><code>' . esc_html( UpgradeDirGuard::nginx_rule() ) . '</code></li>';
 		}
 		$editor = ( defined( 'DISALLOW_FILE_EDIT' ) && DISALLOW_FILE_EDIT ) || $settings->get( 'lockdown.disable_file_editor', false );
 		echo '<li>' . View::pill( $editor ? __( 'Off', 'sentinel-shield' ) : __( 'On', 'sentinel-shield' ), $editor ? 'ok' : 'warn' ) . ' ' . esc_html__( 'Built-in file editor.', 'sentinel-shield' ) . ' ' . esc_html__( 'Adding define( \'DISALLOW_FILE_EDIT\', true ); to wp-config.php turns it off even if this plugin is removed.', 'sentinel-shield' ) . '</li>'; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- pill() escapes.

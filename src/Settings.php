@@ -136,11 +136,13 @@ final class Settings {
 				'server_var' => '',
 			),
 			// Malware lockdown measures are opt-in except the alerts, which change nothing,
-			// and the incident filters, which only refuse traffic that no legitimate site sends.
+			// and the incident filters, which only refuse traffic that no legitimate site sends
+			// (no visitor ever needs wp-content/upgrade/ either).
 			'lockdown'   => array(
 				'disable_file_editor'  => false,
 				'block_installs'       => false,
 				'block_php_uploads'    => false,
+				'block_upgrade_dir'    => true,
 				'admin_lock'           => false,
 				'protect_self'         => false,
 				'block_chain_rpc'      => false,

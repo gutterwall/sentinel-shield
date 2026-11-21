@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace SentinelShield\Install;
 
 use SentinelShield\Firewall\EarlyGate;
+use SentinelShield\Lockdown\UpgradeDirGuard;
 use SentinelShield\Settings;
 
 defined( 'ABSPATH' ) || exit;
@@ -23,7 +24,7 @@ defined( 'ABSPATH' ) || exit;
  */
 final class Schema {
 
-	public const VERSION = 6;
+	public const VERSION = 7;
 	public const OPTION  = 'sentinel_shield_db_version';
 
 	/**
@@ -63,6 +64,15 @@ final class Schema {
 	 */
 	private static function migrations(): array {
 		return array(
+			// 0.10.0: refuse web access to wp-content/upgrade/ (CVE-2026-119977), on by
+			// default. Writing .htaccess needs the rest of WordPress, so it runs on init.
+			7 => static function (): void {
+				$sync = static function (): void {
+					$settings = new Settings();
+					UpgradeDirGuard::sync_htaccess( $settings->is_enabled() && $settings->is_module_enabled( 'lockdown' ) && (bool) $settings->get( 'lockdown.block_upgrade_dir', true ) );
+				};
+				did_action( 'init' ) ? $sync() : add_action( 'init', $sync );
+			},
 			// 0.8.2: 0.8.0 kept the early firewall snapshot (with allowlisted
 			// addresses), its block log and the server files in public uploads.
 			// Migrations run while plugins load, before all of WordPress is
