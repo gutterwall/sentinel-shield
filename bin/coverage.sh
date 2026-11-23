@@ -31,12 +31,26 @@ fi
 "${PHP[@]}" -r 'exit( extension_loaded( "pcov" ) ? 0 : 1 );' && PHP+=(-d pcov.enabled=1 -d "pcov.directory=$PWD")
 export SENTINEL_SHIELD_SUBPROCESS_COVERAGE=$OUT/http
 
+# Runs a PHPUnit suite, printing its result line; if it fails, the failures too
+# (the whole output is kept in $OUT/<name>.log).
+phpunit_run() {
+	local name=$1
+	shift
+	if "$@" >"$OUT/$name.log" 2>&1; then
+		tail -1 "$OUT/$name.log"
+	else
+		sed -n '/^There w[ae][rs] [0-9]/,$p' "$OUT/$name.log"
+		grep -q '^There w[ae][rs] [0-9]' "$OUT/$name.log" || tail -40 "$OUT/$name.log"
+		return 1
+	fi
+}
+
 echo "Unit tests"
-"${PHP[@]}" vendor/bin/phpunit --testsuite unit --coverage-php "$OUT/in-process/unit.cov" --log-junit "$OUT/junit-unit.xml" | tail -1
+phpunit_run unit "${PHP[@]}" vendor/bin/phpunit --testsuite unit --coverage-php "$OUT/in-process/unit.cov" --log-junit "$OUT/junit-unit.xml"
 echo "Integration tests (single site)"
-"${PHP[@]}" vendor/bin/phpunit --testsuite integration --coverage-php "$OUT/in-process/integration.cov" --log-junit "$OUT/junit-integration.xml" | tail -1
+phpunit_run integration "${PHP[@]}" vendor/bin/phpunit --testsuite integration --coverage-php "$OUT/in-process/integration.cov" --log-junit "$OUT/junit-integration.xml"
 echo "Integration tests (multisite)"
-WP_MULTISITE=1 "${PHP[@]}" vendor/bin/phpunit --testsuite integration --coverage-php "$OUT/in-process/integration-ms.cov" --log-junit "$OUT/junit-integration-ms.xml" | tail -1
+WP_MULTISITE=1 phpunit_run integration-ms "${PHP[@]}" vendor/bin/phpunit --testsuite integration --coverage-php "$OUT/in-process/integration-ms.cov" --log-junit "$OUT/junit-integration-ms.xml"
 
 echo "Reports"
 php vendor/bin/phpcov merge --clover "$OUT/in-process.xml" --text "$OUT/in-process.txt" "$OUT/in-process" >/dev/null
@@ -57,9 +71,9 @@ if [ "${BRANCHES:-0}" = 1 ]; then
 	# The servers the HTTP tests start load Xdebug the same way.
 	[ -n "$XD" ] && export SENTINEL_SHIELD_COVERAGE_EXTENSION=$XD
 	rm -f "$SENTINEL_SHIELD_BRANCH_OUT"
-	"${XPHP[@]}" -d "auto_prepend_file=$PWD/tests/coverage/branch-collector.php" vendor/bin/phpunit --testsuite unit --no-coverage --exclude-group heavy | tail -1
-	"${XPHP[@]}" -d "auto_prepend_file=$PWD/tests/coverage/branch-collector.php" vendor/bin/phpunit --testsuite integration --no-coverage --exclude-group heavy | tail -1
-	WP_MULTISITE=1 "${XPHP[@]}" -d "auto_prepend_file=$PWD/tests/coverage/branch-collector.php" vendor/bin/phpunit --testsuite integration --no-coverage --exclude-group heavy | tail -1
+	phpunit_run branches-unit "${XPHP[@]}" -d "auto_prepend_file=$PWD/tests/coverage/branch-collector.php" vendor/bin/phpunit --testsuite unit --no-coverage --exclude-group heavy
+	phpunit_run branches-integration "${XPHP[@]}" -d "auto_prepend_file=$PWD/tests/coverage/branch-collector.php" vendor/bin/phpunit --testsuite integration --no-coverage --exclude-group heavy
+	WP_MULTISITE=1 phpunit_run branches-integration-ms "${XPHP[@]}" -d "auto_prepend_file=$PWD/tests/coverage/branch-collector.php" vendor/bin/phpunit --testsuite integration --no-coverage --exclude-group heavy
 	BRANCH_ARG=(--branches="$OUT/branch.json" --require=lines,branches)
 else
 	BRANCH_ARG=(--require=lines)
